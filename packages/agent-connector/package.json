@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@nova/shared": "*",
+    "@nova/task-queue": "*",
     "bullmq": "^4.0.0",
     "ioredis": "^5.0.0"
   },
