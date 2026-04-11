@@ -1,4 +1,5 @@
 import express from 'express';
+import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
 import { enqueueWithIdempotency } from '@nova/task-queue';
@@ -96,8 +97,9 @@ app.use('/agents/:agentId', agentRouter);
 
 async function start() {
   try {
-    // 1. Initialize cryptographic boundary
-    const keyPath = process.env.NOVA_PRIVATE_KEY_PATH || 'data/keys/nova.private.pem';
+    // 1. Initialize cryptographic boundary 
+    // Accounts for npm workspaces running nested directory CWDs
+    const keyPath = process.env.NOVA_PRIVATE_KEY_PATH || path.resolve(process.cwd(), '../../data/keys/nova.private.pem');
     await keyManager.initialize(keyPath);
 
     app.listen(PORT, () => {

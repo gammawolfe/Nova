@@ -91,7 +91,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
  * matching the resolved Actor DID.
  */
 function resolveTrustTier(tenantCtx: TenantContext, did: string): TrustTier {
-  const dataRoot = process.env.DATA_ROOT || path.join(process.cwd(), 'data');
+  const dataRoot = process.env.DATA_ROOT || path.resolve(process.cwd(), '../../data');
   const recordPath = path.join(
     dataRoot,
     'tenants',
@@ -109,7 +109,7 @@ function resolveTrustTier(tenantCtx: TenantContext, did: string): TrustTier {
   try {
     const raw = fs.readFileSync(recordPath, 'utf8');
     const record = JSON.parse(raw) as ActorRecord;
-    return record.tier;
+    return record.tier as TrustTier;
   } catch (err) {
     // Treat corrupt local DB files securely as failed state.
     return 0; 
