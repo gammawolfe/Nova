@@ -6,6 +6,7 @@ export interface DeliveryResult {
   success: boolean;
   taskResult?: TaskResult;
   error?: string;
+  httpStatus?: number;
 }
 
 /**
@@ -33,6 +34,7 @@ export async function deliverToOperator(
       const body = await response.text().catch(() => '');
       return {
         success: false,
+        httpStatus: response.status,
         error: `Operator returned HTTP ${response.status}: ${body}`,
       };
     }

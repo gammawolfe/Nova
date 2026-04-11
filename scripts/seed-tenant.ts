@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -63,9 +64,10 @@ function main() {
     addedBy: 'AdminSeed'
   };
 
-  // Nomenclatures inside Trust Registry directory bind strictly to DID names natively
+  // Spec: trust registry filename = sha256hex(did) + '.json'
+  const sha256Did = crypto.createHash('sha256').update(allowedDid).digest('hex');
   fs.writeFileSync(
-    path.join(trustRegistryDir, `${allowedDid.replace(/:/g, '_')}.json`),
+    path.join(trustRegistryDir, `${sha256Did}.json`),
     JSON.stringify(mockTrustRecord, null, 2)
   );
 

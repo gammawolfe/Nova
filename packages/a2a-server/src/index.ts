@@ -3,16 +3,21 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
+import { auditLog } from '@nova/shared/src/audit';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
-import { enqueueWithIdempotency, setTaskState, getTaskState } from '@nova/task-queue/src/index';
+import { enqueueWithIdempotency, setTaskState, getTaskState, redis } from '@nova/task-queue/src/index';
 import { QueuedTask, TaskState } from '@nova/shared/src/types';
 import { AgentCardSchema } from '@nova/shared/src/schemas';
-import { tenantDataPath } from '@nova/shared/src/tenant';
+import { tenantDataPath, redisKey } from '@nova/shared/src/tenant';
 import { tenantRouter } from './tenant-router';
 import { keyManager } from './key-manager';
+import { streamRouter } from './stream';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+const RATE_LIMIT_PER_SENDER = parseInt(process.env.RATE_LIMIT_PER_SENDER || '60', 10);
+const RATE_LIMIT_GLOBAL_PER_AGENT = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_AGENT || '300', 10);
 
 // Parse standard ingress objects
 app.use(express.json());
@@ -42,9 +47,9 @@ agentRouter.get('/.well-known/agent.json', async (req, res) => {
       version: raw.version || '1.0.0',
       protocolVersions: ['1.0'] as const,
       capabilities: raw.capabilities || {
-        streaming: false,
-        pushNotifications: false,
-        stateTransitionHistory: false,
+        streaming: true,
+        pushNotifications: true,
+        stateTransitionHistory: true,
       },
       authentication: raw.authentication || {
         schemes: ['ucan'],
@@ -81,88 +86,154 @@ agentRouter.get('/tasks/:taskId', async (req, res) => {
   }
 });
 
+// SSE Streaming endpoint
+agentRouter.use(streamRouter);
+
 // Standard task ingress
 agentRouter.post('/tasks', async (req, res) => {
+  const ctx = req.ctx;
+  const requestId = crypto.randomUUID();
+
+  // --- Rate Limiting (per-sender IP + global per-agent) ---
+  const senderIp = req.ip ?? '0.0.0.0';
+  try {
+    const senderKey = redisKey(ctx, 'rate', 'sender', senderIp);
+    const senderCount = await redis.incr(senderKey);
+    if (senderCount === 1) await redis.expire(senderKey, 60);
+
+    if (senderCount > RATE_LIMIT_PER_SENDER) {
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({ error: 'RATE_LIMITED' });
+    }
+
+    const globalKey = redisKey(ctx, 'rate', 'global');
+    const globalCount = await redis.incr(globalKey);
+    if (globalCount === 1) await redis.expire(globalKey, 60);
+
+    if (globalCount > RATE_LIMIT_GLOBAL_PER_AGENT) {
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({ error: 'RATE_LIMITED' });
+    }
+  } catch (err) {
+    // Redis unavailable — spec says return 503
+    logger.error({ err }, 'Redis unavailable during rate limit check');
+    return res.status(503).json({ error: 'INTERNAL_ERROR', message: 'Service temporarily unavailable' });
+  }
+
+  // --- Audit: message_received ---
+  try {
+    await auditLog(ctx, {
+      event: 'message_received',
+      senderDid: undefined,
+      metadata: { requestId, senderIp },
+    });
+  } catch (err) {
+    // Audit write failed — spec says return 503
+    logger.error({ err }, 'Audit log write failed at ingress');
+    return res.status(503).json({ error: 'INTERNAL_ERROR', message: 'Audit system unavailable' });
+  }
+
+  // --- Gate Pipeline ---
   const gateCtx: GateContext = {
-    tenantCtx: req.ctx,
+    tenantCtx: ctx,
     headers: req.headers,
-    body: req.body
+    body: req.body,
+    senderIp,
+    requestId,
+    agentDid: keyManager.getDid(),
   };
 
-  // Synchronously execute the Gate Pipeline blocking admission
   const gateResult = await executeGatePipeline(gateCtx);
 
   if (!gateResult.passed) {
-    logger.warn({ 
-      ctx: req.ctx, 
-      error: gateResult.errorCode, 
-      reason: gateResult.reason 
+    logger.warn({
+      ctx,
+      error: gateResult.errorCode,
+      reason: gateResult.reason,
+      decision: gateResult.decision,
     }, 'Task rejected at ingress gate');
 
-    const UCAN_ERROR_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_INSUFFICIENT_CAPABILITY']);
-    const status = UCAN_ERROR_CODES.has(gateResult.errorCode!) ? 401 : 403;
-    
-    return res.status(status).json({
-      error: gateResult.errorCode,
-      message: gateResult.reason
+    // Quarantined tasks still return 202 (gate decision is internal)
+    // Dropped tasks return error codes
+    if (gateResult.decision === 'dropped') {
+      const UCAN_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_INSUFFICIENT_CAPABILITY']);
+      const status = UCAN_CODES.has(gateResult.errorCode!) ? 401 : 403;
+      return res.status(status).json({
+        error: gateResult.errorCode,
+        message: gateResult.reason,
+      });
+    }
+
+    // Quarantined — return 202 with quarantine context (operator can review)
+    return res.status(202).json({
+      status: 'quarantined',
+      reason: gateResult.reason,
+      quarantineId: gateResult.quarantineId,
     });
   }
 
-  // --- Map dynamically to Isolated Queue Buffer ---
-  // Generate task ID server-side; use client's idempotencyKey only for dedup
+  // --- Map to Queue ---
   const generatedTaskId = crypto.randomUUID();
-  const queuedTaskFormat: QueuedTask = {
+  const queuedTask: QueuedTask = {
     taskId: generatedTaskId,
-    tenantId: req.ctx.tenantId,
-    agentId: req.ctx.agentId,
-    intent: req.body?.intent || 'unknown_intent',
-    params: req.body?.params || {},
-    replyTo: req.body?.replyTo || 'https://unknown.reply.domain.com/webhook',
+    tenantId: ctx.tenantId,
+    agentId: ctx.agentId,
+    intent: (req.body as any)?.intent || 'unknown_intent',
+    params: (req.body as any)?.params || {},
+    replyTo: (req.body as any)?.replyTo || 'https://unknown.reply.domain.com/webhook',
     senderDid: gateResult.senderDid!,
     tier: gateResult.trustTier!,
     queuedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString() // 24h fallback
+    expiresAt: (req.body as any)?.ttl ?? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
   };
 
   try {
-    // We invoke our custom idempotent BullMQ wrapper directly as designed
-    // Wait TTL is 600 seconds (10 mins) as defined implicitly
-    const queued = await enqueueWithIdempotency(req.ctx, queuedTaskFormat, 600);
+    const queued = await enqueueWithIdempotency(ctx, queuedTask, 600);
 
     if (!queued) {
-      logger.info({ taskId: generatedTaskId }, 'Dropped idempotent exact duplicate request at ingress');
+      logger.info({ taskId: generatedTaskId }, 'Dropped idempotent duplicate request');
     } else {
-      // Persist initial task state for status queries
       const initialState: TaskState = {
         taskId: generatedTaskId,
-        tenantId: req.ctx.tenantId,
-        agentId: req.ctx.agentId,
+        tenantId: ctx.tenantId,
+        agentId: ctx.agentId,
         status: 'submitted',
-        intent: queuedTaskFormat.intent,
-        submittedAt: queuedTaskFormat.queuedAt,
-        updatedAt: queuedTaskFormat.queuedAt,
-        expiresAt: queuedTaskFormat.expiresAt,
+        intent: queuedTask.intent,
+        submittedAt: queuedTask.queuedAt,
+        updatedAt: queuedTask.queuedAt,
+        expiresAt: queuedTask.expiresAt,
         submitterDid: gateResult.senderDid!,
       };
-      await setTaskState(req.ctx, initialState);
+      await setTaskState(ctx, initialState);
 
-      logger.info({
-        ctx: req.ctx,
+      await auditLog(ctx, {
+        event: 'task_queued',
         taskId: generatedTaskId,
         senderDid: gateResult.senderDid,
-        tier: gateResult.trustTier
-      }, 'Task passed gate pipeline. BullMQ enqueue successful!');
+        tier: gateResult.trustTier,
+      });
+
+      logger.info({
+        ctx,
+        taskId: generatedTaskId,
+        senderDid: gateResult.senderDid,
+        tier: gateResult.trustTier,
+      }, 'Task passed gate pipeline and enqueued');
     }
 
-    // Specs explicitly dictate 202 Async ingestion standard
-    res.status(202).json({
+    const host = req.get('host');
+    const baseUrl = `${req.protocol}://${host}/agents/${ctx.agentId}`;
+
+    return res.status(202).json({
       status: 'submitted',
-      taskId: generatedTaskId
+      taskId: generatedTaskId,
+      statusUrl: `${baseUrl}/tasks/${generatedTaskId}`,
+      streamUrl: `${baseUrl}/tasks/${generatedTaskId}/stream`,
     });
 
   } catch (err: any) {
-    logger.error({ err, taskId: generatedTaskId }, 'Redis Queueing Failure at boundaries');
-    res.status(503).json({ error: 'INTERNAL_ERROR', message: 'Task queue backend is temporarily unavailable' });
+    logger.error({ err, taskId: generatedTaskId }, 'Queue failure at ingress');
+    return res.status(503).json({ error: 'INTERNAL_ERROR', message: 'Task queue backend temporarily unavailable' });
   }
 });
 
@@ -170,17 +241,16 @@ app.use('/agents/:agentId', agentRouter);
 
 async function start() {
   try {
-    // 1. Initialize cryptographic boundary 
-    // Accounts for npm workspaces running nested directory CWDs
-    const keyPath = process.env.NOVA_PRIVATE_KEY_PATH || path.resolve(process.cwd(), '../../data/keys/nova.private.pem');
+    const keyPath = process.env.NOVA_PRIVATE_KEY_PATH
+      || path.resolve(process.cwd(), '../../data/keys/nova.private.pem');
     await keyManager.initialize(keyPath);
 
     app.listen(PORT, () => {
       logger.info(`🚀 Nova A2A Server running on http://localhost:${PORT}`);
-      logger.info(`Identity Bound to DID: ${keyManager.getDid()}`);
+      logger.info(`Identity DID: ${keyManager.getDid()}`);
     });
   } catch (err) {
-    logger.error('Failed to start a2a-server', err);
+    logger.error({ err }, 'Failed to start a2a-server');
     process.exit(1);
   }
 }

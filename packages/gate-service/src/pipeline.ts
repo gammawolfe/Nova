@@ -1,123 +1,298 @@
+import crypto from 'crypto';
 import fs from 'fs';
-import path from 'path';
-import { TenantContext } from '@nova/shared/src/tenant';
+import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
 import { TrustTier, ActorRecord } from '@nova/shared/src/types';
+import { auditLog } from '@nova/shared/src/audit';
+import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
+import { validateSchema } from './schema-validator';
+import { extractStrings, patternMatch } from './classifier';
+import { writeQuarantine } from './quarantine';
 
 export interface GateContext {
   tenantCtx: TenantContext;
   headers: Record<string, string | string[] | undefined>;
-  body: any;
+  body: unknown;
+  senderIp?: string;
+  requestId?: string;
+  agentDid?: string; // Nova's own DID — used for UCAN audience check
 }
 
 export interface GateResult {
   passed: boolean;
-  errorCode?: GateErrorCode;
-  reason?: string;
-  ucanJwt?: string;
-  senderDid?: string;
-  trustTier?: TrustTier;
-  parsedTask?: any; // Finalized task after schema application
+  decision: 'accepted' | 'quarantined' | 'dropped';
+  errorCode?: GateErrorCode | undefined;
+  reason?: string | undefined;
+  quarantineId?: string | undefined;
+  ucanJwt?: string | undefined;
+  senderDid?: string | undefined;
+  trustTier?: TrustTier | undefined;
+  parsedTask?: unknown;
 }
 
 /**
- * Executes the synchronous 5-layer Gate pipeline. 
- * Rejects immediately upon encountering any violation.
+ * Executes the 5-layer Gate pipeline synchronously.
+ * Returns a GateResult describing whether the task was accepted, quarantined, or dropped.
  */
 export async function executeGatePipeline(ctx: GateContext): Promise<GateResult> {
-  const result: GateResult = { passed: true };
+  const { tenantCtx } = ctx;
+  const receivedAt = new Date().toISOString();
 
-  try {
-    // --- STEP 1: UCAN Pre-Extraction ---
-    // Enforce Authorization: UCAN {jwt} format
-    const authHeader = ctx.headers['authorization'];
-    if (!authHeader || typeof authHeader !== 'string') {
-      throw new NovaError('UCAN_MISSING', 'Missing Authorization header');
-    }
+  // --- STEP 1: UCAN Pre-Extraction ---
+  const authHeader = ctx.headers['authorization'];
+  let ucanJwt: string | null = null;
 
+  if (authHeader && typeof authHeader === 'string') {
     const match = authHeader.match(/^UCAN\s+(eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)$/);
-    if (!match || !match[1]) {
-      throw new NovaError('UCAN_INVALID_JWT', 'Authorization header must be in format: UCAN {jwt}');
+    if (match?.[1]) {
+      ucanJwt = match[1];
     }
-    
-    result.ucanJwt = match[1];
+  }
 
-    // Placeholder until Step 3 parses the DID out of UCAN payload logic
-    // For Milestone 1 testing, we assume the ucan jwt string literal given IS the issuer did (as a mock) 
-    // or we resolve based on header if provided (mock format logic here)
-    const mockExtractedDid = ctx.headers['x-mock-did'] as string || 'did:example:stub';
-    result.senderDid = mockExtractedDid;
+  // Extract DID from UCAN for trust tier lookup (without full verification yet)
+  let senderDid: string | null = null;
+  if (ucanJwt) {
+    senderDid = extractIssuerDid(ucanJwt);
+  }
 
-    // --- STEP 2: Trust Tier Resolution ---
-    // Look up the DID in the specific agent's isolated Trust Registry
-    // If unknown, we default to Tier 0.
-    result.trustTier = resolveTrustTier(ctx.tenantCtx, result.senderDid);
+  // --- STEP 2: Trust Tier Resolution ---
+  const { tier, actorRecord } = resolveTrustTier(tenantCtx, senderDid);
 
-    if (result.trustTier === 0) {
-      throw new NovaError('ACTOR_UNKNOWN', `DID ${result.senderDid} holds no registered trust tier.`);
-    }
+  if (tier === 0) {
+    await auditLog(tenantCtx, {
+      event: 'actor_unknown',
+      senderDid: senderDid ?? undefined,
+      tier: 0,
+      reason: 'No trust record found for sender DID',
+    });
 
-    // --- STEP 3: UCAN Signature & Expiry Verifier (STUB) ---
-    // TODO: Verify chain cryptographically.
-    
-    // --- STEP 4: Schema Validation (STUB) ---
-    // TODO: z.parse payload against specific agent skill definition
-    result.parsedTask = ctx.body; // Mock passing it right through
+    const qId = writeQuarantine(tenantCtx, {
+      receivedAt,
+      senderDid,
+      rawTask: ctx.body,
+      gateStep: 'tier',
+      reason: 'actor_unknown',
+    });
 
-    // --- STEP 5: Injection Classification Layer A (STUB) ---
-    // TODO: Regex validation 
-
-    return result;
-
-  } catch (error: any) {
-    if (error instanceof NovaError) {
-      return {
-        passed: false,
-        errorCode: error.code as GateErrorCode,
-        reason: error.message
-      };
+    if (!qId) {
+      await auditLog(tenantCtx, { event: 'quarantine_full' });
+    } else {
+      await auditLog(tenantCtx, { event: 'task_quarantined', senderDid: senderDid ?? undefined, reason: 'actor_unknown' });
     }
 
     return {
       passed: false,
-      errorCode: 'INTERNAL_ERROR',
-      reason: error.message || 'Unknown catastrophic failure in Gate pipeline'
+      decision: 'quarantined',
+      errorCode: 'ACTOR_UNKNOWN',
+      reason: `Unknown actor: ${senderDid ?? '(no DID)'}`,
+      quarantineId: qId ?? undefined,
+      senderDid: senderDid ?? undefined,
+      trustTier: 0,
     };
   }
-}
 
-/**
- * Resolves local file-system isolation bounds to grab specific trust records 
- * matching the resolved Actor DID.
- */
-const DID_SAFE_PATTERN = /^did:[a-z]+:[a-zA-Z0-9._-]+$/;
+  await auditLog(tenantCtx, {
+    event: 'actor_resolved',
+    senderDid: senderDid ?? undefined,
+    tier,
+  });
 
-function resolveTrustTier(tenantCtx: TenantContext, did: string): TrustTier {
-  if (!DID_SAFE_PATTERN.test(did)) {
-    return 0; // Reject malformed DIDs that could enable path traversal
+  // --- STEP 3: UCAN Verification (tier >= 1 only) ---
+  if (!ucanJwt) {
+    // Missing UCAN → quarantine (not drop — operator may want to review)
+    await auditLog(tenantCtx, {
+      event: 'ucan_failed',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason: 'ucan_missing',
+    });
+
+    const qId = writeQuarantine(tenantCtx, {
+      receivedAt,
+      senderDid,
+      rawTask: ctx.body,
+      gateStep: 'ucan',
+      reason: 'ucan_missing',
+    });
+
+    return {
+      passed: false,
+      decision: 'quarantined',
+      errorCode: 'UCAN_MISSING',
+      reason: 'Missing Authorization: UCAN {jwt} header',
+      quarantineId: qId ?? undefined,
+      senderDid: senderDid ?? undefined,
+      trustTier: tier,
+    };
   }
 
-  const dataRoot = process.env.DATA_ROOT || path.resolve(process.cwd(), '../../data');
-  const recordPath = path.join(
-    dataRoot,
-    'tenants',
-    tenantCtx.tenantId,
-    'agents',
-    tenantCtx.agentId,
-    'trust-registry',
-    `${did.replace(/:/g, '_')}.json`
-  );
+  const agentDid = ctx.agentDid ?? loadAgentDid(tenantCtx);
+  const ucanResult = await verifyUCAN(ucanJwt, actorRecord!, agentDid, tenantCtx);
+
+  if (!ucanResult.valid) {
+    await auditLog(tenantCtx, {
+      event: 'ucan_failed',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason: ucanResult.reason,
+    });
+
+    const qId = writeQuarantine(tenantCtx, {
+      receivedAt,
+      senderDid,
+      rawTask: ctx.body,
+      gateStep: 'ucan',
+      reason: ucanResult.reason ?? 'ucan_invalid',
+    });
+
+    const errorMap: Record<string, GateErrorCode> = {
+      ucan_expired: 'UCAN_EXPIRED',
+      ucan_revoked: 'UCAN_REVOKED',
+      ucan_did_mismatch: 'UCAN_DID_MISMATCH',
+      ucan_wrong_audience: 'UCAN_INSUFFICIENT_CAPABILITY',
+      ucan_insufficient_capability: 'UCAN_INSUFFICIENT_CAPABILITY',
+      ucan_invalid_jwt: 'UCAN_INVALID_JWT',
+    };
+
+    return {
+      passed: false,
+      decision: 'quarantined',
+      errorCode: errorMap[ucanResult.reason ?? ''] ?? 'UCAN_INVALID_JWT',
+      reason: ucanResult.reason,
+      quarantineId: qId ?? undefined,
+      senderDid: senderDid ?? undefined,
+      trustTier: tier,
+    };
+  }
+
+  await auditLog(tenantCtx, {
+    event: 'ucan_verified',
+    senderDid: senderDid ?? undefined,
+    tier,
+  });
+
+  // --- STEP 4: Schema Validation ---
+  const schemaResult = validateSchema(ctx.body, tenantCtx);
+
+  if (!schemaResult.valid) {
+    await auditLog(tenantCtx, {
+      event: 'schema_invalid',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason: schemaResult.reason,
+    });
+
+    // Schema failures → DROP (not quarantine) — sender bug
+    return {
+      passed: false,
+      decision: 'dropped',
+      errorCode: schemaResult.reason?.startsWith('intent_unknown')
+        ? 'INTENT_UNKNOWN'
+        : schemaResult.reason?.includes('ttl')
+          ? 'TASK_TTL_EXPIRED_AT_INGRESS'
+          : 'SCHEMA_INVALID',
+      reason: schemaResult.reason,
+      senderDid: senderDid ?? undefined,
+      trustTier: tier,
+    };
+  }
+
+  await auditLog(tenantCtx, {
+    event: 'schema_valid',
+    senderDid: senderDid ?? undefined,
+    tier,
+  });
+
+  // --- STEP 5: Injection Classification (Stage A — pattern matching) ---
+  const params = (schemaResult.parsedTask as any)?.params ?? {};
+  const strings = extractStrings(params);
+  const patternResult = patternMatch(strings);
+
+  if (patternResult.matched) {
+    await auditLog(tenantCtx, {
+      event: 'injection_pattern_match',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason: patternResult.pattern,
+      metadata: { path: patternResult.path },
+    });
+
+    const qId = writeQuarantine(tenantCtx, {
+      receivedAt,
+      senderDid,
+      rawTask: ctx.body,
+      gateStep: 'classifier',
+      reason: `injection_pattern_match:${patternResult.pattern}`,
+    });
+
+    return {
+      passed: false,
+      decision: 'quarantined',
+      errorCode: 'INJECTION_PATTERN_MATCH',
+      reason: `Injection pattern matched at ${patternResult.path}`,
+      quarantineId: qId ?? undefined,
+      senderDid: senderDid ?? undefined,
+      trustTier: tier,
+    };
+  }
+
+  await auditLog(tenantCtx, {
+    event: 'injection_clear',
+    senderDid: senderDid ?? undefined,
+    tier,
+  });
+
+  // All five layers passed
+  return {
+    passed: true,
+    decision: 'accepted',
+    ucanJwt,
+    senderDid: senderDid ?? undefined,
+    trustTier: tier,
+    parsedTask: schemaResult.parsedTask,
+  };
+}
+
+// --- Trust Tier Resolution ---
+
+const DID_SAFE_PATTERN = /^did:[a-z]+:[a-zA-Z0-9._-]+$/;
+
+interface TierResolutionResult {
+  tier: TrustTier;
+  actorRecord: ActorRecord | null;
+}
+
+function resolveTrustTier(tenantCtx: TenantContext, did: string | null): TierResolutionResult {
+  if (!did || !DID_SAFE_PATTERN.test(did)) {
+    return { tier: 0, actorRecord: null };
+  }
+
+  // Spec: filename = sha256hex(did) + '.json'
+  const sha256Did = crypto.createHash('sha256').update(did).digest('hex');
+  const recordPath = tenantDataPath(tenantCtx, 'trust-registry', sha256Did + '.json');
 
   if (!fs.existsSync(recordPath)) {
-    return 0; // Explicitly map to isolated unknown limits.
+    return { tier: 0, actorRecord: null };
   }
 
   try {
-    const raw = fs.readFileSync(recordPath, 'utf8');
-    const record = JSON.parse(raw) as ActorRecord;
-    return record.tier as TrustTier;
-  } catch (err) {
-    // Treat corrupt local DB files securely as failed state.
-    return 0; 
+    const record = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as ActorRecord;
+    return { tier: record.tier as TrustTier, actorRecord: record };
+  } catch {
+    return { tier: 0, actorRecord: null };
+  }
+}
+
+/** Read the agent's own DID from the data directory. */
+function loadAgentDid(ctx: TenantContext): string {
+  const dataRoot = process.env.DATA_ROOT ?? (() => {
+    const { resolve, join } = require('path');
+    return resolve(process.cwd(), '../../data');
+  })();
+  const didPath = require('path').join(dataRoot, 'keys', 'nova.did');
+  try {
+    return fs.readFileSync(didPath, 'utf8').trim();
+  } catch {
+    return 'did:key:unknown';
   }
 }
