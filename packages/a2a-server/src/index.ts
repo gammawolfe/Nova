@@ -1,10 +1,13 @@
 import express from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
-import { enqueueWithIdempotency } from '@nova/task-queue';
-import { QueuedTask } from '@nova/shared/src/types';
+import { enqueueWithIdempotency, setTaskState, getTaskState } from '@nova/task-queue/src/index';
+import { QueuedTask, TaskState } from '@nova/shared/src/types';
+import { AgentCardSchema } from '@nova/shared/src/schemas';
+import { tenantDataPath } from '@nova/shared/src/tenant';
 import { tenantRouter } from './tenant-router';
 import { keyManager } from './key-manager';
 
@@ -23,7 +26,62 @@ app.get('/health', (req, res) => {
 const agentRouter = express.Router({ mergeParams: true });
 agentRouter.use(tenantRouter);
 
-// Standard task ingress (Milestone 1 Stub)
+// Agent Card — public metadata about this agent
+agentRouter.get('/.well-known/agent.json', async (req, res) => {
+  try {
+    const configPath = tenantDataPath(req.ctx, 'agent-config.json');
+    if (!fs.existsSync(configPath)) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const card = {
+      name: raw.name,
+      description: raw.description,
+      url: `${req.protocol}://${req.get('host')}/agents/${req.ctx.agentId}`,
+      version: raw.version || '1.0.0',
+      protocolVersions: ['1.0'] as const,
+      capabilities: raw.capabilities || {
+        streaming: false,
+        pushNotifications: false,
+        stateTransitionHistory: false,
+      },
+      authentication: raw.authentication || {
+        schemes: ['ucan'],
+        ucapabilityPrefix: `nova:${req.ctx.tenantId}:${req.ctx.agentId}`,
+      },
+      skills: raw.skills || [],
+    };
+
+    const parsed = AgentCardSchema.safeParse(card);
+    if (!parsed.success) {
+      logger.error({ errors: parsed.error.issues }, 'Agent card validation failed');
+      return res.status(500).json({ error: 'Invalid agent configuration' });
+    }
+
+    res.json(parsed.data);
+  } catch (err) {
+    logger.error({ err }, 'Failed to serve agent card');
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Task Status — query current state of a submitted task
+agentRouter.get('/tasks/:taskId', async (req, res) => {
+  const { taskId } = req.params;
+  try {
+    const state = await getTaskState(req.ctx, taskId);
+    if (!state) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    res.json(state);
+  } catch (err) {
+    logger.error({ err, taskId }, 'Failed to fetch task state');
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Standard task ingress
 agentRouter.post('/tasks', async (req, res) => {
   const gateCtx: GateContext = {
     tenantCtx: req.ctx,
@@ -72,12 +130,24 @@ agentRouter.post('/tasks', async (req, res) => {
     const queued = await enqueueWithIdempotency(req.ctx, queuedTaskFormat, 600);
 
     if (!queued) {
-      // It hit our Redis SET NX lock — drop the request implicitly 
-      // but still reply 202 because of asynchronous boundaries!
       logger.info({ taskId: generatedTaskId }, 'Dropped idempotent exact duplicate request at ingress');
     } else {
-      logger.info({ 
-        ctx: req.ctx, 
+      // Persist initial task state for status queries
+      const initialState: TaskState = {
+        taskId: generatedTaskId,
+        tenantId: req.ctx.tenantId,
+        agentId: req.ctx.agentId,
+        status: 'submitted',
+        intent: queuedTaskFormat.intent,
+        submittedAt: queuedTaskFormat.queuedAt,
+        updatedAt: queuedTaskFormat.queuedAt,
+        expiresAt: queuedTaskFormat.expiresAt,
+        submitterDid: gateResult.senderDid!,
+      };
+      await setTaskState(req.ctx, initialState);
+
+      logger.info({
+        ctx: req.ctx,
         taskId: generatedTaskId,
         senderDid: gateResult.senderDid,
         tier: gateResult.trustTier

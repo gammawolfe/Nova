@@ -2,7 +2,7 @@ import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey, queueName, TenantContext } from '@nova/shared/src/tenant';
-import { QueuedTask } from '@nova/shared/src/types';
+import { QueuedTask, TaskState, TaskResult } from '@nova/shared/src/types';
 
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 export const redis = new IORedis(redisUrl, { maxRetriesPerRequest: null });
@@ -34,7 +34,7 @@ export async function enqueueWithIdempotency(
 
   // SET NX ensures atomicity — if key exists, we immediately drop request
   const acquired = await redis.set(idempotencyKey, 'queued', 'EX', ttlSeconds, 'NX');
-  
+
   if (!acquired) {
     logger.warn({ ctx, taskId: task.taskId }, 'Idempotent task drop detected');
     return false;
@@ -58,4 +58,93 @@ export async function enqueueWithIdempotency(
     await redis.del(idempotencyKey);
     throw err;
   }
+}
+
+// --- Task State Persistence ---
+
+const TASK_TTL_SECONDS = 60 * 60 * 24; // 24 hours
+
+/**
+ * Persist the full initial task state as a Redis hash.
+ */
+export async function setTaskState(
+  ctx: TenantContext,
+  state: TaskState
+): Promise<void> {
+  const key = redisKey(ctx, 'task', state.taskId);
+
+  const flat: Record<string, string> = {
+    taskId: state.taskId,
+    tenantId: state.tenantId,
+    agentId: state.agentId,
+    status: state.status,
+    intent: state.intent,
+    submittedAt: state.submittedAt,
+    updatedAt: state.updatedAt,
+    expiresAt: state.expiresAt,
+    submitterDid: state.submitterDid,
+  };
+
+  if (state.result) flat.result = JSON.stringify(state.result);
+  if (state.statusMessage) flat.statusMessage = state.statusMessage;
+  if (state.estimatedResponseBy) flat.estimatedResponseBy = state.estimatedResponseBy;
+
+  await redis.hset(key, flat);
+  await redis.expire(key, TASK_TTL_SECONDS);
+}
+
+/**
+ * Retrieve task state from Redis. Returns null if not found.
+ */
+export async function getTaskState(
+  ctx: TenantContext,
+  taskId: string
+): Promise<TaskState | null> {
+  const key = redisKey(ctx, 'task', taskId);
+  const raw = await redis.hgetall(key);
+
+  if (!raw || Object.keys(raw).length === 0 || !raw['taskId']) return null;
+
+  // Cast is safe — we only write well-formed hashes via setTaskState/updateTaskStatus
+  const r = raw as Record<string, string>;
+
+  const state: TaskState = {
+    taskId: r['taskId']!,
+    tenantId: r['tenantId']!,
+    agentId: r['agentId']!,
+    status: r['status']! as TaskState['status'],
+    intent: r['intent']!,
+    submittedAt: r['submittedAt']!,
+    updatedAt: r['updatedAt']!,
+    expiresAt: r['expiresAt']!,
+    submitterDid: r['submitterDid']!,
+  };
+
+  if (r['result']) state.result = JSON.parse(r['result']) as TaskResult;
+  if (r['statusMessage']) state.statusMessage = r['statusMessage'];
+  if (r['estimatedResponseBy']) state.estimatedResponseBy = r['estimatedResponseBy'];
+
+  return state;
+}
+
+/**
+ * Partial update of task status and optional extra fields.
+ */
+export async function updateTaskStatus(
+  ctx: TenantContext,
+  taskId: string,
+  status: TaskState['status'],
+  extra?: { result?: TaskResult; statusMessage?: string }
+): Promise<void> {
+  const key = redisKey(ctx, 'task', taskId);
+
+  const updates: Record<string, string> = {
+    status,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (extra?.result) updates.result = JSON.stringify(extra.result);
+  if (extra?.statusMessage) updates.statusMessage = extra.statusMessage;
+
+  await redis.hset(key, updates);
 }

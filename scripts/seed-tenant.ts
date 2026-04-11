@@ -14,14 +14,29 @@ function main() {
 
   fs.mkdirSync(trustRegistryDir, { recursive: true });
 
-  // Array of mock skills mapped for the agent's abilities
+  // Agent configuration with operator URL and full skill definitions
   const mockAgentConfig = {
     name: 'Aria Data Helper',
     description: 'Internal analytical agent for parsing data.',
     version: '1.0.0',
+    operatorUrl: process.env.OPERATOR_URL || 'http://localhost:4000/process',
     skills: [
-      { id: 'query_knowledge', inputSchema: {}, outputSchema: {} },
-      { id: 'request_summary', inputSchema: {}, outputSchema: {} }
+      {
+        id: 'query_knowledge',
+        name: 'Query Knowledge',
+        description: 'Query the internal knowledge base for answers',
+        tags: ['knowledge', 'search'],
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        outputSchema: { type: 'object', properties: { answer: { type: 'string' } } }
+      },
+      {
+        id: 'request_summary',
+        name: 'Request Summary',
+        description: 'Generate a summary from provided data',
+        tags: ['summary', 'analysis'],
+        inputSchema: { type: 'object', properties: { data: { type: 'string' } }, required: ['data'] },
+        outputSchema: { type: 'object', properties: { summary: { type: 'string' } } }
+      }
     ]
   };
 

@@ -34,7 +34,8 @@ export function redisKey(ctx: TenantContext, ...parts: string[]): string {
   return `t:${ctx.tenantId}:a:${ctx.agentId}:${parts.join(':')}`;
 }
 
-const DATA_ROOT = process.env.DATA_ROOT || path.join(process.cwd(), 'data');
+// Resolve data root — accounts for npm workspaces where CWD may be a nested package dir
+const DATA_ROOT = process.env.DATA_ROOT || path.resolve(process.cwd(), '../../data');
 
 /**
  * Centralized utility to ensure all file-system paths are securely directed per isolate.

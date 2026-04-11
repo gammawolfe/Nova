@@ -11,6 +11,9 @@
     "generate:agent-card": "tsx scripts/generate-agent-card.ts",
     "generate:keys": "tsx scripts/generate-keys.ts",
     "seed-tenant": "tsx scripts/seed-tenant.ts",
+    "mock:operator": "tsx scripts/mock-operator.ts",
+    "mock:reply": "tsx scripts/mock-reply-receiver.ts",
+    "test:acceptance": "tsx scripts/acceptance-test-m1.ts",
     "lint": "eslint packages/*/src/**/*.ts"
   },
   "devDependencies": {
