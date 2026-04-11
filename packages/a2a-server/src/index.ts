@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
@@ -40,7 +41,8 @@ agentRouter.post('/tasks', async (req, res) => {
       reason: gateResult.reason 
     }, 'Task rejected at ingress gate');
 
-    const status = gateResult.errorCode?.includes('UCAN') ? 401 : 403;
+    const UCAN_ERROR_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_INSUFFICIENT_CAPABILITY']);
+    const status = UCAN_ERROR_CODES.has(gateResult.errorCode!) ? 401 : 403;
     
     return res.status(status).json({
       error: gateResult.errorCode,
@@ -49,7 +51,8 @@ agentRouter.post('/tasks', async (req, res) => {
   }
 
   // --- Map dynamically to Isolated Queue Buffer ---
-  const generatedTaskId = req.body?.id || 'id-generation-fallback';
+  // Generate task ID server-side; use client's idempotencyKey only for dedup
+  const generatedTaskId = crypto.randomUUID();
   const queuedTaskFormat: QueuedTask = {
     taskId: generatedTaskId,
     tenantId: req.ctx.tenantId,
