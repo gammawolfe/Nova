@@ -27,16 +27,18 @@ export interface AgentConfig {
   agentId: string;
   tenantId: string;
   name: string;
-  description?: string;
+  description?: string | undefined;
   version: string;
-  operatorUrl?: string;
+  operatorUrl?: string | undefined;
   skills: Array<{
     id: string; name: string; description: string;
-    tags?: string[]; inputSchema?: Record<string, unknown>; outputSchema?: Record<string, unknown>;
+    tags?: string[] | undefined;
+    inputSchema?: Record<string, unknown> | undefined;
+    outputSchema?: Record<string, unknown> | undefined;
   }>;
   highPrivilegeSkills: string[];
   confirmTimeouts: Record<string, number>;
-  confirmWebhookUrl?: string;
+  confirmWebhookUrl?: string | undefined;
   capabilities: { streaming: boolean; pushNotifications: boolean; stateTransitionHistory: boolean };
   authentication: { schemes: string[]; ucapabilityPrefix: string };
   createdAt: string;
@@ -48,9 +50,9 @@ function agentConfigPath(ctx: TenantContext): string {
 }
 
 export async function createAgent(tenantId: string, data: {
-  agentId: string; name: string; description?: string; operatorUrl?: string;
-  skills: AgentConfig['skills']; highPrivilegeSkills?: string[];
-  confirmTimeouts?: Record<string, number>; confirmWebhookUrl?: string;
+  agentId: string; name: string; description?: string | undefined; operatorUrl?: string | undefined;
+  skills: AgentConfig['skills']; highPrivilegeSkills?: string[] | undefined;
+  confirmTimeouts?: Record<string, number> | undefined; confirmWebhookUrl?: string | undefined;
 }): Promise<AgentConfig> {
   validateId(tenantId, 'tenantId');
   validateId(data.agentId, 'agentId');

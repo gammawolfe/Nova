@@ -19,7 +19,7 @@ function tenantFile(tenantId: string): string {
 
 export async function createTenant(data: {
   name: string; slug: string;
-  plan?: Tenant['plan']; quotas?: Partial<TenantQuotas>;
+  plan?: Tenant['plan'] | undefined; quotas?: Partial<TenantQuotas> | undefined;
 }): Promise<Tenant> {
   const id = `tenant_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const tenant: Tenant = {
@@ -67,7 +67,12 @@ export async function getTenant(tenantId: string): Promise<Tenant | null> {
 
 export async function updateTenant(
   tenantId: string,
-  updates: Partial<Pick<Tenant, 'name' | 'status' | 'plan' | 'quotas'>>
+  updates: {
+    name?: string | undefined;
+    status?: Tenant['status'] | undefined;
+    plan?: Tenant['plan'] | undefined;
+    quotas?: Partial<TenantQuotas> | undefined;
+  }
 ): Promise<Tenant | null> {
   const tenant = await getTenant(tenantId);
   if (!tenant) return null;
