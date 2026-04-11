@@ -8,6 +8,7 @@ import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
+import { gateDecisions, gateLatency, classifierResults, quarantineDepth } from './metrics';
 
 export interface GateContext {
   tenantCtx: TenantContext;
@@ -37,6 +38,20 @@ export interface GateResult {
 export async function executeGatePipeline(ctx: GateContext): Promise<GateResult> {
   const { tenantCtx } = ctx;
   const receivedAt = new Date().toISOString();
+  const endTimer = gateLatency.startTimer();
+
+  function recordAndReturn(result: GateResult): GateResult {
+    endTimer();
+    gateDecisions.inc({ decision: result.decision, error_code: result.errorCode ?? 'none' });
+    if (result.decision === 'quarantined') {
+      try {
+        const qDir = tenantDataPath(tenantCtx, 'quarantine');
+        const count = fs.readdirSync(qDir).filter(f => f.endsWith('.json')).length;
+        quarantineDepth.set({ tenant_id: tenantCtx.tenantId, agent_id: tenantCtx.agentId }, count);
+      } catch { /* dir may not exist */ }
+    }
+    return result;
+  }
 
   // --- STEP 1: UCAN Pre-Extraction ---
   const authHeader = ctx.headers['authorization'];
@@ -80,7 +95,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       await auditLog(tenantCtx, { event: 'task_quarantined', senderDid: senderDid ?? undefined, reason: 'actor_unknown' });
     }
 
-    return {
+    return recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'ACTOR_UNKNOWN',
@@ -88,7 +103,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       quarantineId: qId ?? undefined,
       senderDid: senderDid ?? undefined,
       trustTier: 0,
-    };
+    });
   }
 
   await auditLog(tenantCtx, {
@@ -115,7 +130,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: 'ucan_missing',
     });
 
-    return {
+    return recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'UCAN_MISSING',
@@ -123,7 +138,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       quarantineId: qId ?? undefined,
       senderDid: senderDid ?? undefined,
       trustTier: tier,
-    };
+    });
   }
 
   const agentDid = ctx.agentDid ?? loadAgentDid(tenantCtx);
@@ -154,7 +169,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       ucan_invalid_jwt: 'UCAN_INVALID_JWT',
     };
 
-    return {
+    return recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: errorMap[ucanResult.reason ?? ''] ?? 'UCAN_INVALID_JWT',
@@ -162,7 +177,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       quarantineId: qId ?? undefined,
       senderDid: senderDid ?? undefined,
       trustTier: tier,
-    };
+    });
   }
 
   await auditLog(tenantCtx, {
@@ -183,7 +198,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
 
     // Schema failures → DROP (not quarantine) — sender bug
-    return {
+    return recordAndReturn({
       passed: false,
       decision: 'dropped',
       errorCode: schemaResult.reason?.startsWith('intent_unknown')
@@ -194,7 +209,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: schemaResult.reason,
       senderDid: senderDid ?? undefined,
       trustTier: tier,
-    };
+    });
   }
 
   await auditLog(tenantCtx, {
@@ -225,7 +240,8 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: `injection_pattern_match:${patternResult.pattern}`,
     });
 
-    return {
+    classifierResults.inc({ result: 'quarantine', stage: 'pattern' });
+    return recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'INJECTION_PATTERN_MATCH',
@@ -233,9 +249,10 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       quarantineId: qId ?? undefined,
       senderDid: senderDid ?? undefined,
       trustTier: tier,
-    };
+    });
   }
 
+  classifierResults.inc({ result: 'pass', stage: 'pattern' });
   await auditLog(tenantCtx, {
     event: 'injection_pattern_clear',
     senderDid: senderDid ?? undefined,
@@ -272,7 +289,8 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
         reason,
       });
 
-      return {
+      classifierResults.inc({ result: 'quarantine', stage: 'llm' });
+      return recordAndReturn({
         passed: false,
         decision: 'quarantined',
         errorCode,
@@ -280,9 +298,10 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
         quarantineId: qId ?? undefined,
         senderDid: senderDid ?? undefined,
         trustTier: tier,
-      };
+      });
     }
 
+    classifierResults.inc({ result: 'pass', stage: 'llm' });
     await auditLog(tenantCtx, {
       event: 'injection_clear',
       senderDid: senderDid ?? undefined,
@@ -301,14 +320,14 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   }
 
   // All five layers passed
-  return {
+  return recordAndReturn({
     passed: true,
     decision: 'accepted',
     ucanJwt,
     senderDid: senderDid ?? undefined,
     trustTier: tier,
     parsedTask: schemaResult.parsedTask,
-  };
+  });
 }
 
 // --- Trust Tier Resolution ---

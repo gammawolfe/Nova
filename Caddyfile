@@ -1,0 +1,20 @@
+{
+	# Auto HTTPS disabled for local dev — set domain for production
+	auto_https off
+}
+
+:80 {
+	# A2A Protocol endpoints
+	handle /agents/* {
+		reverse_proxy a2a-server:3001
+	}
+
+	# Admin API (loopback in production — Caddy provides TLS here)
+	handle /admin/* {
+		reverse_proxy admin-api:3005
+	}
+
+	handle {
+		respond "Nova Platform" 200
+	}
+}

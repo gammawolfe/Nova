@@ -16,6 +16,7 @@ import { logger } from '@nova/shared/src/logger';
 export { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
 
 import { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
+import { classifierCacheHits, classifierCacheMisses } from './metrics';
 
 // ─── Stage A: Pattern Matching ───────────────────────────────────────────────
 
@@ -110,8 +111,10 @@ export async function llmClassify(
   try {
     const cached = await getRedis().get(redisKey(ctx, 'classifier-cache', cacheKey));
     if (cached) {
+      classifierCacheHits.inc();
       return { ...JSON.parse(cached), fromCache: true };
     }
+    classifierCacheMisses.inc();
   } catch (err: any) {
     logger.warn({ err: err.message }, 'Classifier cache read failed — proceeding to LLM');
   }

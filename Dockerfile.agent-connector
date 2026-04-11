@@ -1,0 +1,17 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/shared ./packages/shared
+COPY packages/task-queue ./packages/task-queue
+COPY packages/agent-connector ./packages/agent-connector
+
+RUN npm ci --workspace=packages/shared --workspace=packages/task-queue --workspace=packages/agent-connector
+RUN npx tsc --build packages/agent-connector
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages ./packages
+EXPOSE 3003
+CMD ["node", "packages/agent-connector/dist/index.js"]
