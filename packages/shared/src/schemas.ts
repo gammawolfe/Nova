@@ -59,6 +59,8 @@ export const AuditEventSchema = z.object({
     'injection_pattern_match',
     'injection_detected',
     'injection_suspected',
+    'injection_pattern_clear',
+    'classifier_unavailable',
     'task_queued',
     'task_classification_started',
     'task_classification_complete',

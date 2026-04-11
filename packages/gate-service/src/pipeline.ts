@@ -1,12 +1,12 @@
 import crypto from 'crypto';
 import fs from 'fs';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
+import { TenantContext, tenantDataPath, DATA_ROOT } from '@nova/shared/src/tenant';
 import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
 import { TrustTier, ActorRecord } from '@nova/shared/src/types';
 import { auditLog } from '@nova/shared/src/audit';
 import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
-import { extractStrings, patternMatch } from './classifier';
+import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
 
 export interface GateContext {
@@ -237,10 +237,68 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   }
 
   await auditLog(tenantCtx, {
-    event: 'injection_clear',
+    event: 'injection_pattern_clear',
     senderDid: senderDid ?? undefined,
     tier,
   });
+
+  // --- STEP 5B: LLM Classification ---
+  try {
+    const llmResult = await llmClassify(strings, tenantCtx);
+    const decision = classifyDecision(llmResult);
+
+    if (decision === 'quarantine') {
+      const confidenceHigh = llmResult.confidence >= 0.85;
+      const reason = confidenceHigh
+        ? `injection_detected:confidence=${llmResult.confidence}`
+        : `injection_suspected:confidence=${llmResult.confidence}`;
+      const errorCode: GateErrorCode = confidenceHigh
+        ? 'INJECTION_DETECTED'
+        : 'INJECTION_SUSPECTED';
+
+      await auditLog(tenantCtx, {
+        event: confidenceHigh ? 'injection_detected' : 'injection_suspected',
+        senderDid: senderDid ?? undefined,
+        tier,
+        reason,
+        metadata: { indicators: llmResult.indicators },
+      });
+
+      const qId = writeQuarantine(tenantCtx, {
+        receivedAt,
+        senderDid,
+        rawTask: ctx.body,
+        gateStep: 'classifier',
+        reason,
+      });
+
+      return {
+        passed: false,
+        decision: 'quarantined',
+        errorCode,
+        reason: `LLM classifier flagged injection (${llmResult.confidence})`,
+        quarantineId: qId ?? undefined,
+        senderDid: senderDid ?? undefined,
+        trustTier: tier,
+      };
+    }
+
+    await auditLog(tenantCtx, {
+      event: 'injection_clear',
+      senderDid: senderDid ?? undefined,
+      tier,
+      metadata: { classifierConfidence: llmResult.confidence, fromCache: llmResult.fromCache },
+    });
+  } catch (err: any) {
+    // Fail safe: classifier API failure → throw → 503
+    await auditLog(tenantCtx, {
+      event: 'classifier_unavailable',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason: err.message,
+    });
+    throw new Error(`Gate pipeline failed — classifier unavailable: ${err.message}`);
+  }
 
   // All five layers passed
   return {
@@ -284,12 +342,8 @@ function resolveTrustTier(tenantCtx: TenantContext, did: string | null): TierRes
 }
 
 /** Read the agent's own DID from the data directory. */
-function loadAgentDid(ctx: TenantContext): string {
-  const dataRoot = process.env.DATA_ROOT ?? (() => {
-    const { resolve, join } = require('path');
-    return resolve(process.cwd(), '../../data');
-  })();
-  const didPath = require('path').join(dataRoot, 'keys', 'nova.did');
+function loadAgentDid(_ctx: TenantContext): string {
+  const didPath = require('path').join(DATA_ROOT, 'keys', 'nova.did');
   try {
     return fs.readFileSync(didPath, 'utf8').trim();
   } catch {

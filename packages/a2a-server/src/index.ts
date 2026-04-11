@@ -8,7 +8,7 @@ import { executeGatePipeline, GateContext } from '@nova/gate-service';
 import { enqueueWithIdempotency, setTaskState, getTaskState, redis } from '@nova/task-queue/src/index';
 import { QueuedTask, TaskState } from '@nova/shared/src/types';
 import { AgentCardSchema } from '@nova/shared/src/schemas';
-import { tenantDataPath, redisKey } from '@nova/shared/src/tenant';
+import { tenantDataPath, redisKey, DATA_ROOT } from '@nova/shared/src/tenant';
 import { tenantRouter } from './tenant-router';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
@@ -242,7 +242,7 @@ app.use('/agents/:agentId', agentRouter);
 async function start() {
   try {
     const keyPath = process.env.NOVA_PRIVATE_KEY_PATH
-      || path.resolve(process.cwd(), '../../data/keys/nova.private.pem');
+      || path.join(DATA_ROOT, 'keys', 'nova.private.pem');
     await keyManager.initialize(keyPath);
 
     app.listen(PORT, () => {

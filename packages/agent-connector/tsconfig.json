@@ -5,10 +5,22 @@
     "rootDir": "src",
     "composite": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["tests/**/*", "dist"],
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "tests/**/*",
+    "dist"
+  ],
   "references": [
-    { "path": "../shared" },
-    { "path": "../task-queue" }
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../task-queue"
+    },
+    {
+      "path": "../gate-service"
+    }
   ]
 }
