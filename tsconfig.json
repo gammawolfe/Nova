@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/a2a-server" },
+    { "path": "packages/gate-service" },
+    { "path": "packages/task-queue" },
+    { "path": "packages/agent-connector" }
+  ]
+}
