@@ -719,7 +719,7 @@ interface GateResponse {
 }
 ```
 
-**Dependency failure:** If Redis, Anthropic API, or the agent registry is unreachable, return `503`. The A2A server returns `503` to the sender. Do not attempt partial gate execution.
+**Dependency failure:** If Redis or the agent registry is unreachable, return `503`. The Anthropic API (used by the async classifier in the queue worker) does not affect gate availability — classifier failures retry in the worker. The A2A server returns `503` to the sender. Do not attempt partial gate execution.
 
 #### 5.2.2 Step 1 — UCAN Pre-extraction
 
@@ -1585,6 +1585,8 @@ export const AuditEventSchema = z.object({
     'injection_detected',
     'injection_suspected',
     'task_queued',
+    'task_classification_started',
+    'task_classification_complete',
     'task_quarantined',
     'task_dropped',
     'task_started',
