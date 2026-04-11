@@ -204,6 +204,7 @@ Accept: application/json
 | `version` | string | Yes | Agent version string — operator-defined |
 | `protocolVersions` | string[] | Yes | Supported Nova protocol versions |
 | `provider` | object | No | Operator organisation details |
+| `renewalContact` | string | No | Preferred contact channel (URL, email, etc.) for senders to request UCAN renewal |
 | `capabilities.streaming` | boolean | Yes | Whether SSE streaming is supported |
 | `capabilities.pushNotifications` | boolean | Yes | Whether push notifications are supported |
 | `capabilities.stateTransitionHistory` | boolean | Yes | Whether historical state transitions are available |
@@ -323,7 +324,9 @@ X-A2A-Version: 1.0
 
 UCANs have an expiry (`exp` claim). Nova rejects expired UCANs with `UCAN_EXPIRED`. Obtain a new UCAN from the operator before expiry.
 
-There is no automatic renewal. Nova does not issue UCANs — operators do.
+There is no automatic renewal. Nova does not issue UCANs — operators do. 
+
+**Recommended Practice:** Senders should continuously monitor the remaining lifetime of their UCAN. When a UCAN has less than 20% of its lifetime remaining, the sender should proactively request a renewal from the operator using the channel specified in the agent card's `renewalContact` field. This prevents unexpected operational breakages.
 
 ### 3.7 UCAN Revocation
 
@@ -419,11 +422,11 @@ Nova validates the task payload against the skill's declared `inputSchema`. Chec
 Failure: drop with `SCHEMA_INVALID:{field}`.
 
 ### Layer 5 — Injection Classification
-All string fields in task parameters are scanned for prompt injection patterns. Two stages:
+All string fields in task parameters are scanned for prompt injection patterns.
 
-**Stage A — Pattern matching:** Deterministic, <1ms. Known injection phrases, bracket patterns, script tags, null bytes. Match → quarantine immediately, no LLM call.
+**Stage A — Pattern matching (Synchronous):** Deterministic, <1ms. Known injection phrases, bracket patterns, script tags, null bytes. Match → quarantine immediately, no LLM call.
 
-**Stage B — LLM classification:** Probabilistic. Confidence >= 0.85 → quarantine and alert operator. Confidence 0.60–0.85 → quarantine as suspected.
+**Stage B — LLM classification (Asynchronous):** Probabilistic. Runs via a queue worker *after* gate admission to prevent blocking ingestion. The task briefly enters a `pending_classification` state. Confidence >= 0.85 → quarantine and alert operator. Confidence 0.60–0.85 → quarantine as suspected.
 
 The classifier is purpose-built and narrow — it only determines whether text contains injection attempts. It does not process your task content.
 
@@ -562,20 +565,21 @@ You can use this token to prove to a third party that Nova produced this specifi
 ### 7.1 Task States
 
 ```
-submitted ──► working ──► completed
-                │
-                ├──────► input_required ──► working ──► completed
-                │                     │
-                │                     └──► failed (timeout)
-                │
-                └──────► failed
-                │
-                └──────► canceled
+submitted ──► pending_classification ──► working ──► completed
+                                           │
+                                           ├──────► input_required ──► working ──► completed
+                                           │                     │
+                                           │                     └──► failed (timeout)
+                                           │
+                                           └──────► failed
+                                           │
+                                           └──────► canceled
 ```
 
 | State | Description |
 |-------|-------------|
 | `submitted` | Task received, queued for processing |
+| `pending_classification` | Running asynchronously through LLM injection classifier |
 | `working` | Agent is actively processing the task |
 | `input_required` | Task paused — awaiting human operator confirmation for high-privilege actions |
 | `completed` | Task finished — result available |
