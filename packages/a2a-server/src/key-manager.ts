@@ -23,7 +23,7 @@ export class KeyManager {
       }
       
       const exportedKey = fs.readFileSync(privateKeyPath, 'utf8');
-      this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
+      this.keypair = await ucans.EdKeypair.fromSecretKey(exportedKey);
       if (!this.keypair) throw new Error('KeyManager initialization failed natively');
       this.did = this.keypair.did();
 

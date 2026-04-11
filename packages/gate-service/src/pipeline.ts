@@ -90,7 +90,13 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
  * Resolves local file-system isolation bounds to grab specific trust records 
  * matching the resolved Actor DID.
  */
+const DID_SAFE_PATTERN = /^did:[a-z]+:[a-zA-Z0-9._-]+$/;
+
 function resolveTrustTier(tenantCtx: TenantContext, did: string): TrustTier {
+  if (!DID_SAFE_PATTERN.test(did)) {
+    return 0; // Reject malformed DIDs that could enable path traversal
+  }
+
   const dataRoot = process.env.DATA_ROOT || path.resolve(process.cwd(), '../../data');
   const recordPath = path.join(
     dataRoot,
