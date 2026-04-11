@@ -1,5 +1,5 @@
 import fs from 'fs';
-import * as ucans from 'ucans';
+import * as ucans from '@ucans/ucans';
 import { logger } from '@nova/shared/src/logger';
 
 export class KeyManager {

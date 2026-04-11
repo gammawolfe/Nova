@@ -1,5 +1,6 @@
 import express from 'express';
 import { logger } from '@nova/shared/src/logger';
+import { executeGatePipeline, GateContext } from '@nova/gate-service';
 import { tenantRouter } from './tenant-router';
 import { keyManager } from './key-manager';
 
@@ -20,11 +21,38 @@ agentRouter.use(tenantRouter);
 
 // Standard task ingress (Milestone 1 Stub)
 agentRouter.post('/tasks', async (req, res) => {
-  // TODO: Step 5 Gate pipeline ingestion + BullMQ Queue
+  const gateCtx: GateContext = {
+    tenantCtx: req.ctx,
+    headers: req.headers,
+    body: req.body
+  };
+
+  // Synchronously execute the Gate Pipeline blocking admission
+  const gateResult = await executeGatePipeline(gateCtx);
+
+  if (!gateResult.passed) {
+    logger.warn({ 
+      ctx: req.ctx, 
+      error: gateResult.errorCode, 
+      reason: gateResult.reason 
+    }, 'Task rejected at ingress gate');
+
+    // 401 Unauthorized for Auth failures (missing/invalid tokens) vs 403 Forbidden (no access) vs 400 Bad Request
+    const status = gateResult.errorCode?.includes('UCAN') ? 401 : 403;
+    
+    return res.status(status).json({
+      error: gateResult.errorCode,
+      message: gateResult.reason
+    });
+  }
+
+  // TODO: Step 5 BullMQ Queue Enqueue step
   logger.info({ 
     ctx: req.ctx, 
-    intent: req.body?.intent 
-  }, 'Ingested primitive A2A task layout');
+    intent: req.body?.intent,
+    senderDid: gateResult.senderDid,
+    tier: gateResult.trustTier
+  }, 'Task passed gate pipeline. Queueing...');
 
   // Specs explicitly dictate 202 Async ingestion standard
   res.status(202).json({

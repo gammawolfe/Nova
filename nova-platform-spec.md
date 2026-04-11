@@ -2207,6 +2207,9 @@ const activeSseStreams = new Gauge({ name: 'nova_active_sse_streams', labelNames
 | Audit logs | `data/audit/` | Medium |
 | Redis AOF | Docker volume `redis-data` | High |
 
+**Note on Enterprise Cryptography:** 
+The local `nova.private.pem` file-system reliance defined above is optimal for standard Docker or VPS deployment architectures. If Nova is to be deployed in a high-availability, distributed environment (like Kubernetes), this local credential logic should be superseded. Operators should store the signing keys securely in AWS KMS, Azure Key Vault, or HashiCorp Vault and pipe them into the a2a-server nodes via secure environment variables to prevent volume-mounting sensitive material.
+
 ### 14.2 Backup Script
 
 ```bash
@@ -2509,7 +2512,7 @@ export async function log(ctx: TenantContext, event: Omit<AuditEvent, 'eventId' 
     "ioredis": "^5.0.0",
     "pino": "^8.0.0",
     "pino-pretty": "^10.0.0",
-    "ucans": "^0.10.0",
+    "@ucans/ucans": "^0.12.0",
     "jsonwebtoken": "^9.0.0",
     "@anthropic-ai/sdk": "^0.20.0",
     "prom-client": "^14.0.0",
