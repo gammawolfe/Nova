@@ -12,9 +12,12 @@ import { tenantDataPath, redisKey, DATA_ROOT } from '@nova/shared/src/tenant';
 import { tenantRouter } from './tenant-router';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
+import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/health';
+import { a2aRegistry } from './metrics';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const startTime = Date.now();
 
 const RATE_LIMIT_PER_SENDER = parseInt(process.env.RATE_LIMIT_PER_SENDER || '60', 10);
 const RATE_LIMIT_GLOBAL_PER_AGENT = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_AGENT || '300', 10);
@@ -22,9 +25,33 @@ const RATE_LIMIT_GLOBAL_PER_AGENT = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_A
 // Parse standard ingress objects
 app.use(express.json());
 
-// Standard Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', did: keyManager.getDid() });
+// Health check with dependency probes
+app.get('/health', (_req, res) => {
+  (async () => {
+    const checks = {
+      redis: await timedCheck(async () => {
+        const pong = await redis.ping();
+        if (pong !== 'PONG') throw new Error('Redis ping failed');
+      }),
+      keys: await timedCheck(async () => {
+        keyManager.getDid();
+      }),
+    };
+    const status = aggregateHealth(checks);
+    const response: HealthResponse = {
+      status, service: 'a2a-server',
+      uptime: Math.floor((Date.now() - startTime) / 1000), checks,
+    };
+    res.status(status === 'down' ? 503 : 200).json(response);
+  })().catch(() => res.status(503).json({ status: 'down', service: 'a2a-server' }));
+});
+
+// Prometheus metrics
+app.get('/metrics', (_req, res) => {
+  a2aRegistry.metrics().then(metrics => {
+    res.set('Content-Type', a2aRegistry.contentType);
+    res.end(metrics);
+  }).catch(() => res.status(500).end('Error collecting metrics'));
 });
 
 // A2A Protocol Routes

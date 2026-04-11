@@ -1,0 +1,16 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/shared ./packages/shared
+COPY packages/gate-service ./packages/gate-service
+
+RUN npm ci --workspace=packages/shared --workspace=packages/gate-service
+RUN npx tsc --build packages/gate-service
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages ./packages
+EXPOSE 3002
+CMD ["node", "packages/gate-service/dist/server.js"]

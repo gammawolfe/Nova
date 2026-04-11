@@ -3,13 +3,14 @@ import { Router, Request, Response } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey } from '@nova/shared/src/tenant';
 import { redis, getTaskState } from '@nova/task-queue/src/index';
+import { activeSseStreams } from './metrics';
 
 export const streamRouter = Router({ mergeParams: true });
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
-function sendSSEEvent(res: Response, event: { id: number; type: string; data: unknown }): void {
-  res.write(`id: ${event.id}\n`);
+function sendSSEEvent(res: Response, event: { id?: number; type: string; data: unknown }): void {
+  if (event.id !== undefined) res.write(`id: ${event.id}\n`);
   res.write(`event: ${event.type}\n`);
   res.write(`data: ${JSON.stringify(event.data)}\n\n`);
   // Flush immediately so the client sees it right away
@@ -38,6 +39,8 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
   res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx/Caddy buffering
   res.flushHeaders();
 
+  let cleaned = false;
+  activeSseStreams.inc();
   const lastEventId = parseInt((req.headers['last-event-id'] as string) ?? '0', 10);
   const logKey = redisKey(ctx, 'task-events-log', taskId);
   const channelKey = redisKey(ctx, 'task-events', taskId);
@@ -94,7 +97,6 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
   const heartbeat = setInterval(() => {
     try {
       sendSSEEvent(res, {
-        id: 0,
         type: 'heartbeat',
         data: { timestamp: new Date().toISOString() },
       });
@@ -104,6 +106,9 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
   }, HEARTBEAT_INTERVAL_MS);
 
   function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
+    activeSseStreams.dec();
     clearInterval(heartbeat);
     if (sub) {
       sub.unsubscribe().catch(() => {});
