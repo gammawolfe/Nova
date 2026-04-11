@@ -2,8 +2,14 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "composite": true
   },
   "include": ["src/**/*"],
-  "exclude": ["tests/**/*", "dist"]
+  "exclude": ["tests/**/*", "dist"],
+  "references": [
+    { "path": "../shared" },
+    { "path": "../gate-service" },
+    { "path": "../task-queue" }
+  ]
 }

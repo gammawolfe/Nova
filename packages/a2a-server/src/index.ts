@@ -156,7 +156,7 @@ agentRouter.post('/tasks', async (req, res) => {
     // Quarantined tasks still return 202 (gate decision is internal)
     // Dropped tasks return error codes
     if (gateResult.decision === 'dropped') {
-      const UCAN_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_INSUFFICIENT_CAPABILITY']);
+      const UCAN_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_WRONG_AUDIENCE', 'UCAN_INSUFFICIENT_CAPABILITY']);
       const status = UCAN_CODES.has(gateResult.errorCode!) ? 401 : 403;
       return res.status(status).json({
         error: gateResult.errorCode,

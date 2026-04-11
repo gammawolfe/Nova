@@ -149,7 +149,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       ucan_expired: 'UCAN_EXPIRED',
       ucan_revoked: 'UCAN_REVOKED',
       ucan_did_mismatch: 'UCAN_DID_MISMATCH',
-      ucan_wrong_audience: 'UCAN_INSUFFICIENT_CAPABILITY',
+      ucan_wrong_audience: 'UCAN_WRONG_AUDIENCE',
       ucan_insufficient_capability: 'UCAN_INSUFFICIENT_CAPABILITY',
       ucan_invalid_jwt: 'UCAN_INVALID_JWT',
     };
