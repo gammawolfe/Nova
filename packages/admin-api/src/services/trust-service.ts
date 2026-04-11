@@ -18,7 +18,7 @@ function actorFile(ctx: TenantContext, did: string): string {
 }
 
 export async function addActor(ctx: TenantContext, data: {
-  did: string; displayName: string; tier: number; allowedSkills: string[]; notes?: string;
+  did: string; displayName: string; tier: number; allowedSkills: string[]; notes?: string | undefined;
 }): Promise<ActorRecord> {
   await fsp.mkdir(registryDir(ctx), { recursive: true });
 

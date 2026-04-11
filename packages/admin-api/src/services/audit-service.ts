@@ -21,7 +21,10 @@ function dateRange(from?: string, to?: string): string[] {
 
 export async function queryAuditLogs(
   tenantId: string,
-  filters: { event?: string; from?: string; to?: string; taskId?: string; limit?: number; offset?: number }
+  filters: {
+    event?: string | undefined; from?: string | undefined; to?: string | undefined;
+    taskId?: string | undefined; limit?: number | undefined; offset?: number | undefined;
+  }
 ): Promise<{ events: AuditEvent[]; total: number }> {
   const dir = auditDir(tenantId);
   const dates = dateRange(filters.from, filters.to);
