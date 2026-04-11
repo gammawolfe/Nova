@@ -1,0 +1,22 @@
+{
+  "name": "nova-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "generate:agent-card": "tsx scripts/generate-agent-card.ts",
+    "generate:keys": "tsx scripts/generate-keys.ts",
+    "seed-tenant": "tsx scripts/seed-tenant.ts",
+    "lint": "eslint packages/*/src/**/*.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "vitest": "^1.5.0"
+  }
+}
