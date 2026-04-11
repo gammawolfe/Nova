@@ -14,6 +14,10 @@
     "mock:operator": "tsx scripts/mock-operator.ts",
     "mock:reply": "tsx scripts/mock-reply-receiver.ts",
     "test:acceptance": "tsx scripts/acceptance-test-m1.ts",
+    "test:acceptance:m2": "tsx scripts/acceptance-test-m2.ts",
+    "did:exchange": "tsx scripts/did-exchange.ts",
+    "issue:ucan": "tsx scripts/issue-ucan.ts",
+    "revoke:ucan": "tsx scripts/revoke-ucan.ts",
     "lint": "eslint packages/*/src/**/*.ts"
   },
   "devDependencies": {

@@ -127,6 +127,38 @@ export async function getTaskState(
   return state;
 }
 
+// --- SSE Event Publishing ---
+
+/**
+ * Append an event to the Redis sorted set (for replay) and publish to pub/sub (for live SSE).
+ * The sorted set is scored by event ID and keyed by redisKey(ctx, 'task-events-log', taskId).
+ * The pub/sub channel is keyed by redisKey(ctx, 'task-events', taskId).
+ */
+export async function publishTaskEvent(
+  ctx: TenantContext,
+  taskId: string,
+  event: { type: string; data: unknown }
+): Promise<void> {
+  const logKey = redisKey(ctx, 'task-events-log', taskId);
+  const channelKey = redisKey(ctx, 'task-events', taskId);
+
+  // Get next event ID using INCR for monotonically increasing IDs
+  const eventIdKey = redisKey(ctx, 'task-events-seq', taskId);
+  const eventId = await redis.incr(eventIdKey);
+  await redis.expire(eventIdKey, TASK_TTL_SECONDS);
+
+  const payload = JSON.stringify({ id: eventId, type: event.type, data: event.data });
+
+  // Append to sorted set for replay (scored by eventId)
+  await redis.zadd(logKey, eventId, payload);
+  await redis.expire(logKey, TASK_TTL_SECONDS);
+
+  // Publish to channel for live SSE consumers
+  await redis.publish(channelKey, payload);
+}
+
+// --- Task Status Updates ---
+
 /**
  * Partial update of task status and optional extra fields.
  */

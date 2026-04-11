@@ -7,7 +7,9 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@nova/shared": "*"
+    "@nova/shared": "*",
+    "@ucans/ucans": "*",
+    "ioredis": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
