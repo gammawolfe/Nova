@@ -50,22 +50,9 @@ async function main() {
     process.exit(1);
   }
 
-  // Read PEM key and convert to EdKeypair
-  const privKeyPem = fs.readFileSync(privKeyPath, 'utf8');
-  // Extract raw key bytes from PEM
-  const privKeyDer = Buffer.from(
-    privKeyPem
-      .replace('-----BEGIN PRIVATE KEY-----', '')
-      .replace('-----END PRIVATE KEY-----', '')
-      .replace(/\s+/g, ''),
-    'base64'
-  );
-
-  // Ed25519 PKCS#8 DER prefix (32 byte private key follows after 16 byte prefix)
-  const rawPrivKey = privKeyDer.slice(16); // Strip PKCS#8 header
-  const keypair = await ucans.EdKeypair.fromSecretKey(
-    Buffer.from(rawPrivKey).toString('base64pad')
-  );
+  // Read raw base64 key (stored in standard base64 format)
+  const exportedKey = fs.readFileSync(privKeyPath, 'utf8').trim();
+  const keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
 
   const issuerDid = keypair.did();
   const capabilities: ucans.Capability[] = [];
@@ -74,15 +61,15 @@ async function main() {
     // Per-skill capabilities
     for (const skill of skillsArg.split(',').map(s => s.trim())) {
       capabilities.push({
-        with: `nova:${tenantId}:${agentId}:skill:${skill}`,
-        can: 'nova/task',
+        with: ucans.capability.resourcePointer.parse(`nova:${tenantId}:${agentId}:skill:${skill}`),
+        can: ucans.SUPERUSER,
       } as ucans.Capability);
     }
   } else {
     // Wildcard capability for all tasks on this agent
     capabilities.push({
-      with: `nova:${tenantId}:${agentId}`,
-      can: 'nova/task',
+      with: ucans.capability.resourcePointer.parse(`nova:${tenantId}:${agentId}`),
+      can: ucans.SUPERUSER,
     } as ucans.Capability);
   }
 

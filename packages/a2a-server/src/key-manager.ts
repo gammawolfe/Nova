@@ -22,8 +22,8 @@ export class KeyManager {
         throw new Error(`Nova private key not found at ${privateKeyPath}`);
       }
       
-      const exportedKey = fs.readFileSync(privateKeyPath, 'utf8');
-      this.keypair = await ucans.EdKeypair.fromSecretKey(exportedKey);
+      const exportedKey = fs.readFileSync(privateKeyPath, 'utf8').trim();
+      this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
       if (!this.keypair) throw new Error('KeyManager initialization failed natively');
       this.did = this.keypair.did();
 

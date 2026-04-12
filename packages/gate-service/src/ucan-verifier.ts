@@ -60,10 +60,14 @@ export async function verifyUCAN(
   }
 
   // 4. Capability check — must include nova:task/* or the specific nova:{tenantId}:{agentId} prefix
+  // att.with is a ResourcePointer { scheme, hierPart } from ucans.parse()
   const requiredPrefix = `nova:${ctx.tenantId}:${ctx.agentId}`;
-  const hasCapability = payload.att.some(att => {
-    const w = (att as any).with as string | undefined;
-    return w === 'nova:task/*' || (w && w.startsWith(requiredPrefix));
+  const hasCapability = payload.att.some((att: any) => {
+    const w = att.with;
+    if (!w) return false;
+    // Handle both string and ResourcePointer formats
+    const wStr = typeof w === 'string' ? w : `${w.scheme}:${w.hierPart}`;
+    return wStr === 'nova:task/*' || wStr.startsWith(requiredPrefix);
   });
   if (!hasCapability) {
     return { valid: false, reason: 'ucan_insufficient_capability' };

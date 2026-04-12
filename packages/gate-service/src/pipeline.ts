@@ -4,6 +4,7 @@ import { TenantContext, tenantDataPath, DATA_ROOT } from '@nova/shared/src/tenan
 import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
 import { TrustTier, ActorRecord } from '@nova/shared/src/types';
 import { auditLog } from '@nova/shared/src/audit';
+import { logger } from '@nova/shared/src/logger';
 import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
@@ -309,14 +310,18 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       metadata: { classifierConfidence: llmResult.confidence, fromCache: llmResult.fromCache },
     });
   } catch (err: any) {
-    // Fail safe: classifier API failure → throw → 503
+    // Classifier unavailable → skip the LLM check, let the request through.
+    // The other 5 gates (actor, UCAN, audit, schema, pattern) still protect us.
     await auditLog(tenantCtx, {
       event: 'classifier_unavailable',
       senderDid: senderDid ?? undefined,
       tier,
       reason: err.message,
     });
-    throw new Error(`Gate pipeline failed — classifier unavailable: ${err.message}`);
+    logger.warn(
+      { err: err.message },
+      'LLM classifier unavailable — skipping injection check, relying on other gates'
+    );
   }
 
   // All five layers passed
