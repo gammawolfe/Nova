@@ -90,3 +90,29 @@ export function checkConfirmation(
     return null;
   }
 }
+
+/**
+ * Search for an existing pending confirmation request for a given taskId.
+ * Used to handle crash-recovery: if a stalled job is re-queued,
+ * we reuse the existing confirm file rather than creating a duplicate.
+ * Returns the confirm ID, or null if no pending confirm exists.
+ */
+export function findPendingConfirmByTaskId(
+  ctx: TenantContext,
+  taskId: string
+): string | null {
+  const dir = confirmDir(ctx);
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith(".json"));
+    for (const file of files) {
+      const raw = fs.readFileSync(path.join(dir, file), "utf8");
+      const request = JSON.parse(raw) as ConfirmRequest;
+      if (request.taskId === taskId && request.status === "pending") {
+        return request.id;
+      }
+    }
+  } catch {
+    // Directory doesn't exist or read error — no pending confirm
+  }
+  return null;
+}

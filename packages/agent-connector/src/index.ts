@@ -11,7 +11,7 @@ import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/he
 import { deliverToOperator, deliverToReplyTo } from './delivery';
 import { getOperatorUrl } from './config';
 import { connectorRegistry, deliveryOutcomes } from './metrics';
-import { requiresConfirmation, createConfirmRequest, checkConfirmation } from './confirmation';
+import { requiresConfirmation, createConfirmRequest, checkConfirmation, findPendingConfirmByTaskId } from './confirmation';
 
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 export const redisConnection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
@@ -50,6 +50,21 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   await auditLog(taskCtx, { event: 'task_started', taskId: task.taskId, tier: task.tier });
 
   // --- Confirmation Gate: non-blocking via BullMQ delayed re-queue ---
+  // Crash recovery: if a stalled job is re-queued, it may have a pending confirm
+  // file on disk even though confirmId was never persisted to the job data.
+  if (!task.confirmId && requiresConfirmation(taskCtx, task.intent, task.tier)) {
+    const existingConfirmId = findPendingConfirmByTaskId(taskCtx, task.taskId);
+    if (existingConfirmId) {
+      await job.updateData({
+        ...job.data,
+        confirmId: existingConfirmId,
+      });
+      const nextCheck = Date.now() + CONFIRM_RECHECK_DELAY_MS;
+      await job.moveToDelayed(nextCheck);
+      logger.info({ ctx: taskCtx, taskId: task.taskId, confirmId: existingConfirmId }, 'Recovered stalled confirm job') ;
+      return;
+    }
+  }
   if (task.confirmId) {
     // Re-queued job: check current confirmation status (non-blocking)
     const status = checkConfirmation(taskCtx, task.confirmId);
