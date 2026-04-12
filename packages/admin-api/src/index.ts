@@ -17,6 +17,20 @@ const PORT = process.env.PORT || 3005;
 
 app.use(express.json());
 
+// Public healthcheck (no auth needed)
+app.get('/health', async (_req, res) => {
+  try {
+    // Quick Redis check
+    const IORedis = (await import('ioredis')).default;
+    const redis = new IORedis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', { maxRetriesPerRequest: null });
+    const pong = await redis.ping();
+    redis.quit();
+    res.status(pong === 'PONG' ? 200 : 503).json({ status: pong === 'PONG' ? 'ok' : 'down', service: 'admin-api' });
+  } catch {
+    res.status(503).json({ status: 'down', service: 'admin-api' });
+  }
+});
+
 // Auth on all /admin routes
 app.use('/admin', adminAuth);
 

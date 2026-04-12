@@ -98,7 +98,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3005/admin/metrics"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3005/health"]
       interval: 15s
       timeout: 5s
       retries: 3
