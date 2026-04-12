@@ -9,3 +9,10 @@ export const deliveryOutcomes = new Counter({
   labelNames: ['target', 'outcome'] as const,
   registers: [connectorRegistry],
 });
+
+export const confirmRequeues = new Counter({
+  name: 'nova_confirm_requeue_total',
+  help: 'Confirmation re-queue cycles (delayed re-check)',
+  labelNames: ['intent', 'tenant_id', 'agent_id'] as const,
+  registers: [connectorRegistry],
+});

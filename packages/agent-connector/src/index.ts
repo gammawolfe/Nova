@@ -11,10 +11,13 @@ import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/he
 import { deliverToOperator, deliverToReplyTo } from './delivery';
 import { getOperatorUrl } from './config';
 import { connectorRegistry, deliveryOutcomes } from './metrics';
-import { requiresConfirmation, createConfirmRequest, waitForConfirmation } from './confirmation';
+import { requiresConfirmation, createConfirmRequest, checkConfirmation } from './confirmation';
 
 const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 export const redisConnection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+
+/** Milliseconds between confirmation re-check cycles. Default: 5 minutes. */
+const CONFIRM_RECHECK_DELAY_MS = parseInt(process.env.CONFIRM_RECHECK_DELAY_MS || '300000', 10);
 
 const activeWorkers: Worker[] = [];
 
@@ -46,8 +49,42 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   });
   await auditLog(taskCtx, { event: 'task_started', taskId: task.taskId, tier: task.tier });
 
-  // --- Confirmation Gate for High-Privilege Skills ---
-  if (requiresConfirmation(taskCtx, task.intent, task.tier)) {
+  // --- Confirmation Gate: non-blocking via BullMQ delayed re-queue ---
+  if (task.confirmId) {
+    // Re-queued job: check current confirmation status (non-blocking)
+    const status = checkConfirmation(taskCtx, task.confirmId);
+
+    if (status === 'pending') {
+      // Still waiting — re-delay for another cycle
+      const nextCheck = Date.now() + CONFIRM_RECHECK_DELAY_MS;
+      await updateTaskStatus(taskCtx, task.taskId, 'input_required', {
+        statusMessage: `Awaiting confirmation for ${task.intent}`,
+      });
+      await job.moveToDelayed(nextCheck);
+      return;
+    }
+
+    if (status === 'denied') {
+      await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation denied by operator' });
+      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'HUMAN_DENIED' } });
+      await auditLog(taskCtx, { event: 'confirm_denied', taskId: task.taskId });
+      return;
+    }
+
+    if (status === 'timeout') {
+      await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation timed out' });
+      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'CONFIRMATION_TIMEOUT' } });
+      await auditLog(taskCtx, { event: 'confirm_timeout', taskId: task.taskId });
+      return;
+    }
+
+    // Approved — continue to delivery
+    await auditLog(taskCtx, { event: 'confirm_approved', taskId: task.taskId });
+    await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'working' } });
+  }
+
+  if (!task.confirmId && requiresConfirmation(taskCtx, task.intent, task.tier)) {
+    // First encounter: create confirmation request and move job to delayed
     const confirmReq = createConfirmRequest(taskCtx, task);
     await updateTaskStatus(taskCtx, task.taskId, 'input_required', {
       statusMessage: `Awaiting confirmation for ${task.intent} (ID: ${confirmReq.id})`,
@@ -58,25 +95,15 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
     });
     await auditLog(taskCtx, { event: 'confirm_requested', taskId: task.taskId, metadata: { confirmId: confirmReq.id, intent: task.intent } });
 
-    const decision = await waitForConfirmation(taskCtx, confirmReq.id);
-
-    if (decision === 'denied') {
-      await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation denied by operator' });
-      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'HUMAN_DENIED' } });
-      await auditLog(taskCtx, { event: 'confirm_denied', taskId: task.taskId });
-      return;
-    }
-    if (decision === 'timeout') {
-      await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation timed out' });
-      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'CONFIRMATION_TIMEOUT' } });
-      await auditLog(taskCtx, { event: 'confirm_timeout', taskId: task.taskId });
-      return;
-    }
-
-    // Approved — continue to delivery
-    await auditLog(taskCtx, { event: 'confirm_approved', taskId: task.taskId });
-    await updateTaskStatus(taskCtx, task.taskId, 'working');
-    await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'working' } });
+    // Update job data with confirmId and delay
+    const nextCheck = Date.now() + CONFIRM_RECHECK_DELAY_MS;
+    await job.updateData({
+      ...job.data,
+      confirmId: confirmReq.id,
+      confirmRequestAt: new Date().toISOString(),
+    });
+    await job.moveToDelayed(nextCheck);
+    return;
   }
 
   const operatorUrl = getOperatorUrl(taskCtx);

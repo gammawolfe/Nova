@@ -76,8 +76,20 @@ export async function updateTenant(
 ): Promise<Tenant | null> {
   const tenant = await getTenant(tenantId);
   if (!tenant) return null;
-  const updated = { ...tenant, ...updates };
-  if (updates.quotas) updated.quotas = { ...tenant.quotas, ...updates.quotas };
+  const updated: Tenant = {
+    ...tenant,
+    ...(updates.name !== undefined && { name: updates.name }),
+    ...(updates.status !== undefined && { status: updates.status }),
+    ...(updates.plan !== undefined && { plan: updates.plan }),
+  };
+  if (updates.quotas) {
+    updated.quotas = {
+      ...tenant.quotas,
+      ...(updates.quotas.messagesPerDay !== undefined && { messagesPerDay: updates.quotas.messagesPerDay }),
+      ...(updates.quotas.agentsMax !== undefined && { agentsMax: updates.quotas.agentsMax }),
+      ...(updates.quotas.trustedSendersMax !== undefined && { trustedSendersMax: updates.quotas.trustedSendersMax }),
+    };
+  }
   await writeAtomicallyAsync(tenantFile(tenantId), updated);
   return updated;
 }

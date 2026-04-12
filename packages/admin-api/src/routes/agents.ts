@@ -36,7 +36,7 @@ agentsRouter.get('/:agentId', async (req, res, next) => {
 agentsRouter.patch('/:agentId', async (req, res, next) => {
   try {
     const { tenantId, agentId } = p(req);
-    const updates = AgentUpdateSchema.parse(req.body);
+    const updates = AgentUpdateSchema.parse(req.body) as Partial<agentService.AgentConfig>;
     const agent = await agentService.updateAgent(tenantId, agentId, updates);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
     res.json(agent);

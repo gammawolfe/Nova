@@ -28,7 +28,7 @@ tenantsRouter.get('/:tenantId', async (req, res, next) => {
 
 tenantsRouter.patch('/:tenantId', async (req, res, next) => {
   try {
-    const updates = TenantUpdateSchema.parse(req.body);
+    const updates = TenantUpdateSchema.parse(req.body) as Parameters<typeof tenantService.updateTenant>[1];
     const tenant = await tenantService.updateTenant(req.params.tenantId, updates);
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
     res.json(tenant);

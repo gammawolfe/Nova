@@ -56,32 +56,37 @@ export function createConfirmRequest(ctx: TenantContext, task: QueuedTask): Conf
 }
 
 /**
- * Poll the confirmation file every 5s until approved, denied, or timed out.
+ * Non-blocking check of a confirmation request status.
+ * Reads the file synchronously (fast, small JSON).
+ * If the request has expired (past timeoutAt) and is still pending,
+ * atomically updates it to 'timeout' so the admin API sees the transition.
+ * Returns null if the confirmation file doesn't exist.
  */
-export async function waitForConfirmation(ctx: TenantContext, id: string): Promise<'approved' | 'denied' | 'timeout'> {
+export function checkConfirmation(
+  ctx: TenantContext,
+  id: string
+): 'approved' | 'denied' | 'timeout' | 'pending' | null {
   const filePath = path.join(confirmDir(ctx), id + '.json');
 
-  while (true) {
-    await new Promise(r => setTimeout(r, 5000));
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const request = JSON.parse(raw) as ConfirmRequest;
 
-    try {
-      const raw = fs.readFileSync(filePath, 'utf8');
-      const request = JSON.parse(raw) as ConfirmRequest;
-
-      if (request.status === 'approved') return 'approved';
-      if (request.status === 'denied') return 'denied';
-      if (request.status === 'timeout') return 'timeout';
-
-      // Check if deadline exceeded
-      if (new Date() >= new Date(request.timeoutAt)) {
-        request.status = 'timeout';
-        writeAtomically(filePath, request);
-        logger.warn({ ctx, confirmId: id }, 'Confirmation timed out');
-        return 'timeout';
-      }
-    } catch (err: any) {
-      logger.error({ err: err.message, confirmId: id }, 'Error reading confirmation file');
+    // Check expiry
+    if (request.status === 'pending' && new Date() >= new Date(request.timeoutAt)) {
+      request.status = 'timeout';
+      writeAtomically(filePath, request);
+      request.status = 'timeout';  // update in-memory for return
+      logger.warn({ ctx, confirmId: id }, 'Confirmation timed out');
       return 'timeout';
     }
+
+    return request.status === 'pending'
+      ? 'pending'
+      : request.status === 'approved'
+      ? 'approved'
+      : request.status === 'denied' ? 'denied' : null;
+  } catch {
+    return null;
   }
 }

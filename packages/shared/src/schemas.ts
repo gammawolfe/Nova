@@ -38,6 +38,8 @@ export const QueuedTaskSchema = z.object({
   tier: z.number().int().min(0).max(3),
   queuedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
+  confirmId: z.string().uuid().optional(),
+  confirmRequestAt: z.string().datetime().optional(),
 });
 
 export const AuditEventSchema = z.object({
