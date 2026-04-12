@@ -21,7 +21,7 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data:rw
     environment:
       - REDIS_URL=redis://redis:6379
       - DATA_ROOT=/app/data
@@ -42,7 +42,7 @@ services:
       context: .
       dockerfile: Dockerfile.gate-service
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data:rw
     environment:
       - REDIS_URL=redis://redis:6379
       - DATA_ROOT=/app/data

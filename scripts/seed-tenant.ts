@@ -15,12 +15,11 @@ function main() {
 
   fs.mkdirSync(trustRegistryDir, { recursive: true });
 
-  // Agent configuration with operator URL and full skill definitions
+  // Full agent configuration with proper skill definitions for Zod validation
   const mockAgentConfig = {
     name: 'Aria Data Helper',
     description: 'Internal analytical agent for parsing data.',
     version: '1.0.0',
-    operatorUrl: process.env.OPERATOR_URL || 'http://localhost:4000/process',
     skills: [
       {
         id: 'query_knowledge',
@@ -38,7 +37,19 @@ function main() {
         inputSchema: { type: 'object', properties: { data: { type: 'string' } }, required: ['data'] },
         outputSchema: { type: 'object', properties: { summary: { type: 'string' } } }
       }
-    ]
+    ],
+    highPrivilegeSkills: [],
+    confirmTimeouts: {},
+    capabilities: {
+      streaming: true,
+      pushNotifications: false,
+      stateTransitionHistory: true,
+    },
+    authentication: {
+      schemes: ['ucan'],
+      ucapabilityPrefix: `nova:${tenantId}:${agentId}`,
+    },
+    operatorUrl: process.env.OPERATOR_URL || 'http://localhost:4000/process',
   };
 
   fs.writeFileSync(
@@ -46,8 +57,7 @@ function main() {
     JSON.stringify(mockAgentConfig, null, 2)
   );
 
-  // Provide a trusted DID (in a real test we'll pass our own generated key against this logic constraint)
-  // We'll trust our OWN root DID for dev local bounding
+  // Provide a trusted DID
   const myDidPath = path.join(dataRoot, 'keys', 'nova.did');
   let allowedDid = 'did:example:stub';
   
@@ -58,7 +68,7 @@ function main() {
   const mockTrustRecord = {
     did: allowedDid,
     displayName: 'Local Dev Root Identity',
-    tier: 2, // Tier 2 means read+write abilities 
+    tier: 2,
     allowedSkills: ['query_knowledge', 'request_summary'],
     addedAt: new Date().toISOString(),
     addedBy: 'AdminSeed'
