@@ -1,4 +1,5 @@
 import fsp from 'fs/promises';
+import path from 'path';
 import * as ucans from '@ucans/ucans';
 import { logger } from '@nova/shared/src/logger';
 
@@ -18,7 +19,23 @@ export class KeyManager {
 
   public async initialize(privateKeyPath: string): Promise<void> {
     try {
-      const exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
+      let exportedKey: string;
+      try {
+        exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
+      } catch (err: any) {
+        if (err.code !== 'ENOENT') throw err;
+        logger.info('No private key found, generating new identity...');
+        const keypair = await ucans.EdKeypair.create({ exportable: true });
+        exportedKey = await keypair.export();
+        await fsp.mkdir(path.dirname(privateKeyPath), { recursive: true });
+        await fsp.writeFile(privateKeyPath, exportedKey, { encoding: 'utf8', mode: 0o600 });
+        await fsp.writeFile(
+          path.join(path.dirname(privateKeyPath), 'nova.did'),
+          keypair.did(),
+          'utf8',
+        );
+        logger.info('Generated new identity keypair');
+      }
       this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
       if (!this.keypair) throw new Error('KeyManager initialization failed natively');
       this.did = this.keypair.did();
