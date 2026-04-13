@@ -1,13 +1,9 @@
 import { Router } from 'express';
 import { TrustActorAddSchema, TrustActorUpdateTierSchema } from '@nova/shared/src/admin-schemas';
-import { TenantContext } from '@nova/shared/src/tenant';
 import * as trustService from '../services/trust-service';
+import { ctx } from '../middleware/ctx';
 
 export const trustRouter = Router({ mergeParams: true });
-
-function ctx(req: any): TenantContext {
-  return { tenantId: req.params.tenantId, agentId: req.params.agentId };
-}
 
 trustRouter.post('/', async (req, res, next) => {
   try {

@@ -4,13 +4,9 @@ import path from 'path';
 import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { Tenant, TenantQuotas } from '@nova/shared/src/tenant';
+import { ID_RE, validateId } from '@nova/shared/src/validation';
 
 const tenantsDir = path.join(DATA_ROOT, 'tenants');
-
-const ID_RE = /^[a-z0-9_-]{1,64}$/;
-function validateId(id: string, label = 'ID'): void {
-  if (!ID_RE.test(id)) throw Object.assign(new Error(`Invalid ${label} format`), { status: 400 });
-}
 
 function tenantFile(tenantId: string): string {
   validateId(tenantId, 'tenantId');

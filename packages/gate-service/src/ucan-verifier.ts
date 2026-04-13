@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import fs from 'fs';
+import fsp from 'fs/promises';
 import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { ActorRecord } from '@nova/shared/src/types';
@@ -77,8 +77,11 @@ export async function verifyUCAN(
   // We use sha256(jwt) as the stable CID-equivalent (avoids @web3-storage/content dependency)
   const cid = crypto.createHash('sha256').update(ucanJwt).digest('hex');
   const revokedPath = tenantDataPath(ctx, '..', 'ucans', 'revoked', cid + '.json');
-  if (fs.existsSync(revokedPath)) {
+  try {
+    await fsp.access(revokedPath);
     return { valid: false, reason: 'ucan_revoked' };
+  } catch {
+    // Not revoked
   }
 
   return { valid: true, issuerDid: payload.iss };

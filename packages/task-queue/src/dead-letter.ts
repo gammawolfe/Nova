@@ -1,42 +1,29 @@
 import crypto from 'crypto';
 import path from 'path';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { TaskResult } from '@nova/shared/src/types';
-import { writeAtomically } from '@nova/shared/src/fs-utils';
+import { DeadLetterEntry } from '@nova/shared/src/types';
+import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { logger } from '@nova/shared/src/logger';
 
-const DEAD_LETTER_TTL_DAYS = parseInt(process.env.DEAD_LETTER_TTL_DAYS || '7', 10);
+export type { DeadLetterEntry };
 
-export interface DeadLetterEntry {
-  id: string;
-  tenantId: string;
-  agentId: string;
-  taskId: string;
-  targetUrl: string;
-  taskResult: TaskResult;
-  failureReason: 'http_4xx' | 'exhausted_retries';
-  lastAttemptAt: string;
-  attemptCount: number;
-  httpStatus: number;
-  createdAt: string;
-  expiresAt: string;
-}
+const DEAD_LETTER_TTL_DAYS = parseInt(process.env.DEAD_LETTER_TTL_DAYS || '7', 10);
 
 /**
  * Write a failed delivery to the dead letter store.
  * Called when delivery returns HTTP 4xx or after retry exhaustion.
  */
-export function writeDeadLetter(
+export async function writeDeadLetter(
   ctx: TenantContext,
   params: {
     taskId: string;
     targetUrl: string;
-    taskResult: TaskResult;
+    taskResult: DeadLetterEntry['taskResult'];
     failureReason: DeadLetterEntry['failureReason'];
     httpStatus: number;
     attemptCount: number;
   }
-): string {
+): Promise<string> {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + DEAD_LETTER_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
@@ -57,7 +44,7 @@ export function writeDeadLetter(
   };
 
   const filePath = path.join(tenantDataPath(ctx, 'dead-letter'), id + '.json');
-  writeAtomically(filePath, entry);
+  await writeAtomicallyAsync(filePath, entry);
 
   logger.warn({
     ctx,

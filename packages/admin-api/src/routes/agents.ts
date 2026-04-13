@@ -3,14 +3,10 @@ import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
-import { TenantContext } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
+import { ctx } from '../middleware/ctx';
 
 export const agentsRouter = Router({ mergeParams: true });
-
-function ctx(req: any): TenantContext {
-  return { tenantId: req.params.tenantId, agentId: req.params.agentId };
-}
 
 function p(req: any): { tenantId: string; agentId: string } {
   return req.params as { tenantId: string; agentId: string };

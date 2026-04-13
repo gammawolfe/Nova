@@ -79,3 +79,6 @@ export function purgeExpiredNonces(): number {
   }
   return purged;
 }
+
+// Automatically purge expired nonces every 60 seconds
+setInterval(purgeExpiredNonces, 60_000);

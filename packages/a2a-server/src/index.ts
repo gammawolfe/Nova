@@ -1,6 +1,6 @@
 import express from 'express';
 import crypto from 'crypto';
-import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
@@ -13,7 +13,8 @@ import { tenantRouter } from './tenant-router';
 import { registerRouter } from './routes/register';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
-import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/health';
+import { timedCheck, healthHandler } from '@nova/shared/src/health';
+import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
 
 const app = express();
@@ -23,37 +24,24 @@ const startTime = Date.now();
 const RATE_LIMIT_PER_SENDER = parseInt(process.env.RATE_LIMIT_PER_SENDER || '60', 10);
 const RATE_LIMIT_GLOBAL_PER_AGENT = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_AGENT || '300', 10);
 
-// Parse standard ingress objects
+const UCAN_ERROR_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_WRONG_AUDIENCE', 'UCAN_INSUFFICIENT_CAPABILITY']);
+
 app.use(express.json());
 
-// Health check with dependency probes
-app.get('/health', (_req, res) => {
-  (async () => {
-    const checks = {
-      redis: await timedCheck(async () => {
-        const pong = await redis.ping();
-        if (pong !== 'PONG') throw new Error('Redis ping failed');
-      }),
-      keys: await timedCheck(async () => {
-        keyManager.getDid();
-      }),
-    };
-    const status = aggregateHealth(checks);
-    const response: HealthResponse = {
-      status, service: 'a2a-server',
-      uptime: Math.floor((Date.now() - startTime) / 1000), checks,
-    };
-    res.status(status === 'down' ? 503 : 200).json(response);
-  })().catch(() => res.status(503).json({ status: 'down', service: 'a2a-server' }));
-});
+app.get('/health', healthHandler('a2a-server', startTime, async () => {
+  const [redisCheck, keys] = await Promise.all([
+    timedCheck(async () => {
+      const pong = await redis.ping();
+      if (pong !== 'PONG') throw new Error('Redis ping failed');
+    }),
+    timedCheck(async () => {
+      keyManager.getDid();
+    }),
+  ]);
+  return { redis: redisCheck, keys };
+}) as any);
 
-// Prometheus metrics
-app.get('/metrics', (_req, res) => {
-  a2aRegistry.metrics().then(metrics => {
-    res.set('Content-Type', a2aRegistry.contentType);
-    res.end(metrics);
-  }).catch(() => res.status(500).end('Error collecting metrics'));
-});
+app.get('/metrics', metricsHandler(a2aRegistry) as any);
 
 // A2A Protocol Routes
 const agentRouter = express.Router({ mergeParams: true });
@@ -63,11 +51,12 @@ agentRouter.use(tenantRouter);
 agentRouter.get('/.well-known/agent.json', async (req, res) => {
   try {
     const configPath = tenantDataPath(req.ctx, 'agent-config.json');
-    if (!fs.existsSync(configPath)) {
+    let raw: any;
+    try {
+      raw = JSON.parse(await fsp.readFile(configPath, 'utf8'));
+    } catch {
       return res.status(404).json({ error: 'Agent not found' });
     }
-
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     const card = {
       name: raw.name,
       description: raw.description,
@@ -126,17 +115,22 @@ agentRouter.post('/tasks', async (req, res) => {
   const senderIp = req.ip ?? '0.0.0.0';
   try {
     const senderKey = redisKey(ctx, 'rate', 'sender', senderIp);
-    const senderCount = await redis.incr(senderKey);
-    if (senderCount === 1) await redis.expire(senderKey, 60);
+    const globalKey = redisKey(ctx, 'rate', 'global');
+
+    const pipe = redis.pipeline();
+    pipe.incr(senderKey);
+    pipe.expire(senderKey, 60);
+    pipe.incr(globalKey);
+    pipe.expire(globalKey, 60);
+    const results = await pipe.exec();
+
+    const senderCount = (results?.[0]?.[1] as number) ?? 0;
+    const globalCount = (results?.[2]?.[1] as number) ?? 0;
 
     if (senderCount > RATE_LIMIT_PER_SENDER) {
       res.setHeader('Retry-After', '60');
       return res.status(429).json({ error: 'RATE_LIMITED' });
     }
-
-    const globalKey = redisKey(ctx, 'rate', 'global');
-    const globalCount = await redis.incr(globalKey);
-    if (globalCount === 1) await redis.expire(globalKey, 60);
 
     if (globalCount > RATE_LIMIT_GLOBAL_PER_AGENT) {
       res.setHeader('Retry-After', '60');
@@ -184,8 +178,7 @@ agentRouter.post('/tasks', async (req, res) => {
     // Quarantined tasks still return 202 (gate decision is internal)
     // Dropped tasks return error codes
     if (gateResult.decision === 'dropped') {
-      const UCAN_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_WRONG_AUDIENCE', 'UCAN_INSUFFICIENT_CAPABILITY']);
-      const status = UCAN_CODES.has(gateResult.errorCode!) ? 401 : 403;
+      const status = UCAN_ERROR_CODES.has(gateResult.errorCode!) ? 401 : 403;
       return res.status(status).json({
         error: gateResult.errorCode,
         message: gateResult.reason,
@@ -202,17 +195,18 @@ agentRouter.post('/tasks', async (req, res) => {
 
   // --- Map to Queue ---
   const generatedTaskId = crypto.randomUUID();
+  const parsed = gateResult.parsedTask as { intent?: string; params?: Record<string, unknown>; replyTo?: string; ttl?: string } | undefined;
   const queuedTask: QueuedTask = {
     taskId: generatedTaskId,
     tenantId: ctx.tenantId,
     agentId: ctx.agentId,
-    intent: (req.body as any)?.intent || 'unknown_intent',
-    params: (req.body as any)?.params || {},
-    replyTo: (req.body as any)?.replyTo || 'https://unknown.reply.domain.com/webhook',
+    intent: parsed?.intent || 'unknown_intent',
+    params: parsed?.params || {},
+    replyTo: parsed?.replyTo || 'https://unknown.reply.domain.com/webhook',
     senderDid: gateResult.senderDid!,
     tier: gateResult.trustTier!,
     queuedAt: new Date().toISOString(),
-    expiresAt: (req.body as any)?.ttl ?? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
+    expiresAt: parsed?.ttl ?? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
   };
 
   try {

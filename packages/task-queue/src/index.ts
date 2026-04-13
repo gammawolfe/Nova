@@ -1,11 +1,10 @@
-import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey, queueName, TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask, TaskState, TaskResult } from '@nova/shared/src/types';
+import { getSharedRedis } from '@nova/shared/src/redis';
 
-const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-export const redis = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+export const redis = getSharedRedis();
 
 // Cache Queue instances per queue name to avoid per-request connection churn
 const queueCache = new Map<string, Queue>();
@@ -89,8 +88,7 @@ export async function setTaskState(
   if (state.statusMessage) flat.statusMessage = state.statusMessage;
   if (state.estimatedResponseBy) flat.estimatedResponseBy = state.estimatedResponseBy;
 
-  await redis.hset(key, flat);
-  await redis.expire(key, TASK_TTL_SECONDS);
+  await redis.pipeline().hset(key, flat).expire(key, TASK_TTL_SECONDS).exec();
 }
 
 /**
@@ -145,16 +143,16 @@ export async function publishTaskEvent(
   // Get next event ID using INCR for monotonically increasing IDs
   const eventIdKey = redisKey(ctx, 'task-events-seq', taskId);
   const eventId = await redis.incr(eventIdKey);
-  await redis.expire(eventIdKey, TASK_TTL_SECONDS);
 
   const payload = JSON.stringify({ id: eventId, type: event.type, data: event.data });
 
-  // Append to sorted set for replay (scored by eventId)
-  await redis.zadd(logKey, eventId, payload);
-  await redis.expire(logKey, TASK_TTL_SECONDS);
-
-  // Publish to channel for live SSE consumers
-  await redis.publish(channelKey, payload);
+  // Pipeline: expire seq key, append to sorted set, expire log, publish — all in one round-trip
+  await redis.pipeline()
+    .expire(eventIdKey, TASK_TTL_SECONDS)
+    .zadd(logKey, eventId, payload)
+    .expire(logKey, TASK_TTL_SECONDS)
+    .publish(channelKey, payload)
+    .exec();
 }
 
 // --- Task Status Updates ---

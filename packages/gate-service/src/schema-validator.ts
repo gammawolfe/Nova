@@ -1,4 +1,4 @@
-import fs from 'fs';
+import fsp from 'fs/promises';
 import { tenantDataPath } from '@nova/shared/src/tenant';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { TaskRequestSchema } from '@nova/shared/src/schemas';
@@ -35,7 +35,7 @@ interface AgentConfig {
  *
  * Schema failures → DROP (not quarantine) — these are sender bugs.
  */
-export function validateSchema(rawTask: unknown, ctx: TenantContext): ValidationResult {
+export async function validateSchema(rawTask: unknown, ctx: TenantContext): Promise<ValidationResult> {
   // 1. Top-level Zod validation
   const topLevel = TaskRequestSchema.safeParse(rawTask);
   if (!topLevel.success) {
@@ -54,9 +54,8 @@ export function validateSchema(rawTask: unknown, ctx: TenantContext): Validation
   const configPath = tenantDataPath(ctx, 'agent-config.json');
   let agentConfig: AgentConfig;
   try {
-    agentConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')) as AgentConfig;
+    agentConfig = JSON.parse(await fsp.readFile(configPath, 'utf8')) as AgentConfig;
   } catch {
-    // Cannot read config — fail safe
     return { valid: false, reason: 'schema_invalid:agent_config_unavailable' };
   }
 

@@ -1,13 +1,9 @@
 import { Router } from 'express';
-import { TenantContext } from '@nova/shared/src/tenant';
 import { PaginationSchema } from '@nova/shared/src/admin-schemas';
 import * as dlService from '../services/dead-letter-service';
+import { ctx } from '../middleware/ctx';
 
 export const deadLetterRouter = Router({ mergeParams: true });
-
-function ctx(req: any): TenantContext {
-  return { tenantId: req.params.tenantId, agentId: req.params.agentId };
-}
 
 deadLetterRouter.get('/', async (req, res, next) => {
   try {
