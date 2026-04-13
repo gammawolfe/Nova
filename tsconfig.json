@@ -6,6 +6,7 @@
     { "path": "packages/gate-service" },
     { "path": "packages/task-queue" },
     { "path": "packages/agent-connector" },
-    { "path": "packages/admin-api" }
+    { "path": "packages/admin-api" },
+    { "path": "packages/operator-mock" }
   ]
 }

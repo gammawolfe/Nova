@@ -42,7 +42,11 @@ export interface AgentConfig {
   capabilities: { streaming: boolean; pushNotifications: boolean; stateTransitionHistory: boolean };
   authentication: { schemes: string[]; ucapabilityPrefix: string };
   createdAt: string;
-  status: 'active' | 'deregistered';
+  status: 'pending' | 'active' | 'deregistered';
+  // Self-registration fields (optional for backwards compat with pre-existing agents)
+  did?: string | undefined;
+  publicKey?: string | undefined;
+  replyUrl?: string | undefined;
 }
 
 function agentConfigPath(ctx: TenantContext): string {
@@ -87,6 +91,87 @@ export async function createAgent(tenantId: string, data: {
   return config;
 }
 
+/**
+ * Create an agent in "pending" status via self-registration.
+ * The agent is indexed in Redis (discoverable) but the gate pipeline
+ * will quarantine its tasks until admin approval (DID not in trust registry).
+ */
+export async function createAgentPending(tenantId: string, data: {
+  agentId: string; name: string; description?: string; operatorUrl?: string;
+  skills: AgentConfig['skills']; did: string; publicKey: string; replyUrl: string;
+}): Promise<AgentConfig> {
+  validateId(tenantId, 'tenantId');
+  validateId(data.agentId, 'agentId');
+  const ctx: TenantContext = { tenantId, agentId: data.agentId };
+  const agentDir = tenantDataPath(ctx);
+
+  await Promise.all(
+    ['trust-registry', 'quarantine', 'dead-letter', 'confirm-queue'].map(sub =>
+      fsp.mkdir(path.join(agentDir, sub), { recursive: true })
+    )
+  );
+
+  const config: AgentConfig = {
+    agentId: data.agentId,
+    tenantId,
+    name: data.name,
+    description: data.description,
+    version: '1.0.0',
+    operatorUrl: data.operatorUrl,
+    skills: data.skills,
+    highPrivilegeSkills: [],
+    confirmTimeouts: {},
+    capabilities: { streaming: true, pushNotifications: false, stateTransitionHistory: true },
+    authentication: { schemes: ['ucan'], ucapabilityPrefix: `nova:${tenantId}:${data.agentId}` },
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+    did: data.did,
+    publicKey: data.publicKey,
+    replyUrl: data.replyUrl,
+  };
+
+  await writeAtomicallyAsync(agentConfigPath(ctx), config);
+  await getRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
+  return config;
+}
+
+/**
+ * Approve a pending agent: flip status to active, return config for approval caller.
+ */
+export async function approveAgent(tenantId: string, agentId: string, notes?: string): Promise<AgentConfig> {
+  validateId(tenantId, 'tenantId');
+  validateId(agentId, 'agentId');
+  const agent = await getAgent(tenantId, agentId);
+  if (!agent) throw Object.assign(new Error(`Agent ${agentId} not found`), { status: 404 });
+  if (agent.status === 'active') return agent;
+  if (agent.status === 'deregistered') {
+    throw Object.assign(new Error(`Agent ${agentId} is deregistered`), { status: 400 });
+  }
+
+  agent.status = 'active';
+  const ctx: TenantContext = { tenantId, agentId };
+  await writeAtomicallyAsync(agentConfigPath(ctx), agent);
+
+  // Ensure agent remains in the Redis index (should already be there, but guard against edge cases)
+  await getRedis().set(`nova:agent-index:${agentId}`, tenantId);
+  return agent;
+}
+
+/**
+ * Reject a pending agent: set status to deregistered, remove from Redis index.
+ */
+export async function rejectAgent(tenantId: string, agentId: string): Promise<boolean> {
+  validateId(tenantId, 'tenantId');
+  validateId(agentId, 'agentId');
+  const agent = await getAgent(tenantId, agentId);
+  if (!agent || agent.status !== 'pending') return false;
+  agent.status = 'deregistered';
+  const ctx: TenantContext = { tenantId, agentId };
+  await writeAtomicallyAsync(agentConfigPath(ctx), agent);
+  await getRedis().del(`nova:agent-index:${agentId}`);
+  return true;
+}
+
 export async function listAgents(tenantId: string): Promise<AgentConfig[]> {
   validateId(tenantId, 'tenantId');
   const agentsDir = path.join(DATA_ROOT, 'tenants', tenantId, 'agents');
@@ -114,6 +199,23 @@ export async function getAgent(tenantId: string, agentId: string): Promise<Agent
     const raw = await fsp.readFile(agentConfigPath({ tenantId, agentId }), 'utf8');
     return JSON.parse(raw);
   } catch { return null; }
+}
+
+/**
+ * List all active agents across all tenants (for discovery).
+ */
+export async function listAllActiveAgents(): Promise<AgentConfig[]> {
+  const tenantsDir = path.join(DATA_ROOT, 'tenants');
+  let tenantDirs: string[];
+  try { tenantDirs = await fsp.readdir(tenantsDir); }
+  catch { return []; }
+
+  const allAgents = await Promise.all(
+    tenantDirs
+      .filter(d => ID_RE.test(d))
+      .map(async (tid) => listAgents(tid))
+  );
+  return allAgents.flat().filter(a => a.status === 'active');
 }
 
 export async function updateAgent(tenantId: string, agentId: string, updates: Partial<AgentConfig>): Promise<AgentConfig | null> {

@@ -105,3 +105,51 @@ export const AuditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
+
+// ── Self-Registration ───────────────────────────────────────────────────────
+
+export const SelfRegisterSchema = z.object({
+  agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
+  tenantSlug: z.string().regex(/^[a-z0-9-]+$/).min(1).max(64),
+  tenantName: z.string().min(1).max(200),
+  name: z.string().min(1).max(200),
+  description: z.string().max(1000).optional(),
+  publicKey: z.string().min(1),           // Ed25519 public key (base64)
+  did: z.string().startsWith('did:'),      // did:key:z6Mk...
+  operatorUrl: z.string().url().optional(),
+  skills: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().min(1),
+    tags: z.array(z.string()).optional(),
+    inputSchema: z.record(z.unknown()).optional(),
+    outputSchema: z.record(z.unknown()).optional(),
+  })).min(1),
+  replyUrl: z.string().url(),              // Where to send approval notification
+});
+
+// ── Agent Approval ──────────────────────────────────────────────────────────
+
+export const AgentApprovalSchema = z.object({
+  trustTier: z.number().int().min(1).max(3).default(1),
+  ucanExpiryDays: z.number().int().min(1).max(365).default(30),
+  allowedSkills: z.array(z.string()).min(1).default(['*']),
+  notes: z.string().max(500).optional(),
+});
+
+// ── UCAN Renewal (Proof-of-Possession) ──────────────────────────────────────
+
+export const UcanRenewSchema = z.object({
+  did: z.string().startsWith('did:'),
+  agentId: z.string().min(1).max(64),
+  nonce: z.string().min(1),
+  signature: z.string().min(1),
+});
+
+// ── Discovery Query ────────────────────────────────────────────────────────
+
+export const DiscoverQuerySchema = z.object({
+  status: z.enum(['active', 'pending', 'all']).default('active'),
+  agentId: z.string().min(1).max(64).optional(),
+  skills: z.string().optional(),
+});

@@ -84,7 +84,13 @@ export const AuditEventSchema = z.object({
     'agent_output_schema_violation',
     'quarantine_full',
     'redis_unavailable',
-    'key_rotation_detected'
+    'key_rotation_detected',
+    'agent_registered',
+    'agent_approved',
+    'agent_rejected',
+    'ucan_renewed',
+    'ucan_renewal_failed',
+    'agent_discovered'
   ]),
   taskId: z.string().uuid().optional(),
   senderDid: z.string().optional(),

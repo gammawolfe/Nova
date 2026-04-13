@@ -1,0 +1,9 @@
+New audit event types to add:
+- agent_registered (when /register POST succeeds)
+- agent_approved (when admin approves a pending agent)
+- agent_rejected (when admin rejects a pending agent)
+- agent_deregistered (when an agent is deregistered)
+- ucan_renewed (when a UCAN is renewed via proof-of-possession)
+- ucan_renewal_failed (when renewal fails)
+- agent_discovered (when an agent queries discovery)
+- tenant_auto_created (when a tenant is auto-created during self-registration)

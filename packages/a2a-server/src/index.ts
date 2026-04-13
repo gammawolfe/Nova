@@ -10,6 +10,7 @@ import { QueuedTask, TaskState } from '@nova/shared/src/types';
 import { AgentCardSchema } from '@nova/shared/src/schemas';
 import { tenantDataPath, redisKey, DATA_ROOT } from '@nova/shared/src/tenant';
 import { tenantRouter } from './tenant-router';
+import { registerRouter } from './routes/register';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
 import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/health';
@@ -263,6 +264,9 @@ agentRouter.post('/tasks', async (req, res) => {
     return res.status(503).json({ error: 'INTERNAL_ERROR', message: 'Task queue backend temporarily unavailable' });
   }
 });
+
+// Self-registration endpoint (public, no auth, outside agent routing)
+app.use('/register', registerRouter);
 
 app.use('/agents/:agentId', agentRouter);
 

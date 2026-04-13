@@ -3,6 +3,8 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
+import { verifyAndConsumeNonce } from './nonce-service';
+import * as agentService from './agent-service';
 
 interface UcanMetadata {
   cid: string;
@@ -116,4 +118,80 @@ export async function listUcans(tenantId: string, expiringWithin?: string): Prom
     })
   );
   return all.filter((m): m is UcanMetadata => m !== null);
+}
+
+// ── Proof-of-Possession UCAN Renewal ────────────────────────────────────────
+
+
+/**
+ * Renew a UCAN via proof-of-possession:
+ * 1. Verify and consume the nonce
+ * 2. Verify the Ed25519 signature of the nonce using the agent's stored public key
+ * 3. Verify the agent is active and the DID matches
+ * 4. Issue a fresh UCAN
+ */
+export async function renewUcan(
+  tenantId: string,
+  data: { did: string; agentId: string; nonce: string; signature: string }
+): Promise<{ jwt: string; cid: string; expiresAt: string }> {
+  // Step 1: Verify and consume the nonce
+  const nonceCheck = verifyAndConsumeNonce(data.nonce, data.did, data.agentId);
+  if (!nonceCheck.valid) {
+    const err: any = new Error(`Nonce verification failed: ${nonceCheck.reason}`);
+    if (nonceCheck.reason === 'nonce_expired') err.status = 410;
+    else if (['nonce_did_mismatch', 'nonce_agent_mismatch'].includes(nonceCheck.reason!)) err.status = 401;
+    else err.status = 400;
+    throw err;
+  }
+
+  // Step 2: Verify the agent exists and is active
+  const agent = await agentService.getAgent(tenantId, data.agentId);
+  if (!agent) {
+    throw Object.assign(new Error(`Agent ${data.agentId} not found`), { status: 404 });
+  }
+  if (agent.status !== 'active') {
+    throw Object.assign(new Error(`Agent ${data.agentId} is not active (status: ${agent.status})`), { status: 403 });
+  }
+
+  // Step 3: Verify the DID matches the registered DID
+  if (agent.did !== data.did) {
+    throw Object.assign(new Error('DID does not match registered agent DID'), { status: 401 });
+  }
+
+  // Step 4: Proof-of-possession — verify Ed25519 signature
+  if (!agent.publicKey) {
+    throw Object.assign(new Error('Agent has no registered public key'), { status: 403 });
+  }
+
+  try {
+    // Ed25519 public key stored as raw bytes — wrap in SPKI DER to import
+    const rawKeyBytes = Buffer.from(agent.publicKey, 'base64');
+    // SPKI DER prefix for Ed25519: 30 2A 30 05 06 03 2B 65 70 03 21 00 (12 bytes)
+    const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+    const spkiDer = Buffer.concat([spkiPrefix, rawKeyBytes]);
+    const publicKey = crypto.createPublicKey({
+      key: spkiDer,
+      format: 'der',
+      type: 'spki',
+    });
+    const valid = crypto.verify(
+      null,
+      Buffer.from(data.nonce, 'utf8'),
+      publicKey,
+      Buffer.from(data.signature, 'base64url')
+    );
+    if (!valid) {
+      throw Object.assign(new Error('Signature verification failed — invalid proof of possession'), { status: 401 });
+    }
+  } catch (err: any) {
+    if (err.status) throw err;
+    throw Object.assign(new Error(`Signature verification failed: ${err.message}`), { status: 401 });
+  }
+
+  // Step 5: Issue a new UCAN — capability scoped to this agent's namespace
+  return issueUcan(tenantId, {
+    subjectDid: data.did,
+    capabilities: [`nova:${tenantId}:${data.agentId}`],
+    expiryDays: 30, // Default for renewals — can be overridden later
+  });
 }
