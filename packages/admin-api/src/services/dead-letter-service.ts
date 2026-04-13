@@ -1,21 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-
-interface DeadLetterEntry {
-  id: string;
-  tenantId: string;
-  agentId: string;
-  taskId: string;
-  targetUrl: string;
-  taskResult: unknown;
-  failureReason: string;
-  lastAttemptAt: string;
-  attemptCount: number;
-  httpStatus?: number;
-  createdAt: string;
-  expiresAt: string;
-}
+import { DeadLetterEntry } from '@nova/shared/src/types';
 
 function dlDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'dead-letter');

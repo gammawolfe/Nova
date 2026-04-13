@@ -1,21 +1,13 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import IORedis from 'ioredis';
 import fsp from 'fs/promises';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { SelfRegisterSchema } from '@nova/shared/src/admin-schemas';
 import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-
-const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-let redis: IORedis | null = null;
-function getRedis(): IORedis {
-  if (!redis) redis = new IORedis(redisUrl, { maxRetriesPerRequest: null });
-  return redis;
-}
-
-const ID_RE = /^[a-z0-9_-]{1,64}$/;
+import { getSharedRedis } from '@nova/shared/src/redis';
+import { ID_RE } from '@nova/shared/src/validation';
 
 export const registerRouter = Router();
 
@@ -34,6 +26,14 @@ function checkRateLimit(ip: string): boolean {
   if (entry.count > RATE_LIMIT) return false;
   return true;
 }
+
+// Periodic cleanup of expired rate-limit entries to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateStore) {
+    if (now > entry.resetAt) rateStore.delete(ip);
+  }
+}, 60_000);
 
 /**
  * Look up a tenant by slug, or create one automatically.
@@ -159,7 +159,7 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     await writeAtomicallyAsync(configPath, config);
 
     // Index in Redis (makes agent discoverable but NOT communicable — gate blocks pending agents)
-    await getRedis().set(`nova:agent-index:${agentId}`, tenantId);
+    await getSharedRedis().set(`nova:agent-index:${agentId}`, tenantId);
 
     const registrationId = `reg_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
 

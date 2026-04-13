@@ -1,4 +1,4 @@
-import fs from 'fs';
+import fsp from 'fs/promises';
 import * as ucans from '@ucans/ucans';
 import { logger } from '@nova/shared/src/logger';
 
@@ -6,7 +6,7 @@ export class KeyManager {
   private static instance: KeyManager;
   private keypair: ucans.EdKeypair | null = null;
   private did: string | null = null;
-  
+
   private constructor() {}
 
   public static getInstance(): KeyManager {
@@ -18,11 +18,7 @@ export class KeyManager {
 
   public async initialize(privateKeyPath: string): Promise<void> {
     try {
-      if (!fs.existsSync(privateKeyPath)) {
-        throw new Error(`Nova private key not found at ${privateKeyPath}`);
-      }
-      
-      const exportedKey = fs.readFileSync(privateKeyPath, 'utf8').trim();
+      const exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
       this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
       if (!this.keypair) throw new Error('KeyManager initialization failed natively');
       this.did = this.keypair.did();

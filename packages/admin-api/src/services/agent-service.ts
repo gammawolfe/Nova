@@ -1,27 +1,11 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import IORedis from 'ioredis';
 import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
+import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
+import { ID_RE, validateId } from '@nova/shared/src/validation';
 
-const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-let redis: IORedis | null = null;
-function getRedis(): IORedis {
-  if (!redis) redis = new IORedis(redisUrl, { maxRetriesPerRequest: null });
-  return redis;
-}
-
-export async function closeRedis(): Promise<void> {
-  if (redis) {
-    await redis.quit();
-    redis = null;
-  }
-}
-
-const ID_RE = /^[a-z0-9_-]{1,64}$/;
-function validateId(id: string, label = 'ID'): void {
-  if (!ID_RE.test(id)) throw Object.assign(new Error(`Invalid ${label} format`), { status: 400 });
-}
+export { closeSharedRedis as closeRedis };
 
 export interface AgentConfig {
   agentId: string;
@@ -87,7 +71,7 @@ export async function createAgent(tenantId: string, data: {
   };
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
-  await getRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
+  await getSharedRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
   return config;
 }
 
@@ -131,7 +115,7 @@ export async function createAgentPending(tenantId: string, data: {
   };
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
-  await getRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
+  await getSharedRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
   return config;
 }
 
@@ -153,7 +137,7 @@ export async function approveAgent(tenantId: string, agentId: string, notes?: st
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
 
   // Ensure agent remains in the Redis index (should already be there, but guard against edge cases)
-  await getRedis().set(`nova:agent-index:${agentId}`, tenantId);
+  await getSharedRedis().set(`nova:agent-index:${agentId}`, tenantId);
   return agent;
 }
 
@@ -168,7 +152,7 @@ export async function rejectAgent(tenantId: string, agentId: string): Promise<bo
   agent.status = 'deregistered';
   const ctx: TenantContext = { tenantId, agentId };
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
-  await getRedis().del(`nova:agent-index:${agentId}`);
+  await getSharedRedis().del(`nova:agent-index:${agentId}`);
   return true;
 }
 
@@ -235,6 +219,6 @@ export async function deleteAgent(tenantId: string, agentId: string): Promise<bo
   if (!config) return false;
   config.status = 'deregistered';
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), config);
-  await getRedis().del(`nova:agent-index:${agentId}`);
+  await getSharedRedis().del(`nova:agent-index:${agentId}`);
   return true;
 }

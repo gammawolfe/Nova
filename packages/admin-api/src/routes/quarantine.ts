@@ -1,15 +1,11 @@
 import { Router } from 'express';
-import { TenantContext } from '@nova/shared/src/tenant';
 import { PaginationSchema } from '@nova/shared/src/admin-schemas';
 import { enqueueWithIdempotency } from '@nova/task-queue/src/index';
 import { QueuedTaskSchema } from '@nova/shared/src/schemas';
 import * as quarantineService from '../services/quarantine-service';
+import { ctx } from '../middleware/ctx';
 
 export const quarantineRouter = Router({ mergeParams: true });
-
-function ctx(req: any): TenantContext {
-  return { tenantId: req.params.tenantId, agentId: req.params.agentId };
-}
 
 quarantineRouter.get('/', async (req, res, next) => {
   try {

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import fs from 'fs';
+import fsp from 'fs/promises';
+import path from 'path';
 import { TenantContext, tenantDataPath, DATA_ROOT } from '@nova/shared/src/tenant';
 import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
 import { TrustTier, ActorRecord } from '@nova/shared/src/types';
@@ -41,13 +42,13 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   const receivedAt = new Date().toISOString();
   const endTimer = gateLatency.startTimer();
 
-  function recordAndReturn(result: GateResult): GateResult {
+  async function recordAndReturn(result: GateResult): Promise<GateResult> {
     endTimer();
     gateDecisions.inc({ decision: result.decision, error_code: result.errorCode ?? 'none' });
     if (result.decision === 'quarantined') {
       try {
         const qDir = tenantDataPath(tenantCtx, 'quarantine');
-        const count = fs.readdirSync(qDir).filter(f => f.endsWith('.json')).length;
+        const count = (await fsp.readdir(qDir)).filter(f => f.endsWith('.json')).length;
         quarantineDepth.set({ tenant_id: tenantCtx.tenantId, agent_id: tenantCtx.agentId }, count);
       } catch { /* dir may not exist */ }
     }
@@ -72,7 +73,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   }
 
   // --- STEP 2: Trust Tier Resolution ---
-  const { tier, actorRecord } = resolveTrustTier(tenantCtx, senderDid);
+  const { tier, actorRecord } = await resolveTrustTier(tenantCtx, senderDid);
 
   if (tier === 0) {
     await auditLog(tenantCtx, {
@@ -82,7 +83,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: 'No trust record found for sender DID',
     });
 
-    const qId = writeQuarantine(tenantCtx, {
+    const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
       rawTask: ctx.body,
@@ -96,7 +97,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       await auditLog(tenantCtx, { event: 'task_quarantined', senderDid: senderDid ?? undefined, reason: 'actor_unknown' });
     }
 
-    return recordAndReturn({
+    return await recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'ACTOR_UNKNOWN',
@@ -123,7 +124,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: 'ucan_missing',
     });
 
-    const qId = writeQuarantine(tenantCtx, {
+    const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
       rawTask: ctx.body,
@@ -131,7 +132,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: 'ucan_missing',
     });
 
-    return recordAndReturn({
+    return await recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'UCAN_MISSING',
@@ -142,7 +143,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
   }
 
-  const agentDid = ctx.agentDid ?? loadAgentDid(tenantCtx);
+  const agentDid = ctx.agentDid ?? await loadAgentDid();
   const ucanResult = await verifyUCAN(ucanJwt, actorRecord!, agentDid, tenantCtx);
 
   if (!ucanResult.valid) {
@@ -153,7 +154,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: ucanResult.reason,
     });
 
-    const qId = writeQuarantine(tenantCtx, {
+    const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
       rawTask: ctx.body,
@@ -170,7 +171,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       ucan_invalid_jwt: 'UCAN_INVALID_JWT',
     };
 
-    return recordAndReturn({
+    return await recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: errorMap[ucanResult.reason ?? ''] ?? 'UCAN_INVALID_JWT',
@@ -188,7 +189,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   });
 
   // --- STEP 4: Schema Validation ---
-  const schemaResult = validateSchema(ctx.body, tenantCtx);
+  const schemaResult = await validateSchema(ctx.body, tenantCtx);
 
   if (!schemaResult.valid) {
     await auditLog(tenantCtx, {
@@ -199,7 +200,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
 
     // Schema failures → DROP (not quarantine) — sender bug
-    return recordAndReturn({
+    return await recordAndReturn({
       passed: false,
       decision: 'dropped',
       errorCode: schemaResult.reason?.startsWith('intent_unknown')
@@ -233,7 +234,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       metadata: { path: patternResult.path },
     });
 
-    const qId = writeQuarantine(tenantCtx, {
+    const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
       rawTask: ctx.body,
@@ -242,7 +243,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
 
     classifierResults.inc({ result: 'quarantine', stage: 'pattern' });
-    return recordAndReturn({
+    return await recordAndReturn({
       passed: false,
       decision: 'quarantined',
       errorCode: 'INJECTION_PATTERN_MATCH',
@@ -282,7 +283,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
         metadata: { indicators: llmResult.indicators },
       });
 
-      const qId = writeQuarantine(tenantCtx, {
+      const qId = await writeQuarantine(tenantCtx, {
         receivedAt,
         senderDid,
         rawTask: ctx.body,
@@ -291,7 +292,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       });
 
       classifierResults.inc({ result: 'quarantine', stage: 'llm' });
-      return recordAndReturn({
+      return await recordAndReturn({
         passed: false,
         decision: 'quarantined',
         errorCode,
@@ -325,7 +326,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   }
 
   // All five layers passed
-  return recordAndReturn({
+  return await recordAndReturn({
     passed: true,
     decision: 'accepted',
     ucanJwt,
@@ -344,33 +345,35 @@ interface TierResolutionResult {
   actorRecord: ActorRecord | null;
 }
 
-function resolveTrustTier(tenantCtx: TenantContext, did: string | null): TierResolutionResult {
+function didHash(did: string): string {
+  return crypto.createHash('sha256').update(did).digest('hex');
+}
+
+async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): Promise<TierResolutionResult> {
   if (!did || !DID_SAFE_PATTERN.test(did)) {
     return { tier: 0, actorRecord: null };
   }
 
-  // Spec: filename = sha256hex(did) + '.json'
-  const sha256Did = crypto.createHash('sha256').update(did).digest('hex');
-  const recordPath = tenantDataPath(tenantCtx, 'trust-registry', sha256Did + '.json');
-
-  if (!fs.existsSync(recordPath)) {
-    return { tier: 0, actorRecord: null };
-  }
+  const recordPath = tenantDataPath(tenantCtx, 'trust-registry', didHash(did) + '.json');
 
   try {
-    const record = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as ActorRecord;
+    const record = JSON.parse(await fsp.readFile(recordPath, 'utf8')) as ActorRecord;
     return { tier: record.tier as TrustTier, actorRecord: record };
   } catch {
     return { tier: 0, actorRecord: null };
   }
 }
 
-/** Read the agent's own DID from the data directory. */
-function loadAgentDid(_ctx: TenantContext): string {
-  const didPath = require('path').join(DATA_ROOT, 'keys', 'nova.did');
+/** Read the agent's own DID from the data directory. Cached after first read. */
+let _cachedAgentDid: string | null = null;
+
+async function loadAgentDid(): Promise<string> {
+  if (_cachedAgentDid) return _cachedAgentDid;
+  const didPath = path.join(DATA_ROOT, 'keys', 'nova.did');
   try {
-    return fs.readFileSync(didPath, 'utf8').trim();
-  } catch {
-    return 'did:key:unknown';
+    _cachedAgentDid = (await fsp.readFile(didPath, 'utf8')).trim();
+    return _cachedAgentDid;
+  } catch (err: any) {
+    throw new Error(`Cannot read agent DID from ${didPath}: ${err.message}`);
   }
 }

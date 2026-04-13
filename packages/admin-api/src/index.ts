@@ -14,6 +14,8 @@ import { auditRouter } from './routes/audit';
 import { systemRouter } from './routes/system';
 import { discoverRouter } from './routes/discover';
 import { UcanRenewSchema } from '@nova/shared/src/admin-schemas';
+import { healthHandler, timedCheck } from '@nova/shared/src/health';
+import { getSharedRedis } from '@nova/shared/src/redis';
 import * as ucanService from './services/ucan-service';
 import * as nonceService from './services/nonce-service';
 
@@ -66,18 +68,14 @@ app.use('/admin/tenants/:tenantId/ucans/renew', ucanRenewRouter);
 // ── Authenticated routes ────────────────────────────────────────────────────
 app.use('/admin', adminAuth);
 
-// Public healthcheck (no auth needed — already handled above)
-app.get('/health', async (_req, res) => {
-  try {
-    const IORedis = (await import('ioredis')).default;
-    const redis = new IORedis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', { maxRetriesPerRequest: null });
-    const pong = await redis.ping();
-    redis.quit();
-    res.status(pong === 'PONG' ? 200 : 503).json({ status: pong === 'PONG' ? 'ok' : 'down', service: 'admin-api' });
-  } catch {
-    res.status(503).json({ status: 'down', service: 'admin-api' });
-  }
-});
+// Lightweight liveness probe (no auth, reuses shared Redis connection)
+const adminStartTime = Date.now();
+app.get('/health', healthHandler('admin-api', adminStartTime, async () => ({
+  redis: await timedCheck(async () => {
+    const pong = await getSharedRedis().ping();
+    if (pong !== 'PONG') throw new Error('Redis ping failed');
+  }),
+})) as any);
 
 // Mount routes per spec Section 5.5
 app.use('/admin/tenants', tenantsRouter);
@@ -100,8 +98,8 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
 async function shutdown(signal: string) {
   logger.info({ signal }, 'Admin API shutting down');
   server.close(async () => {
-    const { closeRedis } = await import('./services/agent-service');
-    await closeRedis();
+    const { closeSharedRedis } = await import('@nova/shared/src/redis');
+    await closeSharedRedis();
     process.exit(0);
   });
 }

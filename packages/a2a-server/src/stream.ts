@@ -2,6 +2,7 @@ import IORedis from 'ioredis';
 import { Router, Request, Response } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey } from '@nova/shared/src/tenant';
+import { TERMINAL_STATUSES } from '@nova/shared/src/types';
 import { redis, getTaskState } from '@nova/task-queue/src/index';
 import { activeSseStreams } from './metrics';
 
@@ -70,7 +71,7 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
       return res.end();
     }
 
-    if (['completed', 'failed', 'canceled'].includes(task.status)) {
+    if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
       sendSSEEvent(res, {
         id: lastEventId + missedCount + 1,
         type: 'result',
@@ -123,7 +124,7 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
       sendSSEEvent(res, event);
 
       const status = (event.data as any)?.status;
-      if (['completed', 'failed', 'canceled'].includes(status)) {
+      if ((TERMINAL_STATUSES as readonly string[]).includes(status)) {
         cleanup();
         res.end();
       }

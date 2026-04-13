@@ -1,13 +1,9 @@
 import { Router } from 'express';
-import { TenantContext } from '@nova/shared/src/tenant';
 import { ConfirmApproveSchema } from '@nova/shared/src/admin-schemas';
 import * as confirmService from '../services/confirmation-service';
+import { ctx } from '../middleware/ctx';
 
 export const confirmationRouter = Router({ mergeParams: true });
-
-function ctx(req: any): TenantContext {
-  return { tenantId: req.params.tenantId, agentId: req.params.agentId };
-}
 
 confirmationRouter.get('/', async (req, res, next) => {
   try {

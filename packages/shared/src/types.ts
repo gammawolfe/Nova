@@ -17,6 +17,41 @@ export type ActorRecord = z.infer<typeof ActorRecordSchema>;
 
 export type TrustTier = 0 | 1 | 2 | 3;
 
+export const TERMINAL_STATUSES = ['completed', 'failed', 'canceled'] as const;
+
+export type GateStep = 'tier' | 'ucan' | 'schema' | 'classifier';
+
+export interface QuarantineEntry {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  receivedAt: string;
+  senderDid: string | null;
+  rawTask: unknown;
+  gateStep: GateStep;
+  reason: string;
+  status: 'pending_review' | 'released' | 'dropped';
+  reviewedAt: string | null;
+  reviewedBy: string | null;
+}
+
+export type DeadLetterFailureReason = 'http_4xx' | 'exhausted_retries';
+
+export interface DeadLetterEntry {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  taskId: string;
+  targetUrl: string;
+  taskResult: TaskResult;
+  failureReason: DeadLetterFailureReason;
+  lastAttemptAt: string;
+  attemptCount: number;
+  httpStatus: number;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface TaskState {
   taskId: string;
   tenantId: string;

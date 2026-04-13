@@ -2,20 +2,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-
-export interface QuarantineEntry {
-  id: string;
-  tenantId: string;
-  agentId: string;
-  receivedAt: string;
-  senderDid: string | null;
-  rawTask: unknown;
-  gateStep: string;
-  reason: string;
-  status: 'pending_review' | 'released' | 'dropped';
-  reviewedAt: string | null;
-  reviewedBy: string | null;
-}
+import { QuarantineEntry } from '@nova/shared/src/types';
 
 function quarantineDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'quarantine');

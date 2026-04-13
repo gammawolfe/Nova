@@ -1,38 +1,23 @@
 import crypto from 'crypto';
-import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
-import IORedis from 'ioredis';
 import { AuditEvent } from './types';
 import { TenantContext } from './tenant';
-
-const AUDIT_STREAM_KEY = 'nova:audit:stream';
-const AUDIT_CONSUMER_GROUP = 'audit-workers';
-
-// Singleton Redis for audit writes — separate connection so audit never blocks task operations
-let _auditRedis: IORedis | null = null;
-
-function getAuditRedis(): IORedis {
-  if (!_auditRedis) {
-    const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-    _auditRedis = new IORedis(url, { maxRetriesPerRequest: null });
-    _auditRedis.on('error', (err) => {
-      // Log to stderr — cannot use audit logger here (circular)
-      process.stderr.write(`[audit] Redis error: ${err.message}\n`);
-    });
-  }
-  return _auditRedis;
-}
+import { getSharedRedis } from './redis';
 
 /**
  * Write an audit event to the Redis stream.
  * Fills eventId and timestamp automatically.
  * Throws if Redis is unavailable (caller must handle — spec says return 503).
  */
+const AUDIT_STREAM_KEY = 'nova:audit:stream';
+const AUDIT_CONSUMER_GROUP = 'audit-workers';
+
 export async function auditLog(
   ctx: TenantContext,
   event: Omit<AuditEvent, 'eventId' | 'timestamp' | 'tenantId' | 'agentId'>
 ): Promise<void> {
-  const redis = getAuditRedis();
+  const redis = getSharedRedis();
 
   const fullEvent: AuditEvent = {
     eventId: crypto.randomUUID(),
@@ -56,7 +41,7 @@ export async function auditLog(
  * Call this once at startup in a long-running process (e.g., agent-connector).
  */
 export async function startAuditLogConsumer(dataRoot: string): Promise<void> {
-  const redis = getAuditRedis();
+  const redis = getSharedRedis();
 
   // Create consumer group if it doesn't exist
   try {
@@ -95,9 +80,9 @@ export async function startAuditLogConsumer(dataRoot: string): Promise<void> {
               const event: AuditEvent = JSON.parse(eventJson);
               const date = event.timestamp.slice(0, 10); // YYYY-MM-DD
               const logDir = path.join(dataRoot, 'audit', event.tenantId);
-              fs.mkdirSync(logDir, { recursive: true });
+              await fsp.mkdir(logDir, { recursive: true });
               const logFile = path.join(logDir, `audit-${date}.jsonl`);
-              fs.appendFileSync(logFile, JSON.stringify(event) + '\n', 'utf8');
+              await fsp.appendFile(logFile, JSON.stringify(event) + '\n', 'utf8');
 
               await redis.xack(AUDIT_STREAM_KEY, AUDIT_CONSUMER_GROUP, msgId);
             } catch (parseErr: any) {

@@ -1,5 +1,4 @@
 import express from 'express';
-import IORedis from 'ioredis';
 import { Worker, Job } from 'bullmq';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
@@ -7,14 +6,15 @@ import { queueName, TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { updateTaskStatus, publishTaskEvent, redis as taskRedis } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
-import { timedCheck, aggregateHealth, HealthResponse } from '@nova/shared/src/health';
+import { timedCheck, healthHandler } from '@nova/shared/src/health';
+import { metricsHandler } from '@nova/shared/src/metrics';
+import { getSharedRedis } from '@nova/shared/src/redis';
 import { deliverToOperator, deliverToReplyTo } from './delivery';
 import { getOperatorUrl } from './config';
 import { connectorRegistry, deliveryOutcomes } from './metrics';
 import { requiresConfirmation, createConfirmRequest, checkConfirmation, findPendingConfirmByTaskId } from './confirmation';
 
-const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-export const redisConnection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+export const redisConnection = getSharedRedis();
 
 /** Milliseconds between confirmation re-check cycles. Default: 5 minutes. */
 const CONFIRM_RECHECK_DELAY_MS = parseInt(process.env.CONFIRM_RECHECK_DELAY_MS || '300000', 10);
@@ -52,8 +52,8 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   // --- Confirmation Gate: non-blocking via BullMQ delayed re-queue ---
   // Crash recovery: if a stalled job is re-queued, it may have a pending confirm
   // file on disk even though confirmId was never persisted to the job data.
-  if (!task.confirmId && requiresConfirmation(taskCtx, task.intent, task.tier)) {
-    const existingConfirmId = findPendingConfirmByTaskId(taskCtx, task.taskId);
+  if (!task.confirmId && await requiresConfirmation(taskCtx, task.intent, task.tier)) {
+    const existingConfirmId = await findPendingConfirmByTaskId(taskCtx, task.taskId);
     if (existingConfirmId) {
       await job.updateData({
         ...job.data,
@@ -67,7 +67,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   }
   if (task.confirmId) {
     // Re-queued job: check current confirmation status (non-blocking)
-    const status = checkConfirmation(taskCtx, task.confirmId);
+    const status = await checkConfirmation(taskCtx, task.confirmId);
 
     if (status === 'pending') {
       // Still waiting — re-delay for another cycle
@@ -98,9 +98,9 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'working' } });
   }
 
-  if (!task.confirmId && requiresConfirmation(taskCtx, task.intent, task.tier)) {
+  if (!task.confirmId && await requiresConfirmation(taskCtx, task.intent, task.tier)) {
     // First encounter: create confirmation request and move job to delayed
-    const confirmReq = createConfirmRequest(taskCtx, task);
+    const confirmReq = await createConfirmRequest(taskCtx, task);
     await updateTaskStatus(taskCtx, task.taskId, 'input_required', {
       statusMessage: `Awaiting confirmation for ${task.intent} (ID: ${confirmReq.id})`,
     });
@@ -121,7 +121,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
     return;
   }
 
-  const operatorUrl = getOperatorUrl(taskCtx);
+  const operatorUrl = await getOperatorUrl(taskCtx);
   if (!operatorUrl) {
     logger.error({ taskCtx }, 'No operator URL configured for agent');
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'No operator URL configured' });
@@ -137,7 +137,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
     // Write to dead letter for 4xx errors
     if (httpStatus >= 400 && httpStatus < 500) {
-      const deadLetterId = writeDeadLetter(taskCtx, {
+      const deadLetterId = await writeDeadLetter(taskCtx, {
         taskId: task.taskId,
         targetUrl: operatorUrl,
         taskResult: {
@@ -228,7 +228,7 @@ const healthApp = express();
 
 // Redis heartbeat every 30s
 const HEARTBEAT_KEY = 'nova:connector:heartbeat';
-setInterval(async () => {
+const heartbeatInterval = setInterval(async () => {
   try {
     await redisConnection.set(HEARTBEAT_KEY, Date.now().toString(), 'EX', 60);
   } catch (err: any) {
@@ -236,35 +236,23 @@ setInterval(async () => {
   }
 }, 30_000);
 
-healthApp.get('/health', (_req, res) => {
-  (async () => {
-    const checks = {
-      redis: await timedCheck(async () => {
-        const pong = await redisConnection.ping();
-        if (pong !== 'PONG') throw new Error('Redis ping failed');
-      }),
-      heartbeat: await timedCheck(async () => {
-        const ts = await redisConnection.get(HEARTBEAT_KEY);
-        if (!ts) return;
-        const age = Date.now() - parseInt(ts, 10);
-        if (age > 60_000) throw new Error(`Heartbeat stale: ${age}ms`);
-      }),
-    };
-    const status = aggregateHealth(checks);
-    const response: HealthResponse = {
-      status, service: 'agent-connector',
-      uptime: Math.floor((Date.now() - connectorStartTime) / 1000), checks,
-    };
-    res.status(status === 'down' ? 503 : 200).json(response);
-  })().catch(() => res.status(503).json({ status: 'down', service: 'agent-connector' }));
-});
+healthApp.get('/health', (healthHandler('agent-connector', connectorStartTime, async () => {
+  const [redis, heartbeat] = await Promise.all([
+    timedCheck(async () => {
+      const pong = await redisConnection.ping();
+      if (pong !== 'PONG') throw new Error('Redis ping failed');
+    }),
+    timedCheck(async () => {
+      const ts = await redisConnection.get(HEARTBEAT_KEY);
+      if (!ts) return;
+      const age = Date.now() - parseInt(ts, 10);
+      if (age > 60_000) throw new Error(`Heartbeat stale: ${age}ms`);
+    }),
+  ]);
+  return { redis, heartbeat };
+})) as any);
 
-healthApp.get('/metrics', (_req, res) => {
-  connectorRegistry.metrics().then(metrics => {
-    res.set('Content-Type', connectorRegistry.contentType);
-    res.end(metrics);
-  }).catch(() => res.status(500).end('Error collecting metrics'));
-});
+healthApp.get('/metrics', metricsHandler(connectorRegistry) as any);
 
 healthApp.listen(Number(HEALTH_PORT), () => {
   logger.info(`Agent Connector health/metrics on port ${HEALTH_PORT}`);
@@ -273,6 +261,7 @@ healthApp.listen(Number(HEALTH_PORT), () => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Shutting down Agent Connector safely...');
+  clearInterval(heartbeatInterval);
   await Promise.all(activeWorkers.map(w => w.close()));
   process.exit(0);
 }

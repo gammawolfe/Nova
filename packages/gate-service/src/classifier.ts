@@ -6,11 +6,11 @@
  */
 
 import crypto from 'crypto';
-import IORedis from 'ioredis';
 import Anthropic from '@anthropic-ai/sdk';
 import { redisKey } from '@nova/shared/src/tenant';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
+import { getSharedRedis } from '@nova/shared/src/redis';
 
 // Re-export shared types for backwards compatibility
 export { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
@@ -75,13 +75,8 @@ const CONFIDENCE_DETECTOR = 0.85;
 const CONFIDENCE_SUSPECTED = 0.60;
 const CLASSIFIER_CACHE_TTL = 600; // 10 minutes
 
-let classifierRedis: IORedis | null = null;
-function getRedis(): IORedis {
-  if (!classifierRedis) {
-    const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-    classifierRedis = new IORedis(url);
-  }
-  return classifierRedis;
+function getRedis() {
+  return getSharedRedis();
 }
 
 let anthropicClient: Anthropic | null = null;
@@ -170,9 +165,6 @@ export async function llmClassify(
  * Returns: 'quarantine' | 'pass'
  */
 export function classifyDecision(result: LLMClassificationResult): 'quarantine' | 'pass' {
-  if (result.injection && result.confidence >= CONFIDENCE_DETECTOR) {
-    return 'quarantine';
-  }
   if (result.injection && result.confidence >= CONFIDENCE_SUSPECTED) {
     return 'quarantine';
   }
