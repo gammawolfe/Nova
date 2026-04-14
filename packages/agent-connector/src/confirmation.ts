@@ -6,6 +6,7 @@ import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { ConfirmRequest, getConfirmTimeout } from '@nova/shared/src/confirmation';
 import { QueuedTask } from '@nova/shared/src/types';
 import { logger } from '@nova/shared/src/logger';
+import { getAgentConfig } from './config';
 
 function confirmDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'confirm-queue');
@@ -15,17 +16,12 @@ function confirmDir(ctx: TenantContext): string {
  * Check if a given intent requires confirmation for a given trust tier.
  */
 export async function requiresConfirmation(ctx: TenantContext, intent: string, tier: number): Promise<boolean> {
-  // Tier 3 (fully trusted) skips confirmation
   if (tier >= 3) return false;
 
-  try {
-    const configPath = tenantDataPath(ctx, 'agent-config.json');
-    const config = JSON.parse(await fsp.readFile(configPath, 'utf8'));
-    const highPrivSkills: string[] = config.highPrivilegeSkills ?? [];
-    return highPrivSkills.includes(intent);
-  } catch {
-    return false;
-  }
+  const config = await getAgentConfig(ctx);
+  if (!config) return false;
+  const highPrivSkills = (config.highPrivilegeSkills as string[]) ?? [];
+  return highPrivSkills.includes(intent);
 }
 
 /**
