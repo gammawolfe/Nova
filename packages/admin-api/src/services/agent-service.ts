@@ -4,7 +4,7 @@ import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared/src/tenan
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
 import { ID_RE, validateId } from '@nova/shared/src/validation';
-import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta } from '@nova/shared/src/agent-index';
+import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta, AGENT_LIFECYCLE_CHANNEL, AgentLifecycleEvent } from '@nova/shared/src/agent-index';
 
 export { closeSharedRedis as closeRedis };
 export type { ParsedAgentMeta };
@@ -33,6 +33,10 @@ export interface AgentConfig {
   did?: string | undefined;
   publicKey?: string | undefined;
   replyUrl?: string | undefined;
+}
+
+async function publishLifecycle(event: AgentLifecycleEvent): Promise<void> {
+  await getSharedRedis().publish(AGENT_LIFECYCLE_CHANNEL, JSON.stringify(event));
 }
 
 function agentConfigPath(ctx: TenantContext): string {
@@ -74,6 +78,7 @@ export async function createAgent(tenantId: string, data: {
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
   await indexAgentMeta(getSharedRedis(), config);
+  await publishLifecycle({ action: 'created', tenantId, agentId: data.agentId, status: 'active' });
   return config;
 }
 
@@ -118,6 +123,7 @@ export async function createAgentPending(tenantId: string, data: {
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
   await indexAgentMeta(getSharedRedis(), config);
+  await publishLifecycle({ action: 'created', tenantId, agentId: data.agentId, status: 'pending' });
   return config;
 }
 
@@ -138,6 +144,7 @@ export async function approveAgent(tenantId: string, agentId: string, notes?: st
   const ctx: TenantContext = { tenantId, agentId };
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
   await indexAgentMeta(getSharedRedis(), agent);
+  await publishLifecycle({ action: 'approved', tenantId, agentId, status: 'active' });
   return agent;
 }
 
@@ -153,6 +160,7 @@ export async function rejectAgent(tenantId: string, agentId: string): Promise<bo
   const ctx: TenantContext = { tenantId, agentId };
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
   await deindexAgent(getSharedRedis(), agentId);
+  await publishLifecycle({ action: 'deregistered', tenantId, agentId, status: 'deregistered' });
   return true;
 }
 
@@ -270,5 +278,6 @@ export async function deleteAgent(tenantId: string, agentId: string): Promise<bo
   config.status = 'deregistered';
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), config);
   await deindexAgent(getSharedRedis(), agentId);
+  await publishLifecycle({ action: 'deregistered', tenantId, agentId, status: 'deregistered' });
   return true;
 }
