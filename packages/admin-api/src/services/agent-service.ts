@@ -4,8 +4,10 @@ import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared/src/tenan
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
 import { ID_RE, validateId } from '@nova/shared/src/validation';
+import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta } from '@nova/shared/src/agent-index';
 
 export { closeSharedRedis as closeRedis };
+export type { ParsedAgentMeta };
 
 export interface AgentConfig {
   agentId: string;
@@ -71,7 +73,7 @@ export async function createAgent(tenantId: string, data: {
   };
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
-  await getSharedRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
+  await indexAgentMeta(getSharedRedis(), config);
   return config;
 }
 
@@ -115,7 +117,7 @@ export async function createAgentPending(tenantId: string, data: {
   };
 
   await writeAtomicallyAsync(agentConfigPath(ctx), config);
-  await getSharedRedis().set(`nova:agent-index:${data.agentId}`, tenantId);
+  await indexAgentMeta(getSharedRedis(), config);
   return config;
 }
 
@@ -135,9 +137,7 @@ export async function approveAgent(tenantId: string, agentId: string, notes?: st
   agent.status = 'active';
   const ctx: TenantContext = { tenantId, agentId };
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
-
-  // Ensure agent remains in the Redis index (should already be there, but guard against edge cases)
-  await getSharedRedis().set(`nova:agent-index:${agentId}`, tenantId);
+  await indexAgentMeta(getSharedRedis(), agent);
   return agent;
 }
 
@@ -152,7 +152,7 @@ export async function rejectAgent(tenantId: string, agentId: string): Promise<bo
   agent.status = 'deregistered';
   const ctx: TenantContext = { tenantId, agentId };
   await writeAtomicallyAsync(agentConfigPath(ctx), agent);
-  await getSharedRedis().del(`nova:agent-index:${agentId}`);
+  await deindexAgent(getSharedRedis(), agentId);
   return true;
 }
 
@@ -186,9 +186,15 @@ export async function getAgent(tenantId: string, agentId: string): Promise<Agent
 }
 
 /**
- * List all active agents across all tenants (for discovery).
+ * List all active agents from Redis discovery index.
+ * Falls back to filesystem scan and populates Redis if the index is empty (migration).
  */
-export async function listAllActiveAgents(): Promise<AgentConfig[]> {
+export async function listAllActiveAgents(): Promise<ParsedAgentMeta[]> {
+  const redis = getSharedRedis();
+  const fromRedis = await listActiveAgentMeta(redis);
+  if (fromRedis.length > 0) return fromRedis;
+
+  // Migration fallback: scan filesystem and populate Redis
   const tenantsDir = path.join(DATA_ROOT, 'tenants');
   let tenantDirs: string[];
   try { tenantDirs = await fsp.readdir(tenantsDir); }
@@ -199,7 +205,50 @@ export async function listAllActiveAgents(): Promise<AgentConfig[]> {
       .filter(d => ID_RE.test(d))
       .map(async (tid) => listAgents(tid))
   );
-  return allAgents.flat().filter(a => a.status === 'active');
+  const active = allAgents.flat().filter(a => a.status === 'active');
+
+  // Populate Redis as side-effect so future calls skip the filesystem
+  await Promise.all(active.map(a => indexAgentMeta(redis, a)));
+
+  return active.map(a => ({
+    agentId: a.agentId,
+    tenantId: a.tenantId,
+    name: a.name,
+    description: a.description ?? '',
+    status: a.status,
+    skills: a.skills.map(s => ({ id: s.id, name: s.name, description: s.description, tags: s.tags })),
+    capabilities: a.capabilities,
+  }));
+}
+
+/**
+ * Get a single active agent's discovery metadata from Redis. O(1).
+ * Falls back to filesystem if not in Redis.
+ */
+export async function getActiveAgent(agentId: string): Promise<ParsedAgentMeta | null> {
+  const redis = getSharedRedis();
+  const meta = await getAgentMeta(redis, agentId);
+  if (meta && meta.status === 'active') return meta;
+
+  // Fallback: check agent-index for tenantId, then read config from disk
+  const tenantId = await redis.get(`nova:agent-index:${agentId}`);
+  if (!tenantId) return null;
+
+  const agent = await getAgent(tenantId, agentId);
+  if (!agent || agent.status !== 'active') return null;
+
+  // Populate Redis for future calls
+  await indexAgentMeta(redis, agent);
+
+  return {
+    agentId: agent.agentId,
+    tenantId: agent.tenantId,
+    name: agent.name,
+    description: agent.description ?? '',
+    status: agent.status,
+    skills: agent.skills.map(s => ({ id: s.id, name: s.name, description: s.description, tags: s.tags })),
+    capabilities: agent.capabilities,
+  };
 }
 
 export async function updateAgent(tenantId: string, agentId: string, updates: Partial<AgentConfig>): Promise<AgentConfig | null> {
@@ -209,6 +258,7 @@ export async function updateAgent(tenantId: string, agentId: string, updates: Pa
   if (!config) return null;
   const updated = { ...config, ...updates };
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), updated);
+  await indexAgentMeta(getSharedRedis(), updated);
   return updated;
 }
 
@@ -219,6 +269,6 @@ export async function deleteAgent(tenantId: string, agentId: string): Promise<bo
   if (!config) return false;
   config.status = 'deregistered';
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), config);
-  await getSharedRedis().del(`nova:agent-index:${agentId}`);
+  await deindexAgent(getSharedRedis(), agentId);
   return true;
 }
