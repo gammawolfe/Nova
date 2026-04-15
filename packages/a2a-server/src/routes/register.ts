@@ -8,6 +8,7 @@ import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { ID_RE } from '@nova/shared/src/validation';
+import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
 
 export const registerRouter = Router();
 
@@ -159,7 +160,11 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     await writeAtomicallyAsync(configPath, config);
 
     // Index in Redis (makes agent discoverable but NOT communicable — gate blocks pending agents)
-    await getSharedRedis().set(`nova:agent-index:${agentId}`, tenantId);
+    const redis = getSharedRedis();
+    await indexAgentMeta(redis, config);
+    await redis.publish(AGENT_LIFECYCLE_CHANNEL, JSON.stringify({
+      action: 'created', tenantId, agentId, status: 'pending',
+    }));
 
     const registrationId = `reg_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
 

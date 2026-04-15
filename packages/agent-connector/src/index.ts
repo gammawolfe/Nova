@@ -1,10 +1,10 @@
 import express from 'express';
-import { Worker, Job } from 'bullmq';
+import { Job } from 'bullmq';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
-import { queueName, TenantContext } from '@nova/shared/src/tenant';
+import { TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
-import { updateTaskStatus, publishTaskEvent, redis as taskRedis } from '@nova/task-queue/src/index';
+import { updateTaskStatus, publishTaskEvent } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
@@ -13,19 +13,12 @@ import { deliverToOperator, deliverToReplyTo } from './delivery';
 import { getOperatorUrl } from './config';
 import { connectorRegistry, deliveryOutcomes } from './metrics';
 import { requiresConfirmation, createConfirmRequest, checkConfirmation, findPendingConfirmByTaskId } from './confirmation';
+import { initWorkerManager, shutdownAllWorkers } from './worker-manager';
 
 export const redisConnection = getSharedRedis();
 
 /** Milliseconds between confirmation re-check cycles. Default: 5 minutes. */
 const CONFIRM_RECHECK_DELAY_MS = parseInt(process.env.CONFIRM_RECHECK_DELAY_MS || '300000', 10);
-
-const activeWorkers: Worker[] = [];
-
-// Static context for M1/M2 — M4 will discover tenants dynamically
-const MOCK_CTX: TenantContext = {
-  tenantId: 'tenant_seed_123',
-  agentId: 'agent_aria',
-};
 
 async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   const task = job.data as QueuedTask;
@@ -196,28 +189,8 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
   }
 }
 
-async function startWorker() {
-  const targetedQueue = queueName(MOCK_CTX, 2);
-
-  const worker = new Worker(
-    targetedQueue,
-    async (job: Job) => processTask(job, MOCK_CTX),
-    { connection: redisConnection, concurrency: 5 }
-  );
-
-  worker.on('failed', (job, err) => {
-    logger.error({ jobId: job?.id, err }, 'Worker job failed');
-  });
-
-  worker.on('ready', () => {
-    logger.info(`Agent Connector Worker listening on: ${targetedQueue}`);
-  });
-
-  activeWorkers.push(worker);
-}
-
-startWorker().catch(err => {
-  logger.error({ err }, 'Worker failed to boot');
+initWorkerManager(processTask).catch(err => {
+  logger.error({ err }, 'Worker manager failed to boot');
   process.exit(1);
 });
 
@@ -262,7 +235,7 @@ healthApp.listen(Number(HEALTH_PORT), () => {
 async function shutdown() {
   logger.info('Shutting down Agent Connector safely...');
   clearInterval(heartbeatInterval);
-  await Promise.all(activeWorkers.map(w => w.close()));
+  await shutdownAllWorkers();
   process.exit(0);
 }
 

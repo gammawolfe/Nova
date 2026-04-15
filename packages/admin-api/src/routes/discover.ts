@@ -1,8 +1,26 @@
 import { Router, Request, Response } from 'express';
 import * as agentService from '../services/agent-service';
 import { DiscoverQuerySchema } from '@nova/shared/src/admin-schemas';
+import { ParsedAgentMeta } from '@nova/shared/src/agent-index';
 
 export const discoverRouter = Router();
+
+function toPublicAgent(a: ParsedAgentMeta, baseUrl: string) {
+  return {
+    agentId: a.agentId,
+    name: a.name,
+    description: a.description,
+    url: `${baseUrl}/agents/${a.agentId}`,
+    skills: a.skills.map(s => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      tags: s.tags,
+    })),
+    status: a.status,
+    capabilities: a.capabilities,
+  };
+}
 
 /**
  * GET /discover — public agent discovery
@@ -25,14 +43,6 @@ discoverRouter.get('/', async (req: Request, res: Response) => {
     const query = queryParse.data;
     let agents = await agentService.listAllActiveAgents();
 
-    // Apply filters
-    if (query.status !== 'active') {
-      // For 'pending' or 'all', we need to scan pending agents too
-      // listAllActiveAgents only returns active — extend if needed
-      // For now, 'pending' returns empty and 'all' returns same as 'active'
-      // This is intentional: pending agents are not discoverable by other agents
-    }
-
     if (query.agentId) {
       agents = agents.filter(a => a.agentId === query.agentId);
     }
@@ -44,27 +54,8 @@ discoverRouter.get('/', async (req: Request, res: Response) => {
       );
     }
 
-    // Strip sensitive fields before returning
-    const publicAgents = agents.map(a => ({
-      agentId: a.agentId,
-      name: a.name,
-      description: a.description,
-      url: a.authentication ? undefined : `/agents/${a.agentId}`, // URL built from agentId
-      skills: a.skills.map(s => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        tags: s.tags,
-      })),
-      status: a.status,
-      capabilities: a.capabilities,
-    }));
-
-    // Build proper URLs
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    for (const agent of publicAgents) {
-      agent.url = `${baseUrl}/agents/${agent.agentId}`;
-    }
+    const publicAgents = agents.map(a => toPublicAgent(a, baseUrl));
 
     res.json({
       agents: publicAgents,
@@ -76,33 +67,20 @@ discoverRouter.get('/', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /discover/:agentId — lookup specific agent
+ * GET /discover/:agentId — lookup specific agent (O(1) Redis call)
  */
 discoverRouter.get('/:agentId', async (req: Request, res: Response) => {
   try {
-    const { agentId } = req.params;
-    const agents = await agentService.listAllActiveAgents();
-    const agent = agents.find(a => a.agentId === agentId);
+    const agentId = req.params['agentId'];
+    if (!agentId) return res.status(400).json({ error: 'MISSING_AGENT_ID' });
+    const agent = await agentService.getActiveAgent(agentId);
 
     if (!agent) {
       return res.status(404).json({ error: 'AGENT_NOT_FOUND' });
     }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    res.json({
-      agentId: agent.agentId,
-      name: agent.name,
-      description: agent.description,
-      url: `${baseUrl}/agents/${agent.agentId}`,
-      skills: agent.skills.map(s => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        tags: s.tags,
-      })),
-      status: agent.status,
-      capabilities: agent.capabilities,
-    });
+    res.json(toPublicAgent(agent, baseUrl));
   } catch (err: any) {
     res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
   }
