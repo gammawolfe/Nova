@@ -109,9 +109,8 @@ export const AuditQuerySchema = z.object({
 // ── Self-Registration ───────────────────────────────────────────────────────
 
 export const SelfRegisterSchema = z.object({
+  invite: z.string().min(1),               // Signed JWT from POST /admin/tenants/:tenantId/invites
   agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
-  tenantSlug: z.string().regex(/^[a-z0-9-]+$/).min(1).max(64),
-  tenantName: z.string().min(1).max(200),
   name: z.string().min(1).max(200),
   description: z.string().max(1000).optional(),
   publicKey: z.string().min(1),           // Ed25519 public key (base64)
@@ -125,7 +124,15 @@ export const SelfRegisterSchema = z.object({
     inputSchema: z.record(z.unknown()).optional(),
     outputSchema: z.record(z.unknown()).optional(),
   })).min(1),
-  replyUrl: z.string().url(),              // Where to send approval notification
+  replyUrl: z.string().url().optional(),   // Optional webhook for approval; polling via /register/status works without it
+});
+
+// ── Tenant Invites ──────────────────────────────────────────────────────────
+
+export const InviteCreateSchema = z.object({
+  agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).optional(),
+  ttlSeconds: z.number().int().min(60).max(7 * 24 * 3600).default(24 * 3600),
+  note: z.string().max(200).optional(),
 });
 
 // ── Agent Approval ──────────────────────────────────────────────────────────
@@ -144,6 +151,19 @@ export const UcanRenewSchema = z.object({
   agentId: z.string().min(1).max(64),
   nonce: z.string().min(1),
   signature: z.string().min(1),
+});
+
+// ── UCAN Request — cross-destination (Proof-of-Possession) ──────────────────
+
+export const UcanRequestSchema = z.object({
+  did: z.string().startsWith('did:'),
+  agentId: z.string().min(1).max(64),
+  nonce: z.string().min(1),
+  signature: z.string().min(1),
+  destTenantId: z.string().min(1).max(64),
+  destAgentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
+  skills: z.array(z.string().min(1)).min(1),
+  expiryDays: z.number().int().min(1).max(365).default(30),
 });
 
 // ── Discovery Query ────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@
     { "path": "packages/task-queue" },
     { "path": "packages/agent-connector" },
     { "path": "packages/admin-api" },
-    { "path": "packages/operator-mock" }
+    { "path": "packages/operator-mock" },
+    { "path": "packages/mcp-server" }
   ]
 }

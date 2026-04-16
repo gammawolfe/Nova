@@ -13,7 +13,9 @@ import { confirmationRouter } from './routes/confirmation';
 import { auditRouter } from './routes/audit';
 import { systemRouter } from './routes/system';
 import { discoverRouter } from './routes/discover';
-import { UcanRenewSchema } from '@nova/shared/src/admin-schemas';
+import { invitesRouter } from './routes/invites';
+import { eventsRouter } from './routes/events';
+import { UcanRenewSchema, UcanRequestSchema } from '@nova/shared/src/admin-schemas';
 import { healthHandler, timedCheck } from '@nova/shared/src/health';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import * as ucanService from './services/ucan-service';
@@ -65,6 +67,31 @@ ucanRenewRouter.post('/', async (req, res) => {
 
 app.use('/admin/tenants/:tenantId/ucans/renew', ucanRenewRouter);
 
+// UCAN request — cross-destination issuance via proof-of-possession
+const ucanRequestRouter = Router();
+ucanRequestRouter.post('/', async (req, res) => {
+  try {
+    const parseResult = UcanRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        error: 'REQUEST_INVALID',
+        details: parseResult.error.issues.map((i: any) => ({ field: i.path.join('.'), message: i.message })),
+      });
+    }
+    const { tenantId } = req.params as { tenantId: string };
+    const result = await ucanService.requestUcan(tenantId, parseResult.data);
+    logger.info(
+      { sourceTenant: tenantId, sourceAgent: parseResult.data.agentId, destTenant: parseResult.data.destTenantId, destAgent: parseResult.data.destAgentId, cid: result.cid },
+      'Cross-destination UCAN issued',
+    );
+    res.status(200).json(result);
+  } catch (err: any) {
+    const status = err.status ?? 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+app.use('/admin/tenants/:tenantId/ucans/request', ucanRequestRouter);
+
 // ── Authenticated routes ────────────────────────────────────────────────────
 app.use('/admin', adminAuth);
 
@@ -78,7 +105,9 @@ app.get('/health', healthHandler('admin-api', adminStartTime, async () => ({
 })) as any);
 
 // Mount routes per spec Section 5.5
+app.use('/admin/events', eventsRouter);
 app.use('/admin/tenants', tenantsRouter);
+app.use('/admin/tenants/:tenantId/invites', invitesRouter);
 app.use('/admin/tenants/:tenantId/agents', agentsRouter);
 app.use('/admin/tenants/:tenantId/agents/:agentId/trust', trustRouter);
 app.use('/admin/tenants/:tenantId/ucans', ucanRouter);

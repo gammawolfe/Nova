@@ -4,7 +4,13 @@ import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
 import { logger } from '@nova/shared/src/logger';
+import { getSharedRedis } from '@nova/shared/src/redis';
 import { ctx } from '../middleware/ctx';
+
+const UCAN_CLAIM_TTL_SECONDS = 3600;
+function ucanClaimKey(tenantId: string, agentId: string): string {
+  return `nova:ucan-claim:${tenantId}:${agentId}`;
+}
 
 export const agentsRouter = Router({ mergeParams: true });
 
@@ -82,7 +88,22 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
       expiryDays: data.ucanExpiryDays,
     });
 
-    // Fire webhook notification to agent's replyUrl
+    // Stash UCAN for one-time claim via GET /register/status (for stdio MCP clients without a webhook listener)
+    const ucanRenewalUrl = `/admin/tenants/${tenantId}/ucans/renew`;
+    await getSharedRedis().set(
+      ucanClaimKey(tenantId, agentId),
+      JSON.stringify({
+        jwt: ucanResult.jwt,
+        cid: ucanResult.cid,
+        expiresAt: ucanResult.expiresAt,
+        trustTier: data.trustTier,
+        ucanRenewalUrl,
+      }),
+      'EX',
+      UCAN_CLAIM_TTL_SECONDS,
+    );
+
+    // Fire webhook notification to agent's replyUrl (still supported for agents that listen)
     if (agent.replyUrl) {
       try {
         await fetch(agent.replyUrl, {
@@ -95,7 +116,7 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
             trustTier: data.trustTier,
             ucan: ucanResult.jwt,
             ucanExpiresAt: ucanResult.expiresAt,
-            ucanRenewalUrl: `http://localhost:${process.env.PORT || 3005}/admin/tenants/${tenantId}/ucans/renew`,
+            ucanRenewalUrl,
           }),
           signal: AbortSignal.timeout(10_000),
         });

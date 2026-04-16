@@ -195,3 +195,73 @@ export async function renewUcan(
     expiryDays: 30, // Default for renewals — can be overridden later
   });
 }
+
+// ── Cross-destination UCAN issuance (Proof-of-Possession) ───────────────────
+
+/**
+ * Issue a UCAN scoped to a specific destination tenant + agent + skills.
+ * Same PoP flow as renewUcan: caller proves ownership of its DID by signing
+ * a nonce; we then mint a narrow UCAN targeting the destination.
+ *
+ * Used when agent A in tenant X wants to send tasks to agent Z in tenant Y —
+ * A requests a UCAN with capability `nova:Y:Z:skill:*` instead of carrying a
+ * wildcard credential.
+ */
+export async function requestUcan(
+  sourceTenantId: string,
+  data: {
+    did: string;
+    agentId: string;
+    nonce: string;
+    signature: string;
+    destTenantId: string;
+    destAgentId: string;
+    skills: string[];
+    expiryDays: number;
+  }
+): Promise<{ jwt: string; cid: string; expiresAt: string }> {
+  // PoP: verify nonce + signature against source agent's stored public key
+  const nonceCheck = verifyAndConsumeNonce(data.nonce, data.did, data.agentId);
+  if (!nonceCheck.valid) {
+    const err: any = new Error(`Nonce verification failed: ${nonceCheck.reason}`);
+    if (nonceCheck.reason === 'nonce_expired') err.status = 410;
+    else if (['nonce_did_mismatch', 'nonce_agent_mismatch'].includes(nonceCheck.reason!)) err.status = 401;
+    else err.status = 400;
+    throw err;
+  }
+
+  const agent = await agentService.getAgent(sourceTenantId, data.agentId);
+  if (!agent) throw Object.assign(new Error(`Agent ${data.agentId} not found`), { status: 404 });
+  if (agent.status !== 'active') {
+    throw Object.assign(new Error(`Agent ${data.agentId} is not active`), { status: 403 });
+  }
+  if (agent.did !== data.did) {
+    throw Object.assign(new Error('DID does not match registered agent DID'), { status: 401 });
+  }
+  if (!agent.publicKey) {
+    throw Object.assign(new Error('Agent has no registered public key'), { status: 403 });
+  }
+
+  const rawKeyBytes = Buffer.from(agent.publicKey, 'base64');
+  const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+  const spkiDer = Buffer.concat([spkiPrefix, rawKeyBytes]);
+  const publicKey = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
+  const valid = crypto.verify(
+    null,
+    Buffer.from(data.nonce, 'utf8'),
+    publicKey,
+    Buffer.from(data.signature, 'base64url')
+  );
+  if (!valid) {
+    throw Object.assign(new Error('Signature verification failed — invalid proof of possession'), { status: 401 });
+  }
+
+  const capabilities = data.skills.map(s => `nova:${data.destTenantId}:${data.destAgentId}:skill:${s}`);
+
+  // UCAN is recorded under the destination tenant for audit / revocation by that operator
+  return issueUcan(data.destTenantId, {
+    subjectDid: data.did,
+    capabilities,
+    expiryDays: data.expiryDays,
+  });
+}

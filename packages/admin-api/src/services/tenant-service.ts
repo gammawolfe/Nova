@@ -5,8 +5,14 @@ import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { Tenant, TenantQuotas } from '@nova/shared/src/tenant';
 import { ID_RE, validateId } from '@nova/shared/src/validation';
+import { getSharedRedis } from '@nova/shared/src/redis';
+import { TENANT_LIFECYCLE_CHANNEL, TenantLifecycleEvent } from '@nova/shared/src/agent-index';
 
 const tenantsDir = path.join(DATA_ROOT, 'tenants');
+
+async function publishTenantLifecycle(event: TenantLifecycleEvent): Promise<void> {
+  await getSharedRedis().publish(TENANT_LIFECYCLE_CHANNEL, JSON.stringify(event));
+}
 
 function tenantFile(tenantId: string): string {
   validateId(tenantId, 'tenantId');
@@ -34,6 +40,7 @@ export async function createTenant(data: {
 
   await fsp.mkdir(path.join(tenantsDir, id), { recursive: true });
   await writeAtomicallyAsync(tenantFile(id), tenant);
+  await publishTenantLifecycle({ action: 'created', tenantId: id, slug: tenant.slug, name: tenant.name });
   return tenant;
 }
 
@@ -87,6 +94,7 @@ export async function updateTenant(
     };
   }
   await writeAtomicallyAsync(tenantFile(tenantId), updated);
+  await publishTenantLifecycle({ action: 'updated', tenantId, slug: updated.slug, name: updated.name });
   return updated;
 }
 
@@ -95,5 +103,6 @@ export async function deleteTenant(tenantId: string): Promise<boolean> {
   if (!tenant) return false;
   tenant.status = 'deleted';
   await writeAtomicallyAsync(tenantFile(tenantId), tenant);
+  await publishTenantLifecycle({ action: 'deleted', tenantId, slug: tenant.slug, name: tenant.name });
   return true;
 }

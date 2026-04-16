@@ -7,12 +7,12 @@ import { SelfRegisterSchema } from '@nova/shared/src/admin-schemas';
 import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis } from '@nova/shared/src/redis';
-import { ID_RE } from '@nova/shared/src/validation';
 import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
+import { verifyAndConsumeInvite } from '@nova/shared/src/invites';
+import { validateId } from '@nova/shared/src/validation';
 
 export const registerRouter = Router();
 
-// Simple in-memory rate limiter: IP → count, reset every 60s
 const rateStore = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = parseInt(process.env.RATE_LIMIT_REGISTER || '20', 10);
 
@@ -24,11 +24,9 @@ function checkRateLimit(ip: string): boolean {
     return true;
   }
   entry.count++;
-  if (entry.count > RATE_LIMIT) return false;
-  return true;
+  return entry.count <= RATE_LIMIT;
 }
 
-// Periodic cleanup of expired rate-limit entries to prevent unbounded growth
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of rateStore) {
@@ -37,68 +35,23 @@ setInterval(() => {
 }, 60_000);
 
 /**
- * Look up a tenant by slug, or create one automatically.
- */
-async function getOrCreateTenant(slug: string, name: string): Promise<string> {
-  const tenantsDir = path.join(DATA_ROOT, 'tenants');
-  let dirs: string[];
-  try {
-    dirs = await fsp.readdir(tenantsDir);
-  } catch {
-    dirs = [];
-  }
-
-  for (const d of dirs) {
-    if (!ID_RE.test(d)) continue;
-    try {
-      const raw = await fsp.readFile(path.join(tenantsDir, d, 'tenant.json'), 'utf8');
-      const tenant = JSON.parse(raw);
-      if (tenant.slug === slug) return d;
-    } catch { /* skip */ }
-  }
-
-  // Auto-create tenant
-  const tenantId = `tenant_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-  const tenantDir = path.join(tenantsDir, tenantId);
-  await fsp.mkdir(tenantDir, { recursive: true });
-
-  const tenantData = {
-    id: tenantId,
-    name,
-    slug,
-    createdAt: new Date().toISOString(),
-    status: 'active' as const,
-    plan: 'developer' as const,
-    quotas: {
-      messagesPerDay: 1000,
-      agentsMax: 5,
-      trustedSendersMax: 50,
-    },
-  };
-  await writeAtomicallyAsync(path.join(tenantDir, 'tenant.json'), tenantData);
-
-  logger.info({ tenantId, slug, name }, 'Tenant auto-created during self-registration');
-  return tenantId;
-}
-
-/**
- * POST /register — self-registration endpoint
+ * POST /register — self-registration via signed invite.
  *
- * Creates an agent in 'pending' status. Requires admin approval before activation.
- * Agent is indexed in Redis (so discoverable) but gate pipeline will quarantine
- * tasks because DID is not in trust registry yet.
+ * The operator mints an invite for a tenant (admin-api), shares the token
+ * out-of-band, and the agent presents it here. No tenant auto-creation —
+ * tenants are created explicitly by operators in the admin UI.
+ *
+ * Agent starts in 'pending' status. Admin approval activates it and
+ * stashes a UCAN for pickup via GET /register/status.
  */
 registerRouter.post('/', async (req: Request, res: Response) => {
   const senderIp = req.ip ?? '0.0.0.0';
-  const requestId = crypto.randomUUID();
 
-  // Rate limiting
   if (!checkRateLimit(senderIp)) {
     res.setHeader('Retry-After', '60');
     return res.status(429).json({ error: 'RATE_LIMITED', message: 'Too many registration attempts' });
   }
 
-  // Validate request body
   const parseResult = SelfRegisterSchema.safeParse(req.body);
   if (!parseResult.success) {
     return res.status(400).json({
@@ -108,28 +61,51 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     });
   }
 
-  const { agentId, tenantSlug, tenantName, name, description, publicKey, did, operatorUrl, skills, replyUrl } = parseResult.data;
-  const ctx: TenantContext = { tenantId: '', agentId };
+  const { invite, agentId, name, description, publicKey, did, operatorUrl, skills, replyUrl } = parseResult.data;
+
+  let tenantId: string;
+  let agentIdHint: string | undefined;
+  try {
+    const payload = await verifyAndConsumeInvite(invite);
+    tenantId = payload.tenantId;
+    agentIdHint = payload.agentIdHint;
+  } catch (err: any) {
+    return res.status(err.status ?? 400).json({
+      error: 'INVITE_INVALID',
+      message: err.message,
+    });
+  }
+
+  if (agentIdHint && agentIdHint !== agentId) {
+    return res.status(400).json({
+      error: 'AGENT_ID_MISMATCH',
+      message: `Invite was minted for agentId '${agentIdHint}' but registration requested '${agentId}'`,
+    });
+  }
+
+  const tenantConfigPath = path.join(DATA_ROOT, 'tenants', tenantId, 'tenant.json');
+  try {
+    await fsp.access(tenantConfigPath);
+  } catch {
+    return res.status(404).json({
+      error: 'TENANT_NOT_FOUND',
+      message: `Tenant ${tenantId} no longer exists`,
+    });
+  }
+
+  const ctx: TenantContext = { tenantId, agentId };
 
   try {
-    // Get or create tenant
-    const tenantId = await getOrCreateTenant(tenantSlug, tenantName);
-    ctx.tenantId = tenantId;
-
-    // Check if agent already exists
     const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
     try {
       await fsp.access(configPath);
       return res.status(409).json({
         error: 'AGENT_EXISTS',
-        message: `Agent '${agentId}' is already registered`,
-        statusUrl: `/agents/${agentId}`,
+        message: `Agent '${agentId}' is already registered in tenant '${tenantId}'`,
+        statusUrl: `/register/status/${tenantId}/${agentId}`,
       });
-    } catch {
-      // Agent doesn't exist — safe to create
-    }
+    } catch { /* agent doesn't exist — proceed */ }
 
-    // Create agent directories
     const agentDir = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId);
     await Promise.all(
       ['trust-registry', 'quarantine', 'dead-letter', 'confirm-queue'].map(sub =>
@@ -137,14 +113,13 @@ registerRouter.post('/', async (req: Request, res: Response) => {
       )
     );
 
-    // Create agent config in 'pending' status
     const config = {
       agentId,
       tenantId,
       name,
       description,
       version: '1.0.0',
-      operatorUrl: operatorUrl,
+      operatorUrl,
       skills,
       highPrivilegeSkills: [],
       confirmTimeouts: {},
@@ -159,26 +134,75 @@ registerRouter.post('/', async (req: Request, res: Response) => {
 
     await writeAtomicallyAsync(configPath, config);
 
-    // Index in Redis (makes agent discoverable but NOT communicable — gate blocks pending agents)
     const redis = getSharedRedis();
     await indexAgentMeta(redis, config);
     await redis.publish(AGENT_LIFECYCLE_CHANNEL, JSON.stringify({
       action: 'created', tenantId, agentId, status: 'pending',
     }));
 
-    const registrationId = `reg_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-
     res.status(201).json({
       status: 'pending',
-      registrationId,
       tenantId,
       agentId,
-      pendingReason: 'Requires admin approval before activation',
-      agentUrl: `/agents/${agentId}`,
+      statusUrl: `/register/status/${tenantId}/${agentId}`,
+      pendingReason: 'Awaiting operator approval',
     });
-
   } catch (err: any) {
-    logger.error({ err, agentId }, 'Failed to register agent');
+    logger.error({ err, tenantId, agentId }, 'Failed to register agent');
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Registration failed' });
   }
+});
+
+/**
+ * GET /register/status/:tenantId/:agentId — polling endpoint for pending registrations.
+ *
+ * Returns the current agent status and, on first fetch after approval, the UCAN JWT
+ * (stashed in Redis by the admin-api approve route with 1h TTL). The claim is deleted
+ * on read so a compromised endpoint can't re-read credentials.
+ *
+ * Response shapes:
+ *   { status: 'pending' }
+ *   { status: 'active', ucan: { jwt, expiresAt, trustTier, ucanRenewalUrl } }   // only on first fetch
+ *   { status: 'active' }                                                          // subsequent fetches
+ *   { status: 'deregistered' }
+ *   404 if agent does not exist
+ */
+registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Response) => {
+  const tenantId = req.params['tenantId'];
+  const agentId = req.params['agentId'];
+  if (!tenantId || !agentId) {
+    return res.status(400).json({ error: 'INVALID_IDS' });
+  }
+  try {
+    validateId(tenantId, 'tenantId');
+    validateId(agentId, 'agentId');
+  } catch {
+    return res.status(400).json({ error: 'INVALID_IDS' });
+  }
+
+  const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
+  let agent: any;
+  try {
+    agent = JSON.parse(await fsp.readFile(configPath, 'utf8'));
+  } catch {
+    return res.status(404).json({ error: 'AGENT_NOT_FOUND' });
+  }
+
+  const response: any = { status: agent.status, tenantId, agentId };
+
+  if (agent.status === 'active') {
+    const redis = getSharedRedis();
+    const claimKey = `nova:ucan-claim:${tenantId}:${agentId}`;
+    const claim = await redis.get(claimKey);
+    if (claim) {
+      try {
+        response.ucan = JSON.parse(claim);
+        await redis.del(claimKey);
+      } catch {
+        logger.warn({ tenantId, agentId }, 'Malformed UCAN claim payload');
+      }
+    }
+  }
+
+  res.json(response);
 });

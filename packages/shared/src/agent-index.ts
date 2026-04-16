@@ -2,6 +2,22 @@ import IORedis from 'ioredis';
 
 export const AGENT_REGISTRY_SET = 'nova:agent-registry';
 export const AGENT_LIFECYCLE_CHANNEL = 'nova:agent-lifecycle';
+export const TENANT_LIFECYCLE_CHANNEL = 'nova:tenant-lifecycle';
+export const TASK_LIFECYCLE_CHANNEL = 'nova:task-lifecycle';
+
+export interface TenantLifecycleEvent {
+  action: 'created' | 'updated' | 'deleted';
+  tenantId: string;
+  slug: string;
+  name: string;
+}
+
+export interface TaskLifecycleEvent {
+  action: 'queued' | 'completed' | 'failed' | 'quarantined';
+  tenantId: string;
+  agentId: string;
+  taskId: string;
+}
 
 export function agentIndexKey(agentId: string): string {
   return `nova:agent-index:${agentId}`;
