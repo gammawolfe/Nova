@@ -38,3 +38,9 @@ jspm_packages/
 # Temporary files
 tmp/
 temp/
+
+# Superpowers brainstorm artifacts
+.superpowers/
+
+# Git worktrees
+.worktrees/
