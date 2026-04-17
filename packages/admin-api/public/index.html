@@ -3,12 +3,299 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
   <title>Nova Admin</title>
   <link rel="stylesheet" href="/styles.css">
+  <style>[x-cloak]{display:none!important}</style>
 </head>
-<body class="nova-surface">
-  <main id="app"><h1 style="color:#fff;padding:2rem">Nova Admin — loading…</h1></main>
+<body class="nova-surface" x-data="novaApp()" x-init="init()">
+
+  <!-- Kinetic ticker -->
+  <div x-show="token" x-cloak style="position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,rgba(0,0,0,0.6),transparent);border-bottom:1px solid var(--glass-border);overflow:hidden;height:28px;display:flex;align-items:center;z-index:50">
+    <div style="display:flex;gap:48px;white-space:nowrap;animation:nova-scroll-x 24s linear infinite;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--ink-muted);padding-left:20px">
+      <span>◉ nova admin</span>
+      <span x-text="`${galaxies.length} galaxies`"></span>
+      <span x-text="`${pendingAgents.length} pending`"></span>
+      <span>◉ nova admin</span>
+      <span x-text="`${galaxies.length} galaxies`"></span>
+      <span x-text="`${pendingAgents.length} pending`"></span>
+    </div>
+  </div>
+
+  <main class="nova-shell">
+
+    <!-- LOGIN -->
+    <section x-show="!token" x-cloak style="max-width:420px;margin-top:12vh">
+      <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
+      <h1 class="nova-display" style="margin:12px 0 6px">Enter the console.</h1>
+      <p class="nova-subtitle" style="margin-bottom:24px">Bearer token required. Stored in this tab only.</p>
+      <form @submit.prevent="login()">
+        <label class="nova-label" for="admintok">admin token</label>
+        <div class="nova-spotlight" style="border-radius:10px">
+          <input id="admintok" class="nova-input" :class="loginError ? 'is-error' : ''"
+                 type="password" autocomplete="off" x-model="loginValue" required>
+        </div>
+        <p class="nova-error" x-show="loginError" x-text="loginError"></p>
+        <div style="margin-top:20px">
+          <button class="nova-cta" :disabled="loginBusy || !loginValue">
+            <span x-text="loginBusy ? 'Probing…' : 'Enter'"></span>
+            <span>→</span>
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- AUTHENTICATED -->
+    <section x-show="token" x-cloak>
+      <div class="nova-row" style="justify-content:space-between;margin-bottom:24px">
+        <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
+        <button class="nova-input" style="width:auto;padding:6px 12px;font-size:12px" @click="logout()">Log out</button>
+      </div>
+
+      <!-- HOME: Galaxies -->
+      <template x-if="route.name === 'home'">
+        <div>
+          <h1 class="nova-display" style="margin:0 0 6px">Galaxies</h1>
+          <p class="nova-subtitle" style="margin-bottom:24px" x-text="`${galaxies.length} tenant${galaxies.length === 1 ? '' : 's'} orbiting Nova`"></p>
+
+          <div class="nova-stack">
+            <template x-for="g in galaxies" :key="g.tenantId || g.slug">
+              <a class="nova-glass nova-row" :href="`#/galaxy/${encodeURIComponent(g.slug)}`" style="text-decoration:none;color:inherit">
+                <div class="nova-planet" :style="planetStyle(g.slug)"></div>
+                <div style="flex:1">
+                  <div style="font-weight:500;color:#fff" x-text="g.name"></div>
+                  <div class="nova-mono" x-text="g.slug"></div>
+                </div>
+                <span class="nova-pill" :class="g.status === 'active' ? 'nova-pill-active' : 'nova-pill-danger'" x-text="g.status || 'unknown'"></span>
+              </a>
+            </template>
+            <div x-show="galaxies.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+              No galaxies yet.
+            </div>
+          </div>
+
+          <div style="margin-top:28px">
+            <button class="nova-cta" @click="showCreateGalaxy = true">
+              <span>+ New galaxy</span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- GALAXY DETAIL -->
+      <template x-if="route.name === 'galaxy'">
+        <div>
+          <a href="#/" class="nova-mono" style="color:var(--ink-muted);text-decoration:none">← All galaxies</a>
+
+          <template x-if="currentGalaxy">
+            <div style="margin-top:16px">
+              <div class="nova-row" style="gap:20px;align-items:flex-start">
+                <div class="nova-planet nova-planet-lg" :style="planetStyle(currentGalaxy.slug)" style="margin-top:8px"></div>
+                <div style="flex:1">
+                  <div class="nova-eyebrow" x-text="'◉ GALAXY · ' + currentGalaxy.slug"></div>
+                  <h1 class="nova-display" style="font-size:40px;margin:6px 0" x-text="currentGalaxy.name"></h1>
+                  <div class="nova-mono" x-text="currentGalaxy.did || '(no DID)'"></div>
+                  <div class="nova-mono" style="margin-top:4px" x-text="`plan: ${currentGalaxy.plan} · messages/day: ${currentGalaxy.quotas?.messagesPerDay ?? '—'} · agents max: ${currentGalaxy.quotas?.agentsMax ?? '—'}`"></div>
+                </div>
+              </div>
+
+              <h2 class="nova-display" style="font-size:24px;margin:40px 0 14px">Pending planets</h2>
+              <div class="nova-stack">
+                <template x-for="a in pendingAgents" :key="a.agentId">
+                  <div class="nova-glass nova-row">
+                    <div class="nova-planet" :style="planetStyle(a.agentId)"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="color:#fff;font-weight:500" x-text="a.agentId"></div>
+                      <div class="nova-mono" style="overflow-wrap:anywhere" x-text="a.did || '(no DID)'"></div>
+                      <div class="nova-mono" x-text="(a.skills || []).map(s => s.id).join(', ')"></div>
+                    </div>
+                    <span class="nova-pill nova-pill-pending">Pending</span>
+                    <button class="nova-cta" style="padding:8px 14px" @click="approveTarget = a">Approve</button>
+                    <button class="nova-input" style="width:auto;padding:8px 14px" @click="reject(a.agentId)">Reject</button>
+                  </div>
+                </template>
+                <div x-show="pendingAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                  No pending planets. Issue an invite below.
+                </div>
+              </div>
+
+              <h2 class="nova-display" style="font-size:24px;margin:40px 0 14px">Invites</h2>
+              <button class="nova-cta" @click="showCreateInvite = true">
+                <span>+ Issue invite</span>
+              </button>
+            </div>
+          </template>
+
+          <template x-if="!currentGalaxy">
+            <div class="nova-glass" style="margin-top:32px;text-align:center;color:var(--ink-muted)">
+              Galaxy not found.
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- CREATE GALAXY MODAL -->
+      <template x-if="showCreateGalaxy">
+        <div class="nova-modal-backdrop" @click.self="showCreateGalaxy = false">
+          <div class="nova-modal" x-data="{ slug: '', name: '', plan: 'developer', err: '', busy: false, fieldErrs: {} }">
+            <div class="nova-eyebrow">◉ NEW GALAXY</div>
+            <h2 class="nova-display" style="font-size:32px;margin:8px 0 20px">Forge a galaxy.</h2>
+
+            <label class="nova-label" for="g-slug">slug</label>
+            <input id="g-slug" class="nova-input" :class="fieldErrs.slug ? 'is-error' : ''" x-model="slug" placeholder="acme-corp" pattern="[a-z0-9-]+">
+            <p class="nova-error" x-show="fieldErrs.slug" x-text="fieldErrs.slug"></p>
+
+            <label class="nova-label" for="g-name" style="margin-top:14px">display name</label>
+            <input id="g-name" class="nova-input" :class="fieldErrs.name ? 'is-error' : ''" x-model="name" placeholder="ACME Corp">
+            <p class="nova-error" x-show="fieldErrs.name" x-text="fieldErrs.name"></p>
+
+            <label class="nova-label" for="g-plan" style="margin-top:14px">plan</label>
+            <select id="g-plan" class="nova-input" x-model="plan">
+              <option value="developer">Developer</option>
+              <option value="pro">Pro</option>
+              <option value="enterprise">Enterprise</option>
+            </select>
+
+            <p class="nova-error" x-show="err" x-text="err" style="margin-top:12px"></p>
+
+            <div class="nova-row" style="margin-top:24px;justify-content:flex-end;gap:10px">
+              <button class="nova-input" style="width:auto;padding:10px 16px" @click="showCreateGalaxy = false" :disabled="busy">Cancel</button>
+              <button class="nova-cta" @click="(async () => {
+                busy = true; err = ''; fieldErrs = {};
+                try { await createGalaxy({ slug, name, plan }); }
+                catch (e) {
+                  if (e.details && e.details.length) {
+                    for (const d of e.details) fieldErrs[d.field] = d.message;
+                  } else { err = e.message || 'Create failed'; }
+                } finally { busy = false; }
+              })()" :disabled="busy || !slug || !name">
+                <span x-text="busy ? 'Forging…' : 'Forge galaxy'"></span><span>→</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- CREATE INVITE MODAL -->
+      <template x-if="showCreateInvite">
+        <div class="nova-modal-backdrop" @click.self="showCreateInvite = false">
+          <div class="nova-modal" x-data="{ hint: '', ttl: 86400, note: '', err: '', busy: false }">
+            <div class="nova-eyebrow">◉ NEW INVITE</div>
+            <h2 class="nova-display" style="font-size:28px;margin:8px 0 20px">Invite a planet.</h2>
+
+            <label class="nova-label" for="i-hint">agent id hint (optional)</label>
+            <input id="i-hint" class="nova-input" x-model="hint" placeholder="agent_alpha" pattern="[a-z0-9_-]+">
+
+            <label class="nova-label" for="i-ttl" style="margin-top:14px">ttl</label>
+            <select id="i-ttl" class="nova-input" x-model.number="ttl">
+              <option :value="3600">1 hour</option>
+              <option :value="86400">24 hours</option>
+              <option :value="7 * 86400">7 days</option>
+            </select>
+
+            <label class="nova-label" for="i-note" style="margin-top:14px">note (optional)</label>
+            <input id="i-note" class="nova-input" x-model="note" placeholder="e.g. shared with ops team">
+
+            <p class="nova-error" x-show="err" x-text="err" style="margin-top:12px"></p>
+
+            <div class="nova-row" style="margin-top:24px;justify-content:flex-end;gap:10px">
+              <button class="nova-input" style="width:auto;padding:10px 16px" @click="showCreateInvite = false" :disabled="busy">Cancel</button>
+              <button class="nova-cta" @click="(async () => {
+                busy = true; err = '';
+                try { await createInvite({ agentIdHint: hint || undefined, ttlSeconds: ttl, note: note || undefined }); }
+                catch (e) { err = (e.details && e.details[0]?.message) || e.message || 'Invite failed'; }
+                finally { busy = false; }
+              })()" :disabled="busy">
+                <span x-text="busy ? 'Issuing…' : 'Issue invite'"></span><span>→</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- INVITE ONE-TIME REVEAL -->
+      <template x-if="revealedInvite">
+        <div class="nova-modal-backdrop" @click.self="dismissReveal()">
+          <div class="nova-modal" x-data="{ copied: false }" x-init="$nextTick(() => { const el = $refs.qr; el.innerHTML=''; new QRCode(el, { text: revealedInvite.token, width: 180, height: 180, colorDark: '#fff', colorLight: '#050814' }); })">
+            <div class="nova-eyebrow" style="color:var(--signal-warn)">◉ ONE-TIME TOKEN</div>
+            <h2 class="nova-display" style="font-size:26px;margin:8px 0 8px">Share this now.</h2>
+            <p class="nova-subtitle" style="margin-bottom:20px">This token is shown once. Save it or hand it to the planet operator now — a refresh will lose it.</p>
+
+            <div x-ref="qr" style="display:flex;justify-content:center;margin-bottom:18px"></div>
+
+            <div class="nova-glass nova-mono" style="word-break:break-all;font-size:11px;padding:12px" x-text="revealedInvite.token"></div>
+
+            <div class="nova-mono" style="margin-top:10px" x-text="`jti: ${revealedInvite.jti} · expires: ${new Date(revealedInvite.expiresAt).toLocaleString()}`"></div>
+
+            <div class="nova-row" style="margin-top:24px;justify-content:flex-end;gap:10px">
+              <button class="nova-input" style="width:auto;padding:10px 16px" @click="navigator.clipboard.writeText(revealedInvite.token); copied = true; setTimeout(() => copied = false, 2000)">
+                <span x-text="copied ? 'Copied ✓' : 'Copy token'"></span>
+              </button>
+              <button class="nova-cta" @click="dismissReveal()">
+                <span>Dismiss</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- APPROVE MODAL -->
+      <template x-if="approveTarget">
+        <div class="nova-modal-backdrop" @click.self="approveTarget = null">
+          <div class="nova-modal" x-data="{
+            tier: 1, allowedSkillsRaw: '*', expiry: 30, notes: '',
+            busy: false, err: ''
+          }" x-init="allowedSkillsRaw = (approveTarget.skills || []).map(s => s.id).join(', ') || '*'">
+            <div class="nova-eyebrow">◉ APPROVE PLANET</div>
+            <h2 class="nova-display" style="font-size:26px;margin:8px 0 6px" x-text="approveTarget.agentId"></h2>
+            <div class="nova-mono" style="margin-bottom:20px;overflow-wrap:anywhere" x-text="approveTarget.did"></div>
+
+            <label class="nova-label" for="a-tier">trust tier (1-3)</label>
+            <select id="a-tier" class="nova-input" x-model.number="tier">
+              <option :value="1">1 — basic</option>
+              <option :value="2">2 — elevated</option>
+              <option :value="3">3 — full</option>
+            </select>
+
+            <label class="nova-label" for="a-skills" style="margin-top:14px">allowed skills (comma-separated, or *)</label>
+            <input id="a-skills" class="nova-input" x-model="allowedSkillsRaw" placeholder="query_knowledge, request_summary">
+
+            <label class="nova-label" for="a-exp" style="margin-top:14px">ucan expiry (days)</label>
+            <input id="a-exp" class="nova-input" type="number" min="1" max="365" x-model.number="expiry">
+
+            <label class="nova-label" for="a-notes" style="margin-top:14px">notes (optional)</label>
+            <input id="a-notes" class="nova-input" x-model="notes">
+
+            <p class="nova-error" x-show="err" x-text="err" style="margin-top:12px"></p>
+
+            <div class="nova-row" style="margin-top:24px;justify-content:flex-end;gap:10px">
+              <button class="nova-input" style="width:auto;padding:10px 16px" @click="approveTarget = null" :disabled="busy">Cancel</button>
+              <button class="nova-cta" @click="(async () => {
+                busy = true; err = '';
+                const skills = allowedSkillsRaw.split(',').map(s => s.trim()).filter(Boolean);
+                try { await approve(approveTarget.agentId, { trustTier: tier, allowedSkills: skills, ucanExpiryDays: expiry, notes: notes || undefined }); }
+                catch (e) { err = e.message || 'Approval failed'; }
+                finally { busy = false; }
+              })()" :disabled="busy">
+                <span x-text="busy ? 'Approving…' : 'Approve'"></span><span>→</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+    </section>
+
+    <!-- Toasts -->
+    <div class="nova-toast-stack">
+      <template x-for="t in toasts" :key="t.id">
+        <div class="nova-toast" :class="t.kind === 'err' ? 'is-err' : 'is-ok'" x-text="t.text"></div>
+      </template>
+    </div>
+
+  </main>
+
+  <script type="module" src="/js/app.js"></script>
   <script defer src="/vendor/alpine.min.js"></script>
   <script defer src="/vendor/qrcode.min.js"></script>
 </body>

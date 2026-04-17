@@ -99,6 +99,9 @@ ucanRequestRouter.post('/', async (req, res) => {
 });
 app.use('/admin/tenants/:tenantId/ucans/request', ucanRequestRouter);
 
+// ── SSE lifecycle events (unauthenticated; browser EventSource has no header API; v1 trust model is localhost) ──
+app.use('/admin/events', eventsRouter);
+
 // ── Authenticated routes ────────────────────────────────────────────────────
 app.use('/admin', adminAuth);
 
@@ -112,7 +115,6 @@ app.get('/health', healthHandler('admin-api', adminStartTime, async () => ({
 })) as any);
 
 // Mount routes per spec Section 5.5
-app.use('/admin/events', eventsRouter);
 app.use('/admin/tenants', tenantsRouter);
 app.use('/admin/tenants/:tenantId/invites', invitesRouter);
 app.use('/admin/tenants/:tenantId/agents', agentsRouter);
