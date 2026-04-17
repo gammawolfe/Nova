@@ -16,10 +16,33 @@ const CONSUMED_PREFIX = 'nova:invite-consumed:';
 
 async function loadNovaPrivateKey(): Promise<crypto.KeyObject> {
   const keyPath = path.join(DATA_ROOT, 'keys', 'nova.private.pem');
-  const pem = await fsp.readFile(keyPath, 'utf8').catch(() => {
+  const content = await fsp.readFile(keyPath, 'utf8').catch(() => {
     throw new Error('Nova keys not found — run scripts/generate-keys.ts first');
   });
-  return crypto.createPrivateKey(pem);
+  const trimmed = content.trim();
+
+  // PEM — use directly.
+  if (trimmed.startsWith('-----BEGIN')) {
+    return crypto.createPrivateKey(trimmed);
+  }
+
+  // ucans EdKeypair.export() — 64-byte libsodium secretKey (seed || pubkey), base64.
+  // Re-import via JWK so Node crypto.sign() works alongside ucans's own usage.
+  const raw = Buffer.from(trimmed, 'base64');
+  if (raw.length !== 64) {
+    throw new Error(`Nova private key has unexpected length ${raw.length} (expected PEM or 64-byte ucans base64)`);
+  }
+  const seed = raw.subarray(0, 32);
+  const pub = raw.subarray(32, 64);
+  return crypto.createPrivateKey({
+    key: {
+      kty: 'OKP',
+      crv: 'Ed25519',
+      d: seed.toString('base64url'),
+      x: pub.toString('base64url'),
+    },
+    format: 'jwk',
+  });
 }
 
 async function loadNovaPublicKey(): Promise<crypto.KeyObject> {
