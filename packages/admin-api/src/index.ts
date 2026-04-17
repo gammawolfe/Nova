@@ -1,5 +1,6 @@
 import express from 'express';
 import { Router } from 'express';
+import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { adminAuth } from './middleware/auth';
 import { errorHandler } from './middleware/error-handler';
@@ -25,6 +26,12 @@ const app = express();
 const PORT = process.env.PORT || 3005;
 
 app.use(express.json());
+
+// ── UI static assets (unauthenticated; bearer auth is on /admin/* only) ────
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  index: 'index.html',
+  maxAge: '5m',
+}));
 
 // ── Public routes (no auth needed) ──────────────────────────────────────────
 app.use('/discover', discoverRouter);
