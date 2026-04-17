@@ -3,6 +3,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
+import { loadNovaPrivateKey } from '@nova/shared/src/invites';
 import { verifyAndConsumeNonce } from './nonce-service';
 import * as agentService from './agent-service';
 
@@ -26,16 +27,11 @@ function computeCid(jwt: string): string {
 export async function issueUcan(tenantId: string, data: {
   subjectDid: string; capabilities: string[]; expiryDays: number;
 }): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-  const keyPath = path.join(DATA_ROOT, 'keys', 'nova.private.pem');
   const didPath = path.join(DATA_ROOT, 'keys', 'nova.did');
 
   let novaDid: string;
-  let privateKeyPem: string;
   try {
-    [novaDid, privateKeyPem] = await Promise.all([
-      fsp.readFile(didPath, 'utf8').then(s => s.trim()),
-      fsp.readFile(keyPath, 'utf8'),
-    ]);
+    novaDid = (await fsp.readFile(didPath, 'utf8')).trim();
   } catch {
     throw new Error('Nova keys not found — run scripts/generate-keys.ts first');
   }
@@ -55,7 +51,7 @@ export async function issueUcan(tenantId: string, data: {
   const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
 
-  const privateKey = crypto.createPrivateKey(privateKeyPem);
+  const privateKey = await loadNovaPrivateKey();
   const signature = crypto.sign(null, Buffer.from(`${headerB64}.${payloadB64}`), privateKey);
   const signatureB64 = signature.toString('base64url');
 
