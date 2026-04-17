@@ -74,9 +74,11 @@ window.novaApp = function () {
 
     async loadGalaxy(slug) {
       try {
-        this.currentGalaxy = await api('GET', `/admin/tenants/${encodeURIComponent(slug)}`);
-        const id = this.currentGalaxy.tenantId || this.currentGalaxy.slug;
-        this.agents = await api('GET', `/admin/tenants/${encodeURIComponent(id)}/agents`) || [];
+        const all = await api('GET', '/admin/tenants') || [];
+        const match = all.find(t => t.slug === slug || t.id === slug);
+        if (!match) { this.currentGalaxy = null; return; }
+        this.currentGalaxy = match;
+        this.agents = await api('GET', `/admin/tenants/${encodeURIComponent(match.id)}/agents`) || [];
         this.pendingAgents = this.agents.filter(a => a.status === 'pending');
       } catch (e) {
         if (e.status === 404) this.currentGalaxy = null;
@@ -92,7 +94,7 @@ window.novaApp = function () {
     },
 
     async createInvite(form) {
-      const id = this.currentGalaxy.tenantId || this.currentGalaxy.slug;
+      const id = this.currentGalaxy.id;
       const res = await api('POST', `/admin/tenants/${encodeURIComponent(id)}/invites`, form);
       this.revealedInvite = res;
       this.showCreateInvite = false;
@@ -101,7 +103,7 @@ window.novaApp = function () {
     dismissReveal() { this.revealedInvite = null; },
 
     async approve(agentId, form) {
-      const id = this.currentGalaxy.tenantId || this.currentGalaxy.slug;
+      const id = this.currentGalaxy.id;
       try {
         const res = await api('POST', `/admin/tenants/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/approve`, form);
         this.approveTarget = null;
@@ -111,7 +113,7 @@ window.novaApp = function () {
     },
 
     async reject(agentId) {
-      const id = this.currentGalaxy.tenantId || this.currentGalaxy.slug;
+      const id = this.currentGalaxy.id;
       if (!confirm(`Reject ${agentId}? This cannot be undone.`)) return;
       try {
         await api('POST', `/admin/tenants/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/reject`);
@@ -140,7 +142,7 @@ window.novaApp = function () {
       if (!this.currentGalaxy) return;
       try {
         const msg = JSON.parse(ev.data);
-        const galaxyId = this.currentGalaxy.tenantId || this.currentGalaxy.slug;
+        const galaxyId = this.currentGalaxy.id;
         if (msg.tenantId && (msg.tenantId === galaxyId || msg.tenantId === this.currentGalaxy.slug)) {
           this.loadGalaxy(this.route.slug);
         }
