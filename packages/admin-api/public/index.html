@@ -119,6 +119,25 @@
                 </div>
               </div>
 
+              <h2 class="nova-display" style="font-size:24px;margin:40px 0 14px">Active planets</h2>
+              <div class="nova-stack">
+                <template x-for="a in activeAgents" :key="a.agentId">
+                  <div class="nova-glass nova-row">
+                    <div class="nova-planet" :style="planetStyle(a.agentId)"></div>
+                    <div style="flex:1;min-width:0">
+                      <div style="color:#fff;font-weight:500" x-text="a.name || a.agentId"></div>
+                      <div class="nova-mono" x-text="a.agentId"></div>
+                      <div class="nova-mono" style="overflow-wrap:anywhere" x-text="a.did || '(no DID)'"></div>
+                      <div class="nova-mono" x-text="(a.skills || []).map(s => s.id).join(', ')"></div>
+                    </div>
+                    <span class="nova-pill nova-pill-active">Active</span>
+                  </div>
+                </template>
+                <div x-show="activeAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                  No active planets yet. Invite one below.
+                </div>
+              </div>
+
               <h2 class="nova-display" style="font-size:24px;margin:40px 0 14px">Invites</h2>
               <button class="nova-cta" @click="showCreateInvite = true">
                 <span>+ Issue invite</span>

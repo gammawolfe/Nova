@@ -12,6 +12,7 @@ window.novaApp = function () {
     currentGalaxy: null,
     agents: [],
     pendingAgents: [],
+    activeAgents: [],
     showCreateGalaxy: false,
     showCreateInvite: false,
     revealedInvite: null,
@@ -80,6 +81,7 @@ window.novaApp = function () {
         this.currentGalaxy = match;
         this.agents = await api('GET', `/admin/tenants/${encodeURIComponent(match.id)}/agents`) || [];
         this.pendingAgents = this.agents.filter(a => a.status === 'pending');
+        this.activeAgents  = this.agents.filter(a => a.status !== 'pending');
       } catch (e) {
         if (e.status === 404) this.currentGalaxy = null;
         else this.pushToast(e.message || 'Load failed', 'err');
