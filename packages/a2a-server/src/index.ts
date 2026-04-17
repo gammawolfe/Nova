@@ -16,6 +16,8 @@ import { streamRouter } from './stream';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
+import { listActiveAgentMeta, getAgentMeta } from '@nova/shared/src/agent-index';
+import { getSharedRedis } from '@nova/shared/src/redis';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -42,6 +44,47 @@ app.get('/health', healthHandler('a2a-server', startTime, async () => {
 }) as any);
 
 app.get('/metrics', metricsHandler(a2aRegistry) as any);
+
+app.get('/discover', async (req, res) => {
+  try {
+    const redis = getSharedRedis();
+    let agents = await listActiveAgentMeta(redis);
+
+    const statusFilter = req.query.status as string;
+    if (statusFilter && statusFilter !== 'all') {
+      agents = agents.filter(agent => agent.status === statusFilter);
+    }
+
+    const skillsFilter = req.query.skills as string;
+    if (skillsFilter) {
+      agents = agents.filter(agent =>
+        agent.skills.some(skill =>
+          skill.id.includes(skillsFilter) ||
+          skill.name.includes(skillsFilter) ||
+          (skill.tags && skill.tags.includes(skillsFilter))
+        )
+      );
+    }
+    res.json(agents);
+  } catch (err) {
+    logger.error({ err }, 'Failed to list agents for discovery');
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve agent list' });
+  }
+});
+
+app.get('/discover/:agentId', async (req, res) => {
+  try {
+    const redis = getSharedRedis();
+    const agent = await getAgentMeta(redis, req.params.agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'AGENT_NOT_FOUND', message: `Agent ${req.params.agentId} not found` });
+    }
+    res.json(agent);
+  } catch (err) {
+    logger.error({ err }, `Failed to retrieve agent ${req.params.agentId}`);
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve agent details' });
+  }
+});
 
 // A2A Protocol Routes
 const agentRouter = express.Router({ mergeParams: true });
@@ -72,7 +115,14 @@ agentRouter.get('/.well-known/agent.json', async (req, res) => {
         schemes: ['ucan'],
         ucapabilityPrefix: `nova:${req.ctx.tenantId}:${req.ctx.agentId}`,
       },
-      skills: raw.skills || [],
+      skills: (raw.skills || []).map((s: any) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        tags: s.tags ?? [],
+        inputSchema: s.inputSchema ?? {},
+        outputSchema: s.outputSchema ?? {},
+      })),
     };
 
     const parsed = AgentCardSchema.safeParse(card);

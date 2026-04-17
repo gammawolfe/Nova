@@ -37,7 +37,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.use('/discover', discoverRouter);
 
 // UCAN renewal — proof-of-possession, not admin auth
-const ucanRenewRouter = Router();
+const ucanRenewRouter = Router({ mergeParams: true });
 
 ucanRenewRouter.get('/', async (req, res) => {
   try {
@@ -75,7 +75,7 @@ ucanRenewRouter.post('/', async (req, res) => {
 app.use('/admin/tenants/:tenantId/ucans/renew', ucanRenewRouter);
 
 // UCAN request — cross-destination issuance via proof-of-possession
-const ucanRequestRouter = Router();
+const ucanRequestRouter = Router({ mergeParams: true });
 ucanRequestRouter.post('/', async (req, res) => {
   try {
     const parseResult = UcanRequestSchema.safeParse(req.body);
