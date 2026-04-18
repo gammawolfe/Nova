@@ -250,45 +250,25 @@
                viewBox="0 0 800 600"
                preserveAspectRatio="xMidYMid meet"
                role="img"
-               aria-label="Solar-system visualization of active agents">
-            <defs>
+               aria-label="Solar-system visualization of active agents"
+               x-effect="renderLiveSvg($el)">
+            <defs class="nova-live-defs">
               <radialGradient id="nova-sun-gradient" cx="30%" cy="30%">
                 <stop offset="0%" stop-color="#ffe08a" />
                 <stop offset="100%" stop-color="#f5a623" />
               </radialGradient>
-              <template x-for="p in livePlanets" :key="p.agentId">
-                <radialGradient :id="`planet-${p.agentId}`" cx="30%" cy="30%">
-                  <stop offset="0%" :stop-color="p.colorLight" />
-                  <stop offset="100%" :stop-color="p.colorDark" />
-                </radialGradient>
-              </template>
             </defs>
 
             <circle class="nova-live-ring" cx="400" cy="300" r="220" />
 
-            <template x-for="line in activeLines" :key="line.id">
-              <path class="nova-live-line"
-                    :class="`is-${line.action}`"
-                    :d="`M ${line.x1} ${line.y1} Q 400 300 ${line.x2} ${line.y2}`" />
-            </template>
+            <g class="nova-live-lines-group"></g>
 
             <g class="nova-live-sun">
               <circle cx="400" cy="300" r="24" fill="url(#nova-sun-gradient)" />
               <text x="400" y="303" class="nova-live-sun-label" text-anchor="middle">NOVA</text>
             </g>
 
-            <template x-for="p in livePlanets" :key="p.agentId">
-              <a :href="`#/galaxy/${encodeURIComponent(p.galaxySlug)}`">
-                <g class="nova-live-planet-group">
-                  <circle class="nova-live-planet"
-                          :cx="p.x" :cy="p.y" r="10"
-                          :fill="`url(#planet-${p.agentId})`" />
-                  <text class="nova-live-label" :x="p.labelX" :y="p.labelY" text-anchor="middle"
-                        x-text="p.name"></text>
-                  <title x-text="`${p.agentId} — ${p.galaxySlug}`"></title>
-                </g>
-              </a>
-            </template>
+            <g class="nova-live-planets-group"></g>
           </svg>
         </div>
       </template>

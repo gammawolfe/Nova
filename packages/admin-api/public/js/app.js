@@ -290,6 +290,109 @@ window.novaApp = function () {
       this.activeLines = this.activeLines.filter(l => l.expiresAt > now);
     },
 
+    renderLiveSvg(svg) {
+      if (!svg) return;
+      const planets = this.livePlanets;
+      const lines = this.activeLines;
+      const NS = 'http://www.w3.org/2000/svg';
+      const XLINK = 'http://www.w3.org/1999/xlink';
+
+      const planetsGroup = svg.querySelector('.nova-live-planets-group');
+      const linesGroup = svg.querySelector('.nova-live-lines-group');
+      const defsEl = svg.querySelector('.nova-live-defs');
+      if (!planetsGroup || !linesGroup || !defsEl) return;
+
+      svg._planetNodes ??= new Map();
+      svg._lineNodes ??= new Map();
+      svg._defsNodes ??= new Map();
+
+      const planetIds = new Set(planets.map(p => p.agentId));
+
+      // Remove planets and their gradients that are no longer present
+      for (const [id, cached] of svg._planetNodes.entries()) {
+        if (!planetIds.has(id)) {
+          cached.root.remove();
+          svg._planetNodes.delete(id);
+        }
+      }
+      for (const [id, node] of svg._defsNodes.entries()) {
+        if (!planetIds.has(id)) {
+          node.remove();
+          svg._defsNodes.delete(id);
+        }
+      }
+
+      // Create / update each planet + its gradient
+      for (const p of planets) {
+        // Gradient
+        if (!svg._defsNodes.has(p.agentId)) {
+          const grad = document.createElementNS(NS, 'radialGradient');
+          grad.setAttribute('id', `planet-${p.agentId}`);
+          grad.setAttribute('cx', '30%');
+          grad.setAttribute('cy', '30%');
+          const s1 = document.createElementNS(NS, 'stop');
+          s1.setAttribute('offset', '0%');
+          s1.setAttribute('stop-color', p.colorLight);
+          const s2 = document.createElementNS(NS, 'stop');
+          s2.setAttribute('offset', '100%');
+          s2.setAttribute('stop-color', p.colorDark);
+          grad.appendChild(s1);
+          grad.appendChild(s2);
+          defsEl.appendChild(grad);
+          svg._defsNodes.set(p.agentId, grad);
+        }
+
+        // Planet group
+        let cached = svg._planetNodes.get(p.agentId);
+        if (!cached) {
+          const a = document.createElementNS(NS, 'a');
+          a.setAttributeNS(XLINK, 'xlink:href', `#/galaxy/${encodeURIComponent(p.galaxySlug)}`);
+          a.setAttribute('href', `#/galaxy/${encodeURIComponent(p.galaxySlug)}`);
+          const g = document.createElementNS(NS, 'g');
+          g.setAttribute('class', 'nova-live-planet-group');
+          const circle = document.createElementNS(NS, 'circle');
+          circle.setAttribute('class', 'nova-live-planet');
+          circle.setAttribute('r', '10');
+          circle.setAttribute('fill', `url(#planet-${p.agentId})`);
+          const label = document.createElementNS(NS, 'text');
+          label.setAttribute('class', 'nova-live-label');
+          label.setAttribute('text-anchor', 'middle');
+          label.textContent = p.name;
+          const title = document.createElementNS(NS, 'title');
+          title.textContent = `${p.agentId} — ${p.galaxySlug}`;
+          g.appendChild(circle);
+          g.appendChild(label);
+          g.appendChild(title);
+          a.appendChild(g);
+          planetsGroup.appendChild(a);
+          cached = { root: a, circle, label };
+          svg._planetNodes.set(p.agentId, cached);
+        }
+        cached.circle.setAttribute('cx', p.x);
+        cached.circle.setAttribute('cy', p.y);
+        cached.label.setAttribute('x', p.labelX);
+        cached.label.setAttribute('y', p.labelY);
+      }
+
+      // Sync lines
+      const lineIds = new Set(lines.map(l => l.id));
+      for (const [id, node] of svg._lineNodes.entries()) {
+        if (!lineIds.has(id)) {
+          node.remove();
+          svg._lineNodes.delete(id);
+        }
+      }
+      for (const l of lines) {
+        if (!svg._lineNodes.has(l.id)) {
+          const path = document.createElementNS(NS, 'path');
+          path.setAttribute('class', `nova-live-line is-${l.action}`);
+          path.setAttribute('d', `M ${l.x1} ${l.y1} Q 400 300 ${l.x2} ${l.y2}`);
+          linesGroup.appendChild(path);
+          svg._lineNodes.set(l.id, path);
+        }
+      }
+    },
+
     pushToast(text, kind = 'ok') {
       const id = Math.random().toString(36).slice(2);
       this.toasts.push({ id, text, kind });
