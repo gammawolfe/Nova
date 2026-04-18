@@ -25,7 +25,7 @@
     </div>
   </div>
 
-  <main class="nova-shell">
+  <main class="nova-shell" :class="token && 'nova-shell--full'">
 
     <!-- LOGIN -->
     <section x-show="!token" x-cloak style="max-width:420px;margin-top:12vh">
@@ -47,11 +47,27 @@
     </section>
 
     <!-- AUTHENTICATED -->
-    <section x-show="token" x-cloak>
-      <div class="nova-row" style="justify-content:space-between;margin-bottom:24px">
-        <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
-        <button class="nova-input" style="width:auto;padding:6px 12px;font-size:12px" @click="logout()">Log out</button>
-      </div>
+    <section x-show="token" x-cloak class="nova-app" :class="sidebarCollapsed && 'is-sidebar-collapsed'">
+
+      <aside class="nova-sidebar">
+        <div class="nova-sidebar-brand">
+          <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
+        </div>
+        <nav class="nova-nav">
+          <a href="#/"        class="nova-nav-item" :class="activeTab === 'galaxies' && 'is-active'">Galaxies</a>
+          <a href="#/agents"  class="nova-nav-item" :class="activeTab === 'agents'   && 'is-active'">Agents</a>
+          <a href="#/live"    class="nova-nav-item" :class="activeTab === 'live'     && 'is-active'">Live</a>
+          <a href="#/audit"   class="nova-nav-item" :class="activeTab === 'audit'    && 'is-active'">Audit</a>
+        </nav>
+        <div class="nova-sidebar-spacer"></div>
+        <button class="nova-sidebar-logout" @click="logout()">Log out</button>
+      </aside>
+
+      <button class="nova-sidebar-toggle" @click="toggleSidebar()" :aria-label="sidebarCollapsed ? 'Open sidebar' : 'Collapse sidebar'">
+        <span x-text="sidebarCollapsed ? '▶' : '◀'"></span>
+      </button>
+
+      <section class="nova-main">
 
       <!-- HOME: Galaxies -->
       <template x-if="route.name === 'home'">
@@ -153,6 +169,35 @@
           </template>
         </div>
       </template>
+
+      <!-- PLACEHOLDER: Agents -->
+      <template x-if="route.name === 'agents'">
+        <div class="nova-placeholder">
+          <div class="nova-eyebrow">◉ AGENTS</div>
+          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
+          <p class="nova-subtitle">Flat cross-galaxy view of every registered agent — advertised skills, trust tier, DID, last-seen.</p>
+        </div>
+      </template>
+
+      <!-- PLACEHOLDER: Live -->
+      <template x-if="route.name === 'live'">
+        <div class="nova-placeholder">
+          <div class="nova-eyebrow">◉ LIVE</div>
+          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
+          <p class="nova-subtitle">Solar-system visualization. Planets orbit a star; dotted lines light up as A2A conversations flow, streamed from <code>/admin/events</code>.</p>
+        </div>
+      </template>
+
+      <!-- PLACEHOLDER: Audit -->
+      <template x-if="route.name === 'audit'">
+        <div class="nova-placeholder">
+          <div class="nova-eyebrow">◉ AUDIT</div>
+          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
+          <p class="nova-subtitle">Task audit log — which agent sent what to whom, when, and with what result. Feeds from <code>/admin/audit</code>.</p>
+        </div>
+      </template>
+
+      </section><!-- /.nova-main -->
 
       <!-- CREATE GALAXY MODAL -->
       <template x-if="showCreateGalaxy">
