@@ -34,10 +34,8 @@
       <p class="nova-subtitle" style="margin-bottom:24px">Bearer token required. Stored in this tab only.</p>
       <form @submit.prevent="login()">
         <label class="nova-label" for="admintok">admin token</label>
-        <div class="nova-spotlight" style="border-radius:10px">
-          <input id="admintok" class="nova-input" :class="loginError ? 'is-error' : ''"
-                 type="password" autocomplete="off" x-model="loginValue" required>
-        </div>
+        <input id="admintok" class="nova-input" :class="loginError ? 'is-error' : ''"
+               type="password" autocomplete="off" x-model="loginValue" required>
         <p class="nova-error" x-show="loginError" x-text="loginError"></p>
         <div style="margin-top:20px">
           <button class="nova-cta" :disabled="loginBusy || !loginValue">
@@ -238,8 +236,8 @@
       <!-- INVITE ONE-TIME REVEAL -->
       <template x-if="revealedInvite">
         <div class="nova-modal-backdrop" @click.self="dismissReveal()">
-          <div class="nova-modal" x-data="{ copied: false }" x-init="$nextTick(() => { const el = $refs.qr; el.innerHTML=''; new QRCode(el, { text: revealedInvite.token, width: 180, height: 180, colorDark: '#fff', colorLight: '#050814' }); })">
-            <div class="nova-eyebrow" style="color:var(--signal-warn)">◉ ONE-TIME TOKEN</div>
+          <div class="nova-modal" x-data="{ copied: false }" x-init="$nextTick(() => { const el = $refs.qr; el.innerHTML=''; new QRCode(el, { text: revealedInvite.token, width: 180, height: 180, colorDark: '#fff', colorLight: '#000' }); })">
+            <div class="nova-eyebrow" style="color:var(--status-error)">◉ ONE-TIME TOKEN</div>
             <h2 class="nova-display" style="font-size:26px;margin:8px 0 8px">Share this now.</h2>
             <p class="nova-subtitle" style="margin-bottom:20px">This token is shown once. Save it or hand it to the planet operator now — a refresh will lose it.</p>
 
