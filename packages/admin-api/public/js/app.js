@@ -31,6 +31,10 @@ window.novaApp = function () {
     allAgents: [],
     allAgentsLoading: false,
     allAgentsError: null,
+    rotationDeg: 0,
+    demoLineActive: false,
+    demoLinePath: '',
+    hoverGalaxy: null,
     sidebarCollapsed: readSidebarState(),
 
     get activeTab() {
@@ -59,8 +63,14 @@ window.novaApp = function () {
       window.addEventListener('hashchange', () => {
         this.route = parseRoute();
         this.routeLoad();
+        if (this.route.name === 'live') this.startLiveTicker();
+        else this.stopLiveTicker();
       });
-      if (this.token) { this.routeLoad(); this.connectSse(); }
+      if (this.token) {
+        this.routeLoad();
+        this.connectSse();
+        if (this.route.name === 'live') this.startLiveTicker();
+      }
     },
 
     async login() {
@@ -96,6 +106,7 @@ window.novaApp = function () {
       if (this.route.name === 'home')   await this.loadGalaxies();
       if (this.route.name === 'galaxy') await this.loadGalaxy(this.route.slug);
       if (this.route.name === 'agents') await this.loadAllAgents();
+      if (this.route.name === 'live')   await this.loadAllAgents();
     },
 
     async loadGalaxies() {
@@ -138,6 +149,47 @@ window.novaApp = function () {
     galaxySlug(tenantId) {
       const match = this.galaxies.find(g => g.id === tenantId || g.slug === tenantId);
       return match?.slug || tenantId;
+    },
+
+    get livePlanets() {
+      const agents = this.allAgents;
+      if (!agents || agents.length === 0) return [];
+      const cx = 400, cy = 300, ringR = 220, labelOffset = 10 + 14;
+      const byGalaxy = new Map();
+      for (const a of agents) {
+        const slug = this.galaxySlug(a.tenantId);
+        if (!byGalaxy.has(slug)) byGalaxy.set(slug, []);
+        byGalaxy.get(slug).push(a);
+      }
+      const galaxyKeys = [...byGalaxy.keys()].sort();
+      const G = galaxyKeys.length;
+      const gap = 10;
+      const usable = 360 - G * gap;
+      const arcWidth = usable / G;
+      const result = [];
+      for (let i = 0; i < G; i++) {
+        const slug = galaxyKeys[i];
+        const arr = byGalaxy.get(slug);
+        const startAngle = i * (arcWidth + gap);
+        for (let j = 0; j < arr.length; j++) {
+          const a = arr[j];
+          const baseAngle = startAngle + arcWidth * (j + 0.5) / arr.length;
+          const theta = (baseAngle + this.rotationDeg) * Math.PI / 180;
+          const colors = slugColor(slug);
+          result.push({
+            agentId: a.agentId,
+            name: a.name,
+            galaxySlug: slug,
+            x: cx + ringR * Math.cos(theta),
+            y: cy + ringR * Math.sin(theta),
+            labelX: cx + (ringR + labelOffset) * Math.cos(theta),
+            labelY: cy + (ringR + labelOffset) * Math.sin(theta) + 4,
+            colorLight: colors.light,
+            colorDark: colors.dark,
+          });
+        }
+      }
+      return result;
     },
 
     async createGalaxy(form) {
@@ -195,7 +247,7 @@ window.novaApp = function () {
     handleSseAgent(ev) {
       try {
         const msg = JSON.parse(ev.data);
-        if (this.activeTab === 'agents') {
+        if (this.activeTab === 'agents' || this.activeTab === 'live') {
           this.loadAllAgents();
           return;
         }
@@ -217,6 +269,50 @@ window.novaApp = function () {
       const c = slugColor(slug || 'x');
       return `--planet-light:${c.light};--planet-dark:${c.dark};--planet-glow:${c.glow}`;
     },
+
+    startLiveTicker() {
+      if (this._liveRaf) return;
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (prefersReduced) return;
+      let lastTime = performance.now();
+      const degPerSec = 360 / 90;
+      const tick = (now) => {
+        if (this.activeTab !== 'live') {
+          this._liveRaf = null;
+          return;
+        }
+        const dt = (now - lastTime) / 1000;
+        lastTime = now;
+        this.rotationDeg = (this.rotationDeg + degPerSec * dt) % 360;
+        this._liveRaf = requestAnimationFrame(tick);
+      };
+      this._liveRaf = requestAnimationFrame(tick);
+    },
+
+    stopLiveTicker() {
+      if (this._liveRaf) {
+        cancelAnimationFrame(this._liveRaf);
+        this._liveRaf = null;
+      }
+    },
+
+    triggerDemoLine() {
+      const planets = this.livePlanets;
+      if (planets.length < 2) return;
+      if (this._demoTimeout) clearTimeout(this._demoTimeout);
+      const a = planets[Math.floor(Math.random() * planets.length)];
+      let b;
+      do { b = planets[Math.floor(Math.random() * planets.length)]; } while (b.agentId === a.agentId);
+      this.demoLinePath = `M ${a.x} ${a.y} Q 400 300 ${b.x} ${b.y}`;
+      this.demoLineActive = false;
+      requestAnimationFrame(() => { this.demoLineActive = true; });
+      this._demoTimeout = setTimeout(() => {
+        this.demoLineActive = false;
+        this.demoLinePath = '';
+        this._demoTimeout = null;
+      }, 1600);
+    },
+
     humanizeTtl,
   };
 };
