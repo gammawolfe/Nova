@@ -32,8 +32,7 @@ window.novaApp = function () {
     allAgentsLoading: false,
     allAgentsError: null,
     rotationDeg: 0,
-    demoLineActive: false,
-    demoLinePath: '',
+    activeLines: [],
     hoverGalaxy: null,
     sidebarCollapsed: readSidebarState(),
 
@@ -232,8 +231,9 @@ window.novaApp = function () {
       let attempt = 0;
       const open = () => {
         this.sse = new EventSource('/admin/events');
-        this.sse.addEventListener('agent', (ev) => this.handleSseAgent(ev));
+        this.sse.addEventListener('agent',  (ev) => this.handleSseAgent(ev));
         this.sse.addEventListener('tenant', () => this.loadGalaxies());
+        this.sse.addEventListener('task',   (ev) => this.handleSseTask(ev));
         this.sse.onopen = () => { attempt = 0; };
         this.sse.onerror = () => {
           this.sse && this.sse.close();
@@ -259,6 +259,37 @@ window.novaApp = function () {
       } catch {}
     },
 
+    handleSseTask(ev) {
+      if (this.activeTab !== 'live') return;
+      try {
+        const msg = JSON.parse(ev.data);
+        if (!msg.fromAgentId || !msg.toAgentId) return;
+        this.addConversationLine(msg.fromAgentId, msg.toAgentId, msg.action);
+      } catch {}
+    },
+
+    addConversationLine(fromAgentId, toAgentId, action) {
+      const planets = this.livePlanets;
+      const from = planets.find(p => p.agentId === fromAgentId);
+      const to = planets.find(p => p.agentId === toAgentId);
+      if (!from || !to) return;
+      this.activeLines.push({
+        id: Math.random().toString(36).slice(2),
+        x1: from.x,
+        y1: from.y,
+        x2: to.x,
+        y2: to.y,
+        action,
+        expiresAt: performance.now() + 2500,
+      });
+    },
+
+    pruneExpiredLines() {
+      if (this.activeLines.length === 0) return;
+      const now = performance.now();
+      this.activeLines = this.activeLines.filter(l => l.expiresAt > now);
+    },
+
     pushToast(text, kind = 'ok') {
       const id = Math.random().toString(36).slice(2);
       this.toasts.push({ id, text, kind });
@@ -273,7 +304,19 @@ window.novaApp = function () {
     startLiveTicker() {
       if (this._liveRaf) return;
       const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      if (prefersReduced) return;
+      if (prefersReduced) {
+        if (!this._reducedPruneInterval) {
+          this._reducedPruneInterval = setInterval(() => {
+            if (this.activeTab !== 'live') {
+              clearInterval(this._reducedPruneInterval);
+              this._reducedPruneInterval = null;
+              return;
+            }
+            this.pruneExpiredLines();
+          }, 1000);
+        }
+        return;
+      }
       let lastTime = performance.now();
       const degPerSec = 360 / 90;
       const tick = (now) => {
@@ -284,6 +327,7 @@ window.novaApp = function () {
         const dt = (now - lastTime) / 1000;
         lastTime = now;
         this.rotationDeg = (this.rotationDeg + degPerSec * dt) % 360;
+        this.pruneExpiredLines();
         this._liveRaf = requestAnimationFrame(tick);
       };
       this._liveRaf = requestAnimationFrame(tick);
@@ -294,23 +338,19 @@ window.novaApp = function () {
         cancelAnimationFrame(this._liveRaf);
         this._liveRaf = null;
       }
+      if (this._reducedPruneInterval) {
+        clearInterval(this._reducedPruneInterval);
+        this._reducedPruneInterval = null;
+      }
     },
 
     triggerDemoLine() {
       const planets = this.livePlanets;
       if (planets.length < 2) return;
-      if (this._demoTimeout) clearTimeout(this._demoTimeout);
       const a = planets[Math.floor(Math.random() * planets.length)];
       let b;
       do { b = planets[Math.floor(Math.random() * planets.length)]; } while (b.agentId === a.agentId);
-      this.demoLinePath = `M ${a.x} ${a.y} Q 400 300 ${b.x} ${b.y}`;
-      this.demoLineActive = false;
-      requestAnimationFrame(() => { this.demoLineActive = true; });
-      this._demoTimeout = setTimeout(() => {
-        this.demoLineActive = false;
-        this.demoLinePath = '';
-        this._demoTimeout = null;
-      }, 1600);
+      this.addConversationLine(a.agentId, b.agentId, 'queued');
     },
 
     humanizeTtl,

@@ -195,6 +195,7 @@
                   <div style="flex:1;min-width:0">
                     <div style="color:#fff;font-weight:500" x-text="a.name"></div>
                     <div class="nova-mono" x-text="a.agentId"></div>
+                    <div class="nova-mono" x-show="a.did" style="overflow-wrap:anywhere;margin-top:2px;font-size:10px" x-text="a.did"></div>
                   </div>
                   <span class="nova-pill" style="color:var(--text-secondary);border-color:var(--border)" x-text="galaxySlug(a.tenantId)"></span>
                 </div>
@@ -231,7 +232,7 @@
             </div>
             <button class="nova-input" style="width:auto;padding:8px 14px;font-size:12px"
                     @click="triggerDemoLine()" :disabled="allAgents.length < 2">
-              Demo conversation
+              Simulate conversation
             </button>
           </div>
 
@@ -265,7 +266,11 @@
 
             <circle class="nova-live-ring" cx="400" cy="300" r="220" />
 
-            <path class="nova-live-demo-line" :class="demoLineActive && 'is-active'" :d="demoLinePath" />
+            <template x-for="line in activeLines" :key="line.id">
+              <path class="nova-live-line"
+                    :class="`is-${line.action}`"
+                    :d="`M ${line.x1} ${line.y1} Q 400 300 ${line.x2} ${line.y2}`" />
+            </template>
 
             <g class="nova-live-sun">
               <circle cx="400" cy="300" r="24" fill="url(#nova-sun-gradient)" />

@@ -394,28 +394,24 @@ body {
   .nova-live-label { display: none; }
 }
 
-.nova-live-demo-line {
+.nova-live-line {
   fill: none;
-  stroke: var(--accent);
   stroke-width: 1.5;
   stroke-dasharray: 5 5;
-  opacity: 0;
   pointer-events: none;
-  transition: opacity 0.3s ease;
+  animation: nova-live-line-fade 2.5s ease-out forwards;
 }
-.nova-live-demo-line.is-active {
-  opacity: 1;
-  animation: nova-live-demo-fade 1.5s ease-out forwards;
-}
-@keyframes nova-live-demo-fade {
+.nova-live-line.is-queued      { stroke: var(--accent); }
+.nova-live-line.is-completed   { stroke: var(--status-active); }
+.nova-live-line.is-failed      { stroke: var(--status-error); }
+.nova-live-line.is-quarantined { stroke: var(--status-error); }
+
+@keyframes nova-live-line-fade {
   0%   { opacity: 1; stroke-dashoffset: 0; }
   100% { opacity: 0; stroke-dashoffset: -40; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .nova-live-demo-line.is-active {
-    animation: none;
-    opacity: 1;
-  }
+  .nova-live-line { animation: none; opacity: 1; }
 }
 
 .nova-live-empty-sun {
