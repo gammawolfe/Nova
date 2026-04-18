@@ -297,3 +297,49 @@ body {
   margin: 80px auto 0;
   text-align: center;
 }
+
+/* ── Agents tab ────────────────────────────────────────────────────────── */
+.nova-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.nova-agent-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+  display: block;
+}
+.nova-agent-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .nova-agent-card { transition: none; }
+  .nova-agent-card:hover { transform: none; }
+}
+
+.nova-skill-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 14px;
+  background: rgba(245, 166, 35, 0.08);
+  border: 1px solid rgba(245, 166, 35, 0.2);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.nova-capability-indicator {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.nova-capability-indicator.is-on {
+  color: var(--status-active);
+}
