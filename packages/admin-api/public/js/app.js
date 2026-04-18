@@ -28,6 +28,9 @@ window.novaApp = function () {
     approveTarget: null,
     toasts: [],
     sse: null,
+    allAgents: [],
+    allAgentsLoading: false,
+    allAgentsError: null,
     sidebarCollapsed: readSidebarState(),
 
     get activeTab() {
@@ -92,6 +95,7 @@ window.novaApp = function () {
       if (!this.token) return;
       if (this.route.name === 'home')   await this.loadGalaxies();
       if (this.route.name === 'galaxy') await this.loadGalaxy(this.route.slug);
+      if (this.route.name === 'agents') await this.loadAllAgents();
     },
 
     async loadGalaxies() {
@@ -112,6 +116,28 @@ window.novaApp = function () {
         if (e.status === 404) this.currentGalaxy = null;
         else this.pushToast(e.message || 'Load failed', 'err');
       }
+    },
+
+    async loadAllAgents() {
+      this.allAgentsLoading = true;
+      this.allAgentsError = null;
+      try {
+        const galaxiesPromise = this.galaxies.length === 0
+          ? this.loadGalaxies()
+          : Promise.resolve();
+        const [res] = await Promise.all([api('GET', '/admin/agents'), galaxiesPromise]);
+        this.allAgents = res?.agents || [];
+      } catch (e) {
+        this.allAgentsError = e.message || 'Load failed';
+        this.pushToast(this.allAgentsError, 'err');
+      } finally {
+        this.allAgentsLoading = false;
+      }
+    },
+
+    galaxySlug(tenantId) {
+      const match = this.galaxies.find(g => g.id === tenantId || g.slug === tenantId);
+      return match?.slug || tenantId;
     },
 
     async createGalaxy(form) {
@@ -167,9 +193,13 @@ window.novaApp = function () {
     },
 
     handleSseAgent(ev) {
-      if (!this.currentGalaxy) return;
       try {
         const msg = JSON.parse(ev.data);
+        if (this.activeTab === 'agents') {
+          this.loadAllAgents();
+          return;
+        }
+        if (!this.currentGalaxy) return;
         const galaxyId = this.currentGalaxy.id;
         if (msg.tenantId && (msg.tenantId === galaxyId || msg.tenantId === this.currentGalaxy.slug)) {
           this.loadGalaxy(this.route.slug);
