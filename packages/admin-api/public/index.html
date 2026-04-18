@@ -14,8 +14,8 @@
 <body class="nova-surface" x-data="novaApp()" x-init="init()">
 
   <!-- Kinetic ticker -->
-  <div x-show="token" x-cloak style="position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,rgba(0,0,0,0.6),transparent);border-bottom:1px solid var(--glass-border);overflow:hidden;height:28px;display:flex;align-items:center;z-index:50">
-    <div style="display:flex;gap:48px;white-space:nowrap;animation:nova-scroll-x 24s linear infinite;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--ink-muted);padding-left:20px">
+  <div x-show="token" x-cloak style="position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,rgba(0,0,0,0.6),transparent);border-bottom:1px solid var(--border);overflow:hidden;height:28px;display:flex;align-items:center;z-index:50">
+    <div style="display:flex;gap:48px;white-space:nowrap;animation:nova-scroll-x 24s linear infinite;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-secondary);padding-left:20px">
       <span>◉ nova admin</span>
       <span x-text="`${galaxies.length} galaxies`"></span>
       <span x-text="`${pendingAgents.length} pending`"></span>
@@ -70,7 +70,7 @@
                 <span class="nova-pill" :class="g.status === 'active' ? 'nova-pill-active' : 'nova-pill-danger'" x-text="g.status || 'unknown'"></span>
               </a>
             </template>
-            <div x-show="galaxies.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+            <div x-show="galaxies.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
               No galaxies yet.
             </div>
           </div>
@@ -86,7 +86,7 @@
       <!-- GALAXY DETAIL -->
       <template x-if="route.name === 'galaxy'">
         <div>
-          <a href="#/" class="nova-mono" style="color:var(--ink-muted);text-decoration:none">← All galaxies</a>
+          <a href="#/" class="nova-mono" style="color:var(--text-secondary);text-decoration:none">← All galaxies</a>
 
           <template x-if="currentGalaxy">
             <div style="margin-top:16px">
@@ -115,7 +115,7 @@
                     <button class="nova-input" style="width:auto;padding:8px 14px" @click="reject(a.agentId)">Reject</button>
                   </div>
                 </template>
-                <div x-show="pendingAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                <div x-show="pendingAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
                   No pending planets. Issue an invite below.
                 </div>
               </div>
@@ -134,7 +134,7 @@
                     <span class="nova-pill nova-pill-active">Active</span>
                   </div>
                 </template>
-                <div x-show="activeAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                <div x-show="activeAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
                   No active planets yet. Invite one below.
                 </div>
               </div>
@@ -147,7 +147,7 @@
           </template>
 
           <template x-if="!currentGalaxy">
-            <div class="nova-glass" style="margin-top:32px;text-align:center;color:var(--ink-muted)">
+            <div class="nova-glass" style="margin-top:32px;text-align:center;color:var(--text-secondary)">
               Galaxy not found.
             </div>
           </template>
