@@ -1,6 +1,15 @@
 import { api, setToken, clearToken, getToken, onUnauthorized } from './api.js';
 import { slugColor, humanizeTtl } from './utils.js';
 
+function readSidebarState() {
+  try { return localStorage.getItem('nova-admin-sidebar-collapsed') === '1'; }
+  catch { return false; }
+}
+function writeSidebarState(collapsed) {
+  try { localStorage.setItem('nova-admin-sidebar-collapsed', collapsed ? '1' : '0'); }
+  catch {}
+}
+
 window.novaApp = function () {
   return {
     token: getToken() || '',
@@ -19,6 +28,23 @@ window.novaApp = function () {
     approveTarget: null,
     toasts: [],
     sse: null,
+    sidebarCollapsed: readSidebarState(),
+
+    get activeTab() {
+      switch (this.route.name) {
+        case 'home':
+        case 'galaxy':  return 'galaxies';
+        case 'agents':  return 'agents';
+        case 'live':    return 'live';
+        case 'audit':   return 'audit';
+        default:        return 'galaxies';
+      }
+    },
+
+    toggleSidebar() {
+      this.sidebarCollapsed = !this.sidebarCollapsed;
+      writeSidebarState(this.sidebarCollapsed);
+    },
 
     init() {
       onUnauthorized(() => {
@@ -169,5 +195,8 @@ function parseRoute() {
   const h = location.hash.replace(/^#/, '');
   const galaxy = h.match(/^\/galaxy\/([^/]+)$/);
   if (galaxy) return { name: 'galaxy', slug: decodeURIComponent(galaxy[1]) };
+  if (h === '/agents') return { name: 'agents' };
+  if (h === '/live')   return { name: 'live' };
+  if (h === '/audit')  return { name: 'audit' };
   return { name: 'home' };
 }
