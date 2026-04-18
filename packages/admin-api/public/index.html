@@ -170,12 +170,53 @@
         </div>
       </template>
 
-      <!-- PLACEHOLDER: Agents -->
+      <!-- AGENTS -->
       <template x-if="route.name === 'agents'">
-        <div class="nova-placeholder">
+        <div>
           <div class="nova-eyebrow">◉ AGENTS</div>
-          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
-          <p class="nova-subtitle">Flat cross-galaxy view of every registered agent — advertised skills, trust tier, DID, last-seen.</p>
+          <h1 class="nova-display" style="font-size:40px;margin:6px 0">Agents</h1>
+          <p class="nova-subtitle" style="margin-bottom:24px" x-text="`${allAgents.length} active ${allAgents.length === 1 ? 'agent' : 'agents'} across your galaxies`"></p>
+
+          <div x-show="allAgentsLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading agents…
+          </div>
+
+          <div x-show="allAgentsError" class="nova-glass" style="text-align:center;color:var(--status-error)" x-text="allAgentsError"></div>
+
+          <div x-show="!allAgentsLoading && !allAgentsError && allAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            No active agents yet. Approve a pending planet in a galaxy to see it here.
+          </div>
+
+          <div x-show="!allAgentsLoading && !allAgentsError && allAgents.length > 0" class="nova-agent-grid">
+            <template x-for="a in allAgents" :key="a.agentId">
+              <a class="nova-agent-card" :href="`#/galaxy/${encodeURIComponent(galaxySlug(a.tenantId))}`">
+                <div class="nova-row" style="margin-bottom:12px;align-items:flex-start">
+                  <div class="nova-planet" :style="planetStyle(galaxySlug(a.tenantId))" style="margin-top:2px"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="color:#fff;font-weight:500" x-text="a.name"></div>
+                    <div class="nova-mono" x-text="a.agentId"></div>
+                  </div>
+                  <span class="nova-pill" style="color:var(--text-secondary);border-color:var(--border)" x-text="galaxySlug(a.tenantId)"></span>
+                </div>
+
+                <p x-show="a.description" class="nova-subtitle" style="margin-bottom:12px" x-text="a.description"></p>
+
+                <div x-show="a.skills && a.skills.length > 0" style="margin-bottom:12px">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px">
+                    <template x-for="s in a.skills" :key="s.id">
+                      <span class="nova-skill-chip" :title="s.description" x-text="s.name"></span>
+                    </template>
+                  </div>
+                </div>
+
+                <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px">
+                  <span class="nova-capability-indicator" :class="a.capabilities?.streaming && 'is-on'">streaming</span>
+                  <span class="nova-capability-indicator" :class="a.capabilities?.pushNotifications && 'is-on'">push</span>
+                  <span class="nova-capability-indicator" :class="a.capabilities?.stateTransitionHistory && 'is-on'">history</span>
+                </div>
+              </a>
+            </template>
+          </div>
         </div>
       </template>
 
