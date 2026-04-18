@@ -40,9 +40,13 @@ export async function issueUcan(tenantId: string, data: {
   const expiresAt = new Date(exp * 1000).toISOString();
 
   const header = { alg: 'EdDSA', typ: 'JWT', ucv: '0.10.0' };
+  // Nova-as-notary model: UCAN is presented to Nova's gateway, which verifies
+  // aud === its own DID. Both iss and aud are Nova's root DID; the subject
+  // agent is the bearer. Sender identity in audits derives from the trust-
+  // registry lookup of the bearer's DID during the Gate pipeline.
   const payload = {
     iss: novaDid,
-    aud: data.subjectDid,
+    aud: novaDid,
     exp,
     att: data.capabilities.map(cap => ({ with: cap, can: 'invoke' })),
     prf: [],

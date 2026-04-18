@@ -1,11 +1,20 @@
+import fsp from 'fs/promises';
+import path from 'path';
 import { Router } from 'express';
 import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared/src/admin-schemas';
+import { DATA_ROOT } from '@nova/shared/src/tenant';
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { ctx } from '../middleware/ctx';
+
+async function loadNovaDid(): Promise<string | null> {
+  try {
+    return (await fsp.readFile(path.join(DATA_ROOT, 'keys', 'nova.did'), 'utf8')).trim();
+  } catch { return null; }
+}
 
 const UCAN_CLAIM_TTL_SECONDS = 3600;
 function ucanClaimKey(tenantId: string, agentId: string): string {
@@ -70,7 +79,7 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
     // Flip status to active
     const agent = await agentService.approveAgent(tenantId, agentId, data.notes);
 
-    // Create trust registry entry
+    // Create trust registry entry for the agent itself
     if (agent.did) {
       await trustService.addActor({ tenantId, agentId }, {
         did: agent.did,
@@ -79,6 +88,25 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
         allowedSkills: data.allowedSkills,
         notes: `Auto-created on agent approval${data.notes ? ': ' + data.notes : ''}`,
       });
+    }
+
+    // Auto-seed Nova's root DID so cross-destination UCANs (issued by Nova) pass the gate.
+    // Nova signs every cross-agent UCAN; every recipient needs Nova's DID in its trust
+    // registry or inter-agent messaging is dead-on-arrival.
+    const novaDid = await loadNovaDid();
+    if (novaDid) {
+      try {
+        await trustService.addActor({ tenantId, agentId }, {
+          did: novaDid,
+          displayName: 'Nova root (notary)',
+          tier: 3,
+          allowedSkills: data.allowedSkills,
+          notes: 'Auto-seeded at approval so cross-destination Nova-signed UCANs are accepted',
+        });
+      } catch (err: any) {
+        // Non-fatal: agent still approved. Log for visibility.
+        logger.warn({ err: err.message, tenantId, agentId }, 'Failed to auto-seed Nova root trust entry');
+      }
     }
 
     // Issue initial UCAN
