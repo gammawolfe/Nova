@@ -14,9 +14,11 @@ export interface TenantLifecycleEvent {
 
 export interface TaskLifecycleEvent {
   action: 'queued' | 'completed' | 'failed' | 'quarantined';
-  tenantId: string;
-  agentId: string;
   taskId: string;
+  toTenantId: string;
+  toAgentId: string;
+  fromTenantId?: string;
+  fromAgentId?: string;
 }
 
 export function agentIndexKey(agentId: string): string {
@@ -25,6 +27,10 @@ export function agentIndexKey(agentId: string): string {
 
 export function agentMetaKey(agentId: string): string {
   return `nova:agent-meta:${agentId}`;
+}
+
+export function didIndexKey(did: string): string {
+  return `nova:did-index:${did}`;
 }
 
 /** Public discovery metadata stored in a Redis Hash per agent. */
@@ -36,6 +42,7 @@ export interface AgentMeta {
   status: string;
   skills: string;        // JSON-serialized
   capabilities: string;  // JSON-serialized
+  did: string;           // Empty string if legacy data pre-DID-index
 }
 
 export interface AgentLifecycleEvent {
@@ -59,9 +66,11 @@ export async function indexAgentMeta(
     status: string;
     skills: Array<{ id: string; name: string; description: string; tags?: string[] | undefined; [key: string]: unknown }>;
     capabilities: { streaming: boolean; pushNotifications: boolean; stateTransitionHistory: boolean };
+    did?: string | undefined;
   }
 ): Promise<void> {
-  await redis.pipeline()
+  const did = config.did ?? '';
+  const pipe = redis.pipeline()
     .set(agentIndexKey(config.agentId), config.tenantId)
     .hset(agentMetaKey(config.agentId), {
       agentId: config.agentId,
@@ -71,9 +80,11 @@ export async function indexAgentMeta(
       status: config.status,
       skills: JSON.stringify(config.skills),
       capabilities: JSON.stringify(config.capabilities),
+      did,
     })
-    .sadd(AGENT_REGISTRY_SET, config.agentId)
-    .exec();
+    .sadd(AGENT_REGISTRY_SET, config.agentId);
+  if (did) pipe.set(didIndexKey(did), config.agentId);
+  await pipe.exec();
 }
 
 /**
@@ -81,11 +92,13 @@ export async function indexAgentMeta(
  * Called on reject and delete — updates status in Hash and removes from registry Set.
  */
 export async function deindexAgent(redis: IORedis, agentId: string): Promise<void> {
-  await redis.pipeline()
+  const did = await redis.hget(agentMetaKey(agentId), 'did');
+  const pipe = redis.pipeline()
     .hset(agentMetaKey(agentId), 'status', 'deregistered')
     .srem(AGENT_REGISTRY_SET, agentId)
-    .del(agentIndexKey(agentId))
-    .exec();
+    .del(agentIndexKey(agentId));
+  if (did) pipe.del(didIndexKey(did));
+  await pipe.exec();
 }
 
 /** Parsed agent metadata for discovery responses. */
@@ -97,6 +110,7 @@ export interface ParsedAgentMeta {
   status: string;
   skills: Array<{ id: string; name: string; description: string; tags?: string[] | undefined }>;
   capabilities: { streaming: boolean; pushNotifications: boolean; stateTransitionHistory: boolean };
+  did?: string | undefined;
 }
 
 function parseAgentMeta(data: Record<string, string>): ParsedAgentMeta | null {
@@ -110,6 +124,7 @@ function parseAgentMeta(data: Record<string, string>): ParsedAgentMeta | null {
       status: data['status']!,
       skills: JSON.parse(data['skills'] || '[]'),
       capabilities: JSON.parse(data['capabilities'] || '{}'),
+      did: data['did'] || undefined,
     };
   } catch {
     return null;
@@ -122,6 +137,13 @@ function parseAgentMeta(data: Record<string, string>): ParsedAgentMeta | null {
 export async function getAgentMeta(redis: IORedis, agentId: string): Promise<ParsedAgentMeta | null> {
   const data = await redis.hgetall(agentMetaKey(agentId));
   return parseAgentMeta(data);
+}
+
+export async function getAgentByDid(redis: IORedis, did: string): Promise<ParsedAgentMeta | null> {
+  if (!did) return null;
+  const agentId = await redis.get(didIndexKey(did));
+  if (!agentId) return null;
+  return getAgentMeta(redis, agentId);
 }
 
 /**
