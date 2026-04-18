@@ -343,3 +343,86 @@ body {
 .nova-capability-indicator.is-on {
   color: var(--status-active);
 }
+
+/* ── Live tab ──────────────────────────────────────────────────────────── */
+.nova-live-wrap { min-height: 400px; }
+.nova-live-svg {
+  width: 100%;
+  height: min(calc(100vh - 240px), 640px);
+  display: block;
+  user-select: none;
+}
+
+.nova-live-ring {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+  stroke-dasharray: 4 6;
+}
+
+.nova-live-sun { filter: drop-shadow(0 0 18px rgba(245, 166, 35, 0.55)); }
+.nova-live-sun-label {
+  fill: #000;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  pointer-events: none;
+  text-transform: uppercase;
+}
+
+.nova-live-planet-group { cursor: pointer; }
+.nova-live-planet-group a { text-decoration: none; }
+.nova-live-planet {
+  transition: filter 0.15s ease;
+}
+.nova-live-planet-group:hover .nova-live-planet {
+  filter: brightness(1.25);
+}
+
+.nova-live-label {
+  fill: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  pointer-events: none;
+  transition: fill 0.15s ease;
+}
+.nova-live-planet-group:hover .nova-live-label {
+  fill: var(--text);
+}
+
+@media (max-width: 640px) {
+  .nova-live-label { display: none; }
+}
+
+.nova-live-demo-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 5;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.nova-live-demo-line.is-active {
+  opacity: 1;
+  animation: nova-live-demo-fade 1.5s ease-out forwards;
+}
+@keyframes nova-live-demo-fade {
+  0%   { opacity: 1; stroke-dashoffset: 0; }
+  100% { opacity: 0; stroke-dashoffset: -40; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nova-live-demo-line.is-active {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+.nova-live-empty-sun {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #ffe08a, #f5a623);
+  box-shadow: 0 0 24px rgba(245, 166, 35, 0.4);
+  margin: 24px auto 0;
+}
