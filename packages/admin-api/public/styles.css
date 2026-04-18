@@ -1,22 +1,25 @@
 :root {
-  --space-0: #020409;
-  --space-1: #050814;
-  --nebula-purple: #a855f7;
-  --nebula-violet: #a78bfa;
-  --plasma-cyan: #22d3ee;
-  --plasma-blue: #3b82f6;
-  --signal-ok: #4ade80;
-  --signal-warn: #f59e0b;
-  --signal-danger: #f87171;
-  --ink-bright: #fff;
-  --ink: #e5e7eb;
-  --ink-muted: #94a3b8;
-  --ink-faint: #64748b;
-  --glass-bg: rgba(255, 255, 255, 0.03);
-  --glass-border: rgba(168, 139, 250, 0.18);
+  /* chrome */
+  --bg:             #000;
+  --surface:        #0a0a0a;
+  --border:         #1a1a1a;
+  --border-hover:   #333;
+  --text:           #fff;
+  --text-secondary: #888;
+  --text-muted:     #555;
 
-  --font-display: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
-  --font-mono: 'SF Mono', ui-monospace, Menlo, monospace;
+  /* brand — primary accent */
+  --accent:         #f5a623;
+
+  /* status */
+  --status-active:  #50e3c2;
+  --status-recent:  #a78bfa;
+  --status-idle:    #333;
+  --status-error:   #e00;
+
+  /* typography */
+  --font-display:   'Outfit', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  --font-mono:      'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -24,58 +27,26 @@
 html, body { margin: 0; padding: 0; min-height: 100vh; }
 
 body {
-  background: var(--space-1);
-  color: var(--ink);
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--font-display);
   font-size: 14px;
   line-height: 1.5;
   overflow-x: hidden;
 }
 
-.nova-surface {
-  position: relative;
-}
-.nova-surface::before,
-.nova-surface::after {
+/* ── Ambient background (static, amber-tinted, 8% opacity) ─────────────── */
+.nova-surface { position: relative; }
+.nova-surface::before {
   content: '';
   position: fixed;
   inset: -20%;
   pointer-events: none;
   z-index: -1;
-}
-.nova-surface::before {
   background:
-    radial-gradient(ellipse 60% 50% at 20% 30%, rgba(168, 85, 247, 0.45), transparent 60%),
-    radial-gradient(ellipse 50% 40% at 80% 20%, rgba(34, 211, 238, 0.35), transparent 60%),
-    radial-gradient(ellipse 70% 50% at 60% 90%, rgba(59, 130, 246, 0.3), transparent 60%),
-    radial-gradient(ellipse 40% 30% at 10% 80%, rgba(236, 72, 153, 0.25), transparent 60%);
+    radial-gradient(ellipse 60% 50% at 20% 30%, rgba(245, 166, 35, 0.08), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 80% 70%, rgba(245, 166, 35, 0.05), transparent 60%);
   filter: blur(40px);
-  animation: nova-drift 14s ease-in-out infinite;
-}
-.nova-surface::after {
-  background-image:
-    radial-gradient(1px 1px at 8% 12%, #fff, transparent),
-    radial-gradient(1px 1px at 32% 48%, #fff, transparent),
-    radial-gradient(1px 1px at 67% 22%, #fff, transparent),
-    radial-gradient(1px 1px at 88% 78%, #fff, transparent),
-    radial-gradient(1px 1px at 41% 88%, #fff, transparent),
-    radial-gradient(2px 2px at 74% 34%, rgba(255, 255, 255, 0.9), transparent);
-  opacity: 0.75;
-  animation: nova-twinkle 4s ease-in-out infinite;
-}
-
-@keyframes nova-drift {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50%      { transform: translate(-20px, -15px) scale(1.05); }
-}
-@keyframes nova-twinkle {
-  0%, 100% { opacity: 0.4; }
-  50%      { opacity: 0.9; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .nova-surface::before,
-  .nova-surface::after { animation: none; }
 }
 
 /* ── Layout ────────────────────────────────────────────────────────────── */
@@ -86,68 +57,43 @@ body {
 /* ── Typography ────────────────────────────────────────────────────────── */
 .nova-display {
   font-size: 48px; font-weight: 200; line-height: 1; letter-spacing: -1.5px;
-  background: linear-gradient(135deg, #fff 0%, var(--nebula-violet) 40%, var(--plasma-cyan) 80%, #fff 100%);
+  font-family: var(--font-display);
+  background: linear-gradient(135deg, #fff 0%, var(--accent) 60%, #fff 100%);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
-  filter: drop-shadow(0 0 24px rgba(168, 139, 250, 0.35));
+  filter: drop-shadow(0 0 24px rgba(245, 166, 35, 0.25));
 }
 .nova-eyebrow {
   font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
-  color: var(--plasma-cyan); font-weight: 700;
+  color: var(--accent); font-weight: 700;
 }
-.nova-subtitle { color: var(--ink-muted); font-size: 14px; }
-.nova-mono { font-family: var(--font-mono); font-size: 12px; color: var(--ink-muted); }
+.nova-subtitle { color: var(--text-secondary); font-size: 14px; }
+.nova-mono { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
 
-/* ── Glass panel ───────────────────────────────────────────────────────── */
+/* ── Card (flat surface, no longer glass) ──────────────────────────────── */
 .nova-glass {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
   padding: 16px;
 }
 
-/* ── Spotlight (rotating conic border) ─────────────────────────────────── */
-.nova-spotlight { position: relative; }
-.nova-spotlight::before {
-  content: '';
-  position: absolute; inset: -1px;
-  border-radius: inherit;
-  background: conic-gradient(from 0deg, transparent 0deg, rgba(34, 211, 238, 0.6) 40deg, transparent 80deg, transparent 360deg);
-  animation: nova-spin 6s linear infinite;
-  z-index: -1;
-  filter: blur(6px);
-  opacity: 0.5;
-}
-@keyframes nova-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
-  .nova-spotlight::before { animation: none; opacity: 0; }
-}
-
-/* ── CTA ───────────────────────────────────────────────────────────────── */
+/* ── CTA (static amber glow, no pulse) ─────────────────────────────────── */
 .nova-cta {
-  background: linear-gradient(135deg, var(--plasma-cyan) 0%, var(--nebula-purple) 50%, #ec4899 100%);
-  color: #fff; border: none; cursor: pointer;
-  border-radius: 12px; padding: 12px 22px;
+  background: var(--accent);
+  color: #000; border: none; cursor: pointer;
+  border-radius: 10px; padding: 12px 22px;
   font-size: 14px; font-weight: 600; letter-spacing: 0.3px;
   display: inline-flex; align-items: center; gap: 8px;
-  animation: nova-pulse 3s ease-in-out infinite;
+  box-shadow: 0 0 32px rgba(245, 166, 35, 0.35);
   font-family: inherit;
 }
-.nova-cta[disabled] { opacity: 0.5; cursor: not-allowed; animation: none; }
-@keyframes nova-pulse {
-  0%, 100% { box-shadow: 0 0 32px rgba(168, 85, 247, 0.35), 0 0 64px rgba(34, 211, 238, 0.15); }
-  50%      { box-shadow: 0 0 56px rgba(168, 85, 247, 0.55), 0 0 120px rgba(34, 211, 238, 0.25); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .nova-cta { animation: none; box-shadow: 0 0 32px rgba(168, 85, 247, 0.35); }
-}
+.nova-cta[disabled] { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
 
-/* ── Planet ────────────────────────────────────────────────────────────── */
+/* ── Planet (colors supplied per-galaxy via CSS custom properties) ─────── */
 .nova-planet {
   width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
-  background: radial-gradient(circle at 30% 30%, var(--planet-light, var(--plasma-cyan)), var(--planet-dark, #0e7490));
-  box-shadow: 0 0 20px var(--planet-glow, rgba(34, 211, 238, 0.4));
+  background: radial-gradient(circle at 30% 30%, var(--planet-light, var(--accent)), var(--planet-dark, #7a4e00));
+  box-shadow: 0 0 16px var(--planet-glow, rgba(245, 166, 35, 0.3));
 }
 .nova-planet-lg { width: 56px; height: 56px; }
 
@@ -157,23 +103,23 @@ body {
   font-size: 10px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
   border: 1px solid currentColor;
 }
-.nova-pill-pending { color: var(--plasma-cyan);   background: rgba(34, 211, 238, 0.15); }
-.nova-pill-active  { color: var(--signal-ok);     background: rgba(74, 222, 128, 0.15); }
-.nova-pill-danger  { color: var(--signal-danger); background: rgba(248, 113, 113, 0.15); }
+.nova-pill-pending { color: var(--status-recent); background: rgba(167, 139, 250, 0.1); }
+.nova-pill-active  { color: var(--status-active); background: rgba(80, 227, 194, 0.1); }
+.nova-pill-danger  { color: var(--status-error);  background: rgba(238, 0, 0, 0.1); }
 
 /* ── Form controls ─────────────────────────────────────────────────────── */
 .nova-input {
   width: 100%;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 11px 14px;
-  color: var(--ink);
+  color: var(--text);
   font-size: 14px;
   font-family: inherit;
 }
-.nova-input:focus { outline: none; border-color: var(--plasma-cyan); }
-.nova-input.is-error { border-color: var(--signal-danger); animation: nova-shake 0.4s ease-out; }
+.nova-input:focus { outline: none; border-color: var(--accent); }
+.nova-input.is-error { border-color: var(--status-error); animation: nova-shake 0.4s ease-out; }
 @keyframes nova-shake {
   0%, 100% { transform: translateX(0); }
   25%      { transform: translateX(-6px); }
@@ -185,21 +131,21 @@ body {
 .nova-label {
   display: block; margin-bottom: 6px;
   font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
-  color: var(--plasma-cyan); font-weight: 600;
+  color: var(--accent); font-weight: 600;
 }
-.nova-error { color: var(--signal-danger); font-size: 12px; margin-top: 4px; }
+.nova-error { color: var(--status-error); font-size: 12px; margin-top: 4px; }
 
 /* ── Modal ─────────────────────────────────────────────────────────────── */
 .nova-modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(2, 4, 9, 0.75); backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px);
   display: flex; align-items: center; justify-content: center;
   z-index: 100; padding: 32px;
 }
 .nova-modal {
   max-width: 520px; width: 100%;
-  background: radial-gradient(ellipse at top right, #1a0b3d 0%, #050814 70%);
-  border: 1px solid var(--glass-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 16px; padding: 28px;
   max-height: calc(100vh - 64px); overflow-y: auto;
 }
@@ -211,15 +157,14 @@ body {
   z-index: 200;
 }
 .nova-toast {
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  backdrop-filter: blur(12px);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 10px; padding: 12px 16px;
-  color: var(--ink); font-size: 13px;
+  color: var(--text); font-size: 13px;
   min-width: 240px; max-width: 360px;
 }
-.nova-toast.is-err { border-color: rgba(248, 113, 113, 0.4); }
-.nova-toast.is-ok  { border-color: rgba(74, 222, 128, 0.4); }
+.nova-toast.is-err { border-color: var(--status-error); }
+.nova-toast.is-ok  { border-color: var(--status-active); }
 
 /* ── Ticker ────────────────────────────────────────────────────────────── */
 @keyframes nova-scroll-x {
