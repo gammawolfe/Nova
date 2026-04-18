@@ -220,12 +220,71 @@
         </div>
       </template>
 
-      <!-- PLACEHOLDER: Live -->
+      <!-- LIVE -->
       <template x-if="route.name === 'live'">
-        <div class="nova-placeholder">
-          <div class="nova-eyebrow">◉ LIVE</div>
-          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
-          <p class="nova-subtitle">Solar-system visualization. Planets orbit a star; dotted lines light up as A2A conversations flow, streamed from <code>/admin/events</code>.</p>
+        <div class="nova-live-wrap">
+          <div class="nova-row" style="justify-content:space-between;margin-bottom:24px;align-items:flex-start">
+            <div>
+              <div class="nova-eyebrow">◉ LIVE</div>
+              <h1 class="nova-display" style="font-size:40px;margin:6px 0">Live</h1>
+              <p class="nova-subtitle" x-text="`${allAgents.length} ${allAgents.length === 1 ? 'planet' : 'planets'} orbiting Nova`"></p>
+            </div>
+            <button class="nova-input" style="width:auto;padding:8px 14px;font-size:12px"
+                    @click="triggerDemoLine()" :disabled="allAgents.length < 2">
+              Demo conversation
+            </button>
+          </div>
+
+          <div x-show="allAgentsLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading agents…
+          </div>
+
+          <div x-show="!allAgentsLoading && allAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            <div class="nova-live-empty-sun"></div>
+            <p style="margin-top:16px">No planets orbiting yet. Approve a pending planet in a galaxy to see it here.</p>
+          </div>
+
+          <svg x-show="!allAgentsLoading && allAgents.length > 0"
+               class="nova-live-svg"
+               viewBox="0 0 800 600"
+               preserveAspectRatio="xMidYMid meet"
+               role="img"
+               aria-label="Solar-system visualization of active agents">
+            <defs>
+              <radialGradient id="nova-sun-gradient" cx="30%" cy="30%">
+                <stop offset="0%" stop-color="#ffe08a" />
+                <stop offset="100%" stop-color="#f5a623" />
+              </radialGradient>
+              <template x-for="p in livePlanets" :key="p.agentId">
+                <radialGradient :id="`planet-${p.agentId}`" cx="30%" cy="30%">
+                  <stop offset="0%" :stop-color="p.colorLight" />
+                  <stop offset="100%" :stop-color="p.colorDark" />
+                </radialGradient>
+              </template>
+            </defs>
+
+            <circle class="nova-live-ring" cx="400" cy="300" r="220" />
+
+            <path class="nova-live-demo-line" :class="demoLineActive && 'is-active'" :d="demoLinePath" />
+
+            <g class="nova-live-sun">
+              <circle cx="400" cy="300" r="24" fill="url(#nova-sun-gradient)" />
+              <text x="400" y="303" class="nova-live-sun-label" text-anchor="middle">NOVA</text>
+            </g>
+
+            <template x-for="p in livePlanets" :key="p.agentId">
+              <a :href="`#/galaxy/${encodeURIComponent(p.galaxySlug)}`">
+                <g class="nova-live-planet-group">
+                  <circle class="nova-live-planet"
+                          :cx="p.x" :cy="p.y" r="10"
+                          :fill="`url(#planet-${p.agentId})`" />
+                  <text class="nova-live-label" :x="p.labelX" :y="p.labelY" text-anchor="middle"
+                        x-text="p.name"></text>
+                  <title x-text="`${p.agentId} — ${p.galaxySlug}`"></title>
+                </g>
+              </a>
+            </template>
+          </svg>
         </div>
       </template>
 
