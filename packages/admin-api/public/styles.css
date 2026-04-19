@@ -476,3 +476,41 @@ body {
   margin: 0;
   white-space: pre;
 }
+
+/* ── Agent detail panel ────────────────────────────────────────────────── */
+.nova-agent-detail {
+  position: fixed;
+  top: 28px;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  padding: 28px 24px;
+  overflow-y: auto;
+  z-index: 60;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.3);
+}
+
+.nova-agent-detail-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.nova-agent-detail-close:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
