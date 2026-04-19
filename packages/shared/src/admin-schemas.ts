@@ -45,7 +45,7 @@ export const SkillDefinitionSchema = z.object({
 export const AgentCreateSchema = z.object({
   agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
   name: z.string().min(1).max(200),
-  description: z.string().max(1000).optional(),
+  description: z.string().min(1).max(1000),
   operatorUrl: z.string().url().optional(),
   skills: z.array(SkillDefinitionSchema).min(1),
   highPrivilegeSkills: z.array(z.string()).default([]),
@@ -55,8 +55,8 @@ export const AgentCreateSchema = z.object({
 
 export const AgentUpdateSchema = z.object({
   name: z.string().min(1).max(200).optional(),
-  description: z.string().max(1000).optional(),
-  operatorUrl: z.string().url().optional(),
+  description: z.string().min(1).max(1000).optional(),
+  operatorUrl: z.string().url().nullable().optional(),
   skills: z.array(SkillDefinitionSchema).optional(),
   highPrivilegeSkills: z.array(z.string()).optional(),
   confirmTimeouts: z.record(z.number().int().min(1)).optional(),
@@ -112,7 +112,7 @@ export const SelfRegisterSchema = z.object({
   invite: z.string().min(1),               // Signed JWT from POST /admin/tenants/:tenantId/invites
   agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
   name: z.string().min(1).max(200),
-  description: z.string().max(1000).optional(),
+  description: z.string().min(1).max(1000),
   publicKey: z.string().min(1),           // Ed25519 public key (base64)
   did: z.string().startsWith('did:'),      // did:key:z6Mk...
   operatorUrl: z.string().url().optional(),

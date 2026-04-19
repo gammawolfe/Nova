@@ -125,7 +125,7 @@ export function registerTools(_server: McpServer): void {
       inputSchema: {
         agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).describe('Must match an identity created via nova_generate_identity.'),
         name: z.string().min(1).max(200).describe('Human-readable agent name (displayed in admin UI / agent cards)'),
-        description: z.string().max(1000).optional(),
+        description: z.string().min(1).max(1000).describe('Short description of what this agent does (required — appears on the public agent card).'),
         invite: z.string().min(1).describe('The invite JWT from the operator. Consumed on this call (one-time use).'),
         skills: z.array(z.object({
           id: z.string().min(1),
