@@ -518,6 +518,56 @@
         </div>
       </template>
 
+      <!-- AGENT DETAIL PANEL -->
+      <aside class="nova-agent-detail" x-show="selectedAgent" x-cloak>
+        <button class="nova-agent-detail-close" @click="closeAgentDetail()" aria-label="Close">×</button>
+
+        <div class="nova-eyebrow">◉ AGENT</div>
+        <h2 class="nova-display" style="font-size:28px;margin:8px 0 12px" x-text="selectedAgent?.name"></h2>
+
+        <div class="nova-mono" style="margin-bottom:16px" x-text="selectedAgent?.agentId"></div>
+
+        <div style="margin-bottom:16px">
+          <div class="nova-label">galaxy</div>
+          <a :href="`#/galaxy/${encodeURIComponent(galaxySlug(selectedAgent?.tenantId))}`"
+             class="nova-pill"
+             style="color:var(--text-secondary);border-color:var(--border);text-decoration:none"
+             x-text="galaxySlug(selectedAgent?.tenantId)"></a>
+        </div>
+
+        <div x-show="selectedAgent?.did" style="margin-bottom:16px">
+          <div class="nova-label">did</div>
+          <div class="nova-mono" style="overflow-wrap:anywhere;font-size:11px" x-text="selectedAgent?.did"></div>
+        </div>
+
+        <div x-show="selectedAgent?.description" style="margin-bottom:16px">
+          <div class="nova-label">description</div>
+          <p class="nova-subtitle" style="margin:0" x-text="selectedAgent?.description"></p>
+        </div>
+
+        <div x-show="selectedAgent?.skills?.length > 0" style="margin-bottom:16px">
+          <div class="nova-label" style="margin-bottom:8px">skills</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <template x-for="s in (selectedAgent?.skills || [])" :key="s.id">
+              <div style="padding:10px;border:1px solid var(--border);border-radius:8px">
+                <div style="color:#fff;font-weight:500" x-text="s.name"></div>
+                <div class="nova-mono" style="font-size:10px;margin-top:2px" x-text="s.id"></div>
+                <p x-show="s.description" class="nova-subtitle" style="margin:6px 0 0" x-text="s.description"></p>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div>
+          <div class="nova-label" style="margin-bottom:8px">capabilities</div>
+          <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px">
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.streaming && 'is-on'">streaming</span>
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.pushNotifications && 'is-on'">push</span>
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.stateTransitionHistory && 'is-on'">history</span>
+          </div>
+        </div>
+      </aside>
+
     </section>
 
     <!-- Toasts -->
