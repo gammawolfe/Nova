@@ -1,6 +1,5 @@
 // packages/task-queue/src/inbox.ts
 import fsp from 'fs/promises';
-import path from 'path';
 import { redis } from './index';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
@@ -41,8 +40,9 @@ export interface InflightEntry {
  * participant (used by the reclaim worker's iteration).
  */
 export async function enqueue(ctx: TenantContext, task: QueuedTask): Promise<void> {
+  const entry: InflightEntry = { taskId: task.taskId, task, reclaimCount: 0 };
   await redis.pipeline()
-    .lpush(inboxKey(ctx), JSON.stringify(task))
+    .lpush(inboxKey(ctx), JSON.stringify(entry))
     .sadd(BROKER_AGENTS_SET, memberKey(ctx))
     .exec();
 }
@@ -68,25 +68,28 @@ export async function pull(
   if (!result) return null;
 
   const [, payload] = result;
-  let task: QueuedTask;
+  let entry: InflightEntry;
   try {
-    task = JSON.parse(payload);
+    entry = JSON.parse(payload);
+    if (!entry.taskId || !entry.task) throw new Error('malformed entry');
   } catch (err) {
     logger.error({ err, ctx }, 'Inbox payload malformed; dropping');
     return null;
   }
 
   // Skip expired tasks — sender's TTL already passed
-  if (new Date(task.expiresAt) <= new Date()) {
-    logger.info({ ctx, taskId: task.taskId }, 'Inbox task TTL expired at pull; dropping');
+  if (new Date(entry.task.expiresAt) <= new Date()) {
+    logger.info({ ctx, taskId: entry.taskId }, 'Inbox task TTL expired at pull; dropping');
     return null;
   }
 
   const visibleUntilMs = Date.now() + BROKER_VISIBILITY_TIMEOUT_MS;
-  const entry: InflightEntry = { taskId: task.taskId, task, reclaimCount: 0 };
-  await redis.zadd(inflightKey(ctx), visibleUntilMs, JSON.stringify(entry));
+  // Preserve reclaimCount from the entry (will be 0 on a fresh enqueue,
+  // incremented on redelivery from reclaim).
+  const inflight: InflightEntry = { ...entry, reclaimCount: entry.reclaimCount ?? 0 };
+  await redis.zadd(inflightKey(ctx), visibleUntilMs, JSON.stringify(inflight));
 
-  return { task, visibleUntil: new Date(visibleUntilMs) };
+  return { task: entry.task, visibleUntil: new Date(visibleUntilMs) };
 }
 
 /** Result of calling respond. */
@@ -162,14 +165,14 @@ export async function reclaim(ctx: TenantContext): Promise<{ redelivered: number
           completedAt: new Date().toISOString(),
           schemaVersion: '1.0',
         },
-        failureReason: 'exhausted_retries',
+        failureReason: 'broker_no_response',
         httpStatus: 0,
         attemptCount: entry.reclaimCount + 1,
       });
       deadLettered += 1;
     } else {
       const updated: InflightEntry = { ...entry, reclaimCount: entry.reclaimCount + 1 };
-      await redis.lpush(inboxKey(ctx), JSON.stringify(updated.task));
+      await redis.lpush(inboxKey(ctx), JSON.stringify(updated));
       redelivered += 1;
     }
   }
