@@ -56,7 +56,7 @@ export interface TaskState {
   taskId: string;
   tenantId: string;
   agentId: string;
-  status: 'submitted' | 'pending_classification' | 'working' | 'input_required' | 'completed' | 'failed' | 'canceled';
+  status: 'submitted' | 'pending_classification' | 'working' | 'input_required' | 'queued' | 'completed' | 'failed' | 'canceled';
   intent: string;
   submittedAt: string;
   updatedAt: string;

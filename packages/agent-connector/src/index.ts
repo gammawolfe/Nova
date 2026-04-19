@@ -5,7 +5,7 @@ import { auditLog } from '@nova/shared/src/audit';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova/shared/src/agent-index';
-import { updateTaskStatus, publishTaskEvent } from '@nova/task-queue/src/index';
+import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
@@ -141,7 +141,18 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
   const operatorUrl = await getOperatorUrl(taskCtx);
   if (!operatorUrl) {
-    logger.error({ taskCtx }, 'No operator URL configured for agent');
+    // Broker path — agent receives via MCP pull, not HTTP webhook
+    if (await isBrokerAgent(taskCtx)) {
+      await inboxEnqueue(taskCtx, task);
+      await updateTaskStatus(taskCtx, task.taskId, 'queued', { statusMessage: 'Queued in agent inbox (broker mode)' });
+      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'queued' } });
+      await auditLog(taskCtx, { event: 'task_broker_queued', taskId: task.taskId });
+      await publishLifecycle('queued');
+      logger.info({ taskCtx, taskId: task.taskId }, 'Task enqueued to broker inbox');
+      return;
+    }
+
+    logger.error({ taskCtx }, 'No operator URL configured and agent is not in broker mode');
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'No operator URL configured' });
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed' } });
     await publishLifecycle('failed');
