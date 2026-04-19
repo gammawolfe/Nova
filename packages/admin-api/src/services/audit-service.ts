@@ -1,8 +1,10 @@
 import { createReadStream } from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import readline from 'readline';
 import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { AuditEvent } from '@nova/shared/src/types';
+import { ID_RE } from '@nova/shared/src/validation';
 
 function auditDir(tenantId: string): string {
   return path.join(DATA_ROOT, 'audit', tenantId);
@@ -112,4 +114,42 @@ export async function getTaskAudit(tenantId: string, taskId: string): Promise<Au
   const { events } = await queryAuditLogs(tenantId, { taskId, limit: 1000 });
   // queryAuditLogs returns newest-first; task audit wants chronological
   return events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+/**
+ * Cross-galaxy audit aggregator: fans out queryAuditLogs across all tenants
+ * in DATA_ROOT/audit, merges the per-tenant results, sorts newest-first, and
+ * truncates to the caller's limit.
+ *
+ * `total` is the sum of per-tenant totals matching the filter — an upper
+ * bound on "how many matches across all galaxies" before merge truncation.
+ * Pagination (offset) is deliberately not exposed at the cross-galaxy level
+ * because offset-within-sort-order is ambiguous across independent sources.
+ */
+export async function queryAllAuditLogs(
+  filters: {
+    event?: string | undefined; from?: string | undefined; to?: string | undefined;
+    taskId?: string | undefined; limit?: number | undefined;
+  }
+): Promise<{ events: AuditEvent[]; total: number }> {
+  const rootAuditDir = path.join(DATA_ROOT, 'audit');
+  let tenantDirs: string[];
+  try { tenantDirs = await fsp.readdir(rootAuditDir); }
+  catch { return { events: [], total: 0 }; }
+
+  const validTenants = tenantDirs.filter(d => ID_RE.test(d));
+  const limit = filters.limit ?? 50;
+
+  const perTenant = await Promise.all(
+    validTenants.map(tenantId =>
+      queryAuditLogs(tenantId, { ...filters, limit, offset: 0 })
+        .catch(() => ({ events: [] as AuditEvent[], total: 0 })),
+    ),
+  );
+
+  const merged = perTenant.flatMap(r => r.events);
+  merged.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+  const totalCounted = perTenant.reduce((sum, r) => sum + r.total, 0);
+  return { events: merged.slice(0, limit), total: totalCounted };
 }
