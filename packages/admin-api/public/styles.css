@@ -422,3 +422,56 @@ body {
   box-shadow: 0 0 24px rgba(245, 166, 35, 0.4);
   margin: 24px auto 0;
 }
+
+/* ── Audit tab ─────────────────────────────────────────────────────────── */
+.nova-audit-list {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.nova-audit-head,
+.nova-audit-row {
+  display: grid;
+  grid-template-columns: 180px 220px 150px 140px 1fr;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.nova-audit-head {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.nova-audit-row {
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.nova-audit-row:hover { background: rgba(255, 255, 255, 0.02); }
+.nova-audit-row.is-expanded { background: rgba(245, 166, 35, 0.04); }
+.nova-audit-row span:nth-child(2) { color: var(--text); }
+
+.nova-audit-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nova-audit-expanded {
+  padding: 0 12px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.nova-audit-metadata {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-x: auto;
+  margin: 0;
+  white-space: pre;
+}
