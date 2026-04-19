@@ -389,9 +389,13 @@ export function registerTools(_server: McpServer): void {
         identity.privateKeyPem,
       );
 
-      const result = await rt.client.inboxPull(rt.agentId, selfUcan, waitMs);
-      if (!result) return ok({ task: null, message: 'No task available within wait window.' });
-      return ok(result);
+      try {
+        const result = await rt.client.inboxPull(rt.agentId, selfUcan, waitMs);
+        if (!result) return ok({ task: null, message: 'No task available within wait window.' });
+        return ok(result);
+      } catch (e: any) {
+        return err(`Inbox pull failed: ${e.message}`);
+      }
     },
   );
 
@@ -401,7 +405,7 @@ export function registerTools(_server: McpServer): void {
       title: 'Complete a task this agent pulled from its inbox',
       description:
         'Ships a TaskResult back to the original sender. Must be called within the visibility timeout (5 minutes from nova_next_task) or the task will be redelivered. Idempotent — calling twice with the same taskId returns { status: "already_completed" } without re-shipping.',
-      inputSchema: {
+      inputSchema: z.object({
         taskId: z.string().uuid().describe('The taskId returned by nova_next_task'),
         status: z.enum(['ok', 'error']).describe('"ok" on success, "error" on failure'),
         result: z.record(z.unknown()).optional().describe('On status="ok": the result payload shaped to the skill\'s outputSchema'),
@@ -410,7 +414,10 @@ export function registerTools(_server: McpServer): void {
           message: z.string().describe('Human-readable error message'),
           retryable: z.boolean().optional().describe('Whether the sender should retry the task'),
         }).optional().describe('On status="error": structured error detail'),
-      },
+      }).refine((v) => v.status !== 'error' || !!v.error, {
+        message: '`error` is required when status is "error"',
+        path: ['error'],
+      }),
     },
     async ({ taskId, status, result, error }) => {
       const rt = await loadAgentRuntime();
@@ -428,12 +435,16 @@ export function registerTools(_server: McpServer): void {
         identity.privateKeyPem,
       );
 
-      const response = await rt.client.inboxRespond(rt.agentId, selfUcan, taskId, {
-        status,
-        ...(result !== undefined ? { result } : {}),
-        ...(error !== undefined ? { error } : {}),
-      });
-      return ok(response);
+      try {
+        const response = await rt.client.inboxRespond(rt.agentId, selfUcan, taskId, {
+          status,
+          ...(result !== undefined ? { result } : {}),
+          ...(error !== undefined ? { error } : {}),
+        });
+        return ok(response);
+      } catch (e: any) {
+        return err(`Inbox respond failed: ${e.message}`);
+      }
     },
   );
 
