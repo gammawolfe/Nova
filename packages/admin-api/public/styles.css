@@ -315,10 +315,15 @@ body {
   color: inherit;
   transition: border-color 0.15s ease, transform 0.15s ease;
   display: block;
+  cursor: pointer;
 }
 .nova-agent-card:hover {
   border-color: var(--accent);
   transform: translateY(-1px);
+}
+.nova-agent-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 @media (prefers-reduced-motion: reduce) {
   .nova-agent-card { transition: none; }
