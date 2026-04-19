@@ -406,11 +406,11 @@ window.novaApp = function () {
         // Planet group
         let cached = svg._planetNodes.get(p.agentId);
         if (!cached) {
-          const a = document.createElementNS(NS, 'a');
-          a.setAttributeNS(XLINK, 'xlink:href', `#/galaxy/${encodeURIComponent(p.galaxySlug)}`);
-          a.setAttribute('href', `#/galaxy/${encodeURIComponent(p.galaxySlug)}`);
           const g = document.createElementNS(NS, 'g');
           g.setAttribute('class', 'nova-live-planet-group');
+          g.style.cursor = 'pointer';
+          const agentId = p.agentId;
+          g.addEventListener('click', () => this.openAgentDetail(agentId));
           const circle = document.createElementNS(NS, 'circle');
           circle.setAttribute('class', 'nova-live-planet');
           circle.setAttribute('r', '10');
@@ -424,9 +424,8 @@ window.novaApp = function () {
           g.appendChild(circle);
           g.appendChild(label);
           g.appendChild(title);
-          a.appendChild(g);
-          planetsGroup.appendChild(a);
-          cached = { root: a, circle, label };
+          planetsGroup.appendChild(g);
+          cached = { root: g, circle, label };
           svg._planetNodes.set(p.agentId, cached);
         }
         cached.circle.setAttribute('cx', p.x);

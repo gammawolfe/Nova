@@ -189,7 +189,10 @@
 
           <div x-show="!allAgentsLoading && !allAgentsError && allAgents.length > 0" class="nova-agent-grid">
             <template x-for="a in allAgents" :key="a.agentId">
-              <a class="nova-agent-card" :href="`#/galaxy/${encodeURIComponent(galaxySlug(a.tenantId))}`">
+              <div class="nova-agent-card" role="button" tabindex="0"
+                   @click="openAgentDetail(a.agentId)"
+                   @keydown.enter="openAgentDetail(a.agentId)"
+                   @keydown.space.prevent="openAgentDetail(a.agentId)">
                 <div class="nova-row" style="margin-bottom:12px;align-items:flex-start">
                   <div class="nova-planet" :style="planetStyle(galaxySlug(a.tenantId))" style="margin-top:2px"></div>
                   <div style="flex:1;min-width:0">
@@ -197,7 +200,9 @@
                     <div class="nova-mono" x-text="a.agentId"></div>
                     <div class="nova-mono" x-show="a.did" style="overflow-wrap:anywhere;margin-top:2px;font-size:10px" x-text="a.did"></div>
                   </div>
-                  <span class="nova-pill" style="color:var(--text-secondary);border-color:var(--border)" x-text="galaxySlug(a.tenantId)"></span>
+                  <a class="nova-pill" :href="`#/galaxy/${encodeURIComponent(galaxySlug(a.tenantId))}`"
+                     style="color:var(--text-secondary);border-color:var(--border);text-decoration:none"
+                     @click.stop x-text="galaxySlug(a.tenantId)"></a>
                 </div>
 
                 <p x-show="a.description" class="nova-subtitle" style="margin-bottom:12px" x-text="a.description"></p>
@@ -215,7 +220,7 @@
                   <span class="nova-capability-indicator" :class="a.capabilities?.pushNotifications && 'is-on'">push</span>
                   <span class="nova-capability-indicator" :class="a.capabilities?.stateTransitionHistory && 'is-on'">history</span>
                 </div>
-              </a>
+              </div>
             </template>
           </div>
         </div>
