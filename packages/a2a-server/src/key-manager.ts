@@ -24,7 +24,27 @@ export class KeyManager {
         exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
       } catch (err: any) {
         if (err.code !== 'ENOENT') throw err;
-        logger.info('No private key found, generating new identity...');
+
+        // Auto-generating a fresh root keypair rotates Nova's notary DID. Any
+        // UCAN previously issued — along with every trust-registry entry that
+        // references the old DID — becomes unverifiable. A transient ENOENT
+        // (e.g. Docker bind-mount not ready at boot) would silently destroy
+        // the trust root. Refuse unless the operator has explicitly opted in.
+        if (process.env.NOVA_BOOTSTRAP_FRESH_IDENTITY !== '1') {
+          throw new Error(
+            `Nova private key not found at ${privateKeyPath}. ` +
+            `Run "pnpm run generate:keys" for first-time setup, or set ` +
+            `NOVA_BOOTSTRAP_FRESH_IDENTITY=1 to auto-generate. ` +
+            `Auto-generation is disabled by default because it rotates the ` +
+            `notary DID and orphans all existing UCANs and trust-registry entries.`,
+          );
+        }
+
+        logger.warn(
+          { path: privateKeyPath },
+          'NOVA_BOOTSTRAP_FRESH_IDENTITY=1 — generating new root identity. ' +
+            'This invalidates any pre-existing UCANs and trust-registry entries.',
+        );
         const keypair = await ucans.EdKeypair.create({ exportable: true });
         exportedKey = await keypair.export();
         await fsp.mkdir(path.dirname(privateKeyPath), { recursive: true });
@@ -34,7 +54,7 @@ export class KeyManager {
           keypair.did(),
           'utf8',
         );
-        logger.info('Generated new identity keypair');
+        logger.info({ did: keypair.did() }, 'Generated new identity keypair');
       }
       this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
       if (!this.keypair) throw new Error('KeyManager initialization failed natively');
