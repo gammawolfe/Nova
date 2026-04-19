@@ -39,6 +39,7 @@ window.novaApp = function () {
     auditError: null,
     auditFilters: { event: '', taskId: '', tenantId: '' },
     auditExpanded: null,
+    selectedAgent: null,
     sidebarCollapsed: readSidebarState(),
 
     get activeTab() {
@@ -75,6 +76,16 @@ window.novaApp = function () {
         this.connectSse();
         if (this.route.name === 'live') this.startLiveTicker();
       }
+
+      // Close the detail panel on tab navigation
+      let _lastTab = this.activeTab;
+      Alpine.effect(() => {
+        const current = this.activeTab;
+        if (current !== _lastTab) {
+          _lastTab = current;
+          if (this.selectedAgent) this.closeAgentDetail();
+        }
+      });
     },
 
     async login() {
@@ -188,6 +199,16 @@ window.novaApp = function () {
 
     toggleAuditRow(eventId) {
       this.auditExpanded = this.auditExpanded === eventId ? null : eventId;
+    },
+
+    openAgentDetail(agentId) {
+      const match = this.allAgents.find(a => a.agentId === agentId);
+      if (!match) return;
+      this.selectedAgent = match;
+    },
+
+    closeAgentDetail() {
+      this.selectedAgent = null;
     },
 
     get livePlanets() {
