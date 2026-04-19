@@ -18,6 +18,7 @@
     "test:acceptance:m3": "tsx scripts/acceptance-test-m3.ts",
     "test:acceptance:m4": "tsx scripts/acceptance-test-m4.ts",
     "test:acceptance:m5": "tsx scripts/acceptance-test-m5.ts",
+    "test:acceptance:broker": "tsx scripts/acceptance-test-broker.ts",
     "rotate:keys": "tsx scripts/rotate-keys.ts",
     "backup": "bash scripts/backup.sh",
     "did:exchange": "tsx scripts/did-exchange.ts",

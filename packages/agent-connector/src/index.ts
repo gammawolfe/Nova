@@ -5,8 +5,9 @@ import { auditLog } from '@nova/shared/src/audit';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova/shared/src/agent-index';
-import { updateTaskStatus, publishTaskEvent } from '@nova/task-queue/src/index';
+import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent, reclaimAll } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
+import { BROKER_RECLAIM_INTERVAL_MS } from '@nova/shared/src/broker-config';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { getSharedRedis } from '@nova/shared/src/redis';
@@ -141,7 +142,18 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
   const operatorUrl = await getOperatorUrl(taskCtx);
   if (!operatorUrl) {
-    logger.error({ taskCtx }, 'No operator URL configured for agent');
+    // Broker path — agent receives via MCP pull, not HTTP webhook
+    if (await isBrokerAgent(taskCtx)) {
+      await inboxEnqueue(taskCtx, task);
+      await updateTaskStatus(taskCtx, task.taskId, 'queued', { statusMessage: 'Queued in agent inbox (broker mode)' });
+      await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'queued' } });
+      await auditLog(taskCtx, { event: 'task_broker_queued', taskId: task.taskId });
+      await publishLifecycle('queued');
+      logger.info({ taskCtx, taskId: task.taskId }, 'Task enqueued to broker inbox');
+      return;
+    }
+
+    logger.error({ taskCtx }, 'No operator URL configured and agent is not in broker mode');
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'No operator URL configured' });
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed' } });
     await publishLifecycle('failed');
@@ -223,6 +235,38 @@ initWorkerManager(processTask).catch(err => {
   process.exit(1);
 });
 
+// ── Broker inbox reclaim worker ─────────────────────────────────────────────
+let reclaimTimer: NodeJS.Timeout | null = null;
+
+async function reclaimTick(): Promise<void> {
+  try {
+    const result = await reclaimAll();
+    if (result.redelivered > 0 || result.deadLettered > 0) {
+      logger.info(
+        { redelivered: result.redelivered, deadLettered: result.deadLettered },
+        'Broker reclaim tick',
+      );
+    }
+  } catch (err: any) {
+    logger.error({ err: err.message }, 'Broker reclaim tick failed');
+  }
+}
+
+function startReclaimWorker(): void {
+  if (reclaimTimer) return;
+  reclaimTimer = setInterval(reclaimTick, BROKER_RECLAIM_INTERVAL_MS);
+  logger.info({ intervalMs: BROKER_RECLAIM_INTERVAL_MS }, 'Broker reclaim worker started');
+}
+
+function stopReclaimWorker(): void {
+  if (reclaimTimer) {
+    clearInterval(reclaimTimer);
+    reclaimTimer = null;
+  }
+}
+
+startReclaimWorker();
+
 // --- Health/Metrics HTTP Server ---
 const HEALTH_PORT = process.env.HEALTH_PORT || 3003;
 const connectorStartTime = Date.now();
@@ -263,6 +307,7 @@ healthApp.listen(Number(HEALTH_PORT), () => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Shutting down Agent Connector safely...');
+  stopReclaimWorker();
   clearInterval(heartbeatInterval);
   await shutdownAllWorkers();
   process.exit(0);

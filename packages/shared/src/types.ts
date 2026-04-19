@@ -35,7 +35,7 @@ export interface QuarantineEntry {
   reviewedBy: string | null;
 }
 
-export type DeadLetterFailureReason = 'http_4xx' | 'exhausted_retries';
+export type DeadLetterFailureReason = 'http_4xx' | 'exhausted_retries' | 'broker_no_response';
 
 export interface DeadLetterEntry {
   id: string;
@@ -56,7 +56,7 @@ export interface TaskState {
   taskId: string;
   tenantId: string;
   agentId: string;
-  status: 'submitted' | 'pending_classification' | 'working' | 'input_required' | 'completed' | 'failed' | 'canceled';
+  status: 'submitted' | 'pending_classification' | 'working' | 'input_required' | 'queued' | 'completed' | 'failed' | 'canceled';
   intent: string;
   submittedAt: string;
   updatedAt: string;

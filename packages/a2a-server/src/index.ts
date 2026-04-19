@@ -13,6 +13,7 @@ import { tenantRouter } from './tenant-router';
 import { registerRouter } from './routes/register';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
+import { inboxRouter } from './routes/inbox';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
@@ -311,6 +312,10 @@ agentRouter.post('/tasks', async (req, res) => {
 
 // Self-registration endpoint (public, no auth, outside agent routing)
 app.use('/register', registerRouter);
+
+// Broker inbox pull endpoints — mounted before agentRouter so /:agentId/inbox
+// routes take priority over the tenantRouter middleware in agentRouter.
+app.use('/agents', inboxRouter);
 
 app.use('/agents/:agentId', agentRouter);
 
