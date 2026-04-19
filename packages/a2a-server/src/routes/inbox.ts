@@ -12,21 +12,20 @@ import { TenantContext } from '@nova/shared/src/tenant';
 import { TaskResult } from '@nova/shared/src/types';
 import { BROKER_MAX_WAIT_MS } from '@nova/shared/src/broker-config';
 import * as inbox from '@nova/task-queue/src/inbox';
+import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
 
 // ── UCAN self-verification adapter ──────────────────────────────────────────
 //
-// The gate-service verifyUCAN() is designed for sender→agent UCANs and requires
-// an actorRecord + agentDid + TenantContext — not suitable for self-auth.
-// extractIssuerDid() is a lightweight decode that gives us the issuer DID.
-// We pair it with a manual expiry check to implement the self-UCAN model:
-// "this JWT was issued BY the calling agent's own DID".
+// Self-UCANs are JWTs issued BY the calling agent's own did:key.
+// We verify them with ucans.validate(), which:
+//   • Decodes the JWT header/payload
+//   • Extracts the Ed25519 public key from the did:key iss field
+//   • Cryptographically verifies the JWT signature against that public key
+//   • Checks the exp claim is in the future
 //
-// We intentionally do NOT call the full verifyUCAN pipeline here because:
-//   • The self-UCAN audience is the calling agent itself, not Nova's agent DID.
-//   • We don't have (nor need) an actorRecord from the trust registry here.
-//   • DID match against the Redis meta is the binding security check.
-
-import { extractIssuerDid } from '@nova/gate-service/src/ucan-verifier';
+// This replaces the previous no-op that only base64-decoded the payload and
+// performed no signature check, allowing any party who knows a target agent's
+// public DID (visible via /discover) to forge a self-UCAN.
 
 interface SelfUcanResult {
   ok: true;
@@ -38,37 +37,41 @@ interface SelfUcanFailure {
 }
 
 /**
- * Minimal self-UCAN verification:
- * 1. Parse the JWT payload (base64url decode — no network required).
- * 2. Confirm `exp` is in the future.
- * 3. Return the issuer DID (`iss`) as the subject identity.
- *
- * Signature cryptographic verification is NOT performed here because these
- * are self-issued JWTs — the DID match against the Redis trust index is the
- * binding check. If full signature verification is needed in the future, add
- * ucans.validate() here and ensure the audience is set to the calling agent's
- * own DID.
+ * Cryptographic self-UCAN verification:
+ * 1. Call ucans.validate() — performs Ed25519 signature verification by
+ *    extracting the public key from the did:key `iss` field, and checks expiry.
+ * 2. Parse the verified payload to extract `iss` as the subject DID.
+ * 3. Return { ok: true, subjectDid } on success or { ok: false, reason } on failure.
  */
-function verifySelfUcan(jwt: string): SelfUcanResult | SelfUcanFailure {
+async function verifySelfUcan(jwt: string): Promise<SelfUcanResult | SelfUcanFailure> {
   try {
     const parts = jwt.split('.');
     if (parts.length !== 3 || !parts[1]) {
       return { ok: false, reason: 'malformed_jwt' };
     }
-    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'));
 
-    if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
-      return { ok: false, reason: 'ucan_expired' };
-    }
+    // ucans.validate() performs full cryptographic signature verification:
+    // it extracts the Ed25519 public key embedded in the did:key `iss` value
+    // (multibase + multicodec encoded) and verifies the JWT signature against it.
+    // It also checks the exp claim and throws on any failure.
+    await ucansValidate(jwt);
 
-    const issuerDid = extractIssuerDid(jwt);
+    const decoded = await ucansParse(jwt);
+    const issuerDid: string | undefined = decoded.payload.iss;
     if (!issuerDid) {
       return { ok: false, reason: 'ucan_no_issuer' };
     }
 
     return { ok: true, subjectDid: issuerDid };
   } catch (err: any) {
-    return { ok: false, reason: 'ucan_parse_error' };
+    const msg: string = (err?.message ?? '').toLowerCase();
+    if (msg.includes('expir')) {
+      return { ok: false, reason: 'expired' };
+    }
+    if (msg.includes('signature') || msg.includes('invalid') || msg.includes('verify')) {
+      return { ok: false, reason: 'signature_invalid' };
+    }
+    return { ok: false, reason: 'malformed' };
   }
 }
 
@@ -93,7 +96,7 @@ async function authSelfUcan(
   }
   const jwt = auth.slice(7).trim();
 
-  const verification = verifySelfUcan(jwt);
+  const verification = await verifySelfUcan(jwt);
   if (!verification.ok) {
     res.status(401).json({ error: 'UCAN_INVALID', reason: verification.reason });
     return null;
