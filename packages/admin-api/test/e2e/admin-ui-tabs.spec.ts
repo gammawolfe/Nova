@@ -141,6 +141,62 @@ test('Agents tab renders cards with DID and skill chips', async ({ page }) => {
   await expect(page.locator('.nova-agent-card').first().locator('.nova-skill-chip')).toContainText('Search');
 });
 
+test('Agents card click opens detail panel and X closes it', async ({ page }) => {
+  await login(page);
+  await page.click('.nova-nav-item:has-text("Agents")');
+  await expect(page.locator('.nova-agent-card')).toHaveCount(2);
+
+  // Panel hidden initially
+  await expect(page.locator('.nova-agent-detail')).toBeHidden();
+
+  // Click first card → panel shows Alpha
+  await page.locator('.nova-agent-card').first().click();
+  await expect(page.locator('.nova-agent-detail')).toBeVisible();
+  await expect(page.locator('.nova-agent-detail')).toContainText('Alpha');
+  await expect(page.locator('.nova-agent-detail')).toContainText('did:key:z6MkTestAlpha');
+
+  // Close panel
+  await page.locator('.nova-agent-detail-close').click();
+  await expect(page.locator('.nova-agent-detail')).toBeHidden();
+
+  // Click second card → panel shows Beta
+  await page.locator('.nova-agent-card').nth(1).click();
+  await expect(page.locator('.nova-agent-detail')).toBeVisible();
+  await expect(page.locator('.nova-agent-detail')).toContainText('Beta');
+
+  // URL should not have changed from the Agents tab
+  await expect(page).toHaveURL(/#\/agents$/);
+
+  // Close-X dismisses
+  await page.locator('.nova-agent-detail-close').click();
+  await expect(page.locator('.nova-agent-detail')).toBeHidden();
+});
+
+test('Tab navigation closes the detail panel', async ({ page }) => {
+  await login(page);
+  await page.click('.nova-nav-item:has-text("Agents")');
+  await page.locator('.nova-agent-card').first().click();
+  await expect(page.locator('.nova-agent-detail')).toBeVisible();
+
+  // Sidebar nav to Audit closes the panel via the Alpine.effect watcher
+  await page.click('.nova-nav-item:has-text("Audit")');
+  await expect(page.locator('.nova-agent-detail')).toBeHidden();
+});
+
+test('Agents card galaxy pill navigates without triggering panel', async ({ page }) => {
+  await login(page);
+  await page.click('.nova-nav-item:has-text("Agents")');
+
+  // Click the pill inside the first card
+  await page.locator('.nova-agent-card').first().locator('.nova-pill').click();
+
+  // URL should be the galaxy route, NOT the agents route
+  await expect(page).toHaveURL(/#\/galaxy\//);
+
+  // Panel never opened
+  await expect(page.locator('.nova-agent-detail')).toBeHidden();
+});
+
 test('Live tab renders SVG planets — regression guard for template x-for bug', async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on('pageerror', (e) => consoleErrors.push(e.message));
