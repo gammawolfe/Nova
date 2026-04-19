@@ -34,6 +34,11 @@ window.novaApp = function () {
     rotationDeg: 0,
     activeLines: [],
     hoverGalaxy: null,
+    auditEvents: [],
+    auditLoading: false,
+    auditError: null,
+    auditFilters: { event: '', taskId: '', tenantId: '' },
+    auditExpanded: null,
     sidebarCollapsed: readSidebarState(),
 
     get activeTab() {
@@ -106,6 +111,7 @@ window.novaApp = function () {
       if (this.route.name === 'galaxy') await this.loadGalaxy(this.route.slug);
       if (this.route.name === 'agents') await this.loadAllAgents();
       if (this.route.name === 'live')   await this.loadAllAgents();
+      if (this.route.name === 'audit')  await this.loadAuditEvents();
     },
 
     async loadGalaxies() {
@@ -148,6 +154,40 @@ window.novaApp = function () {
     galaxySlug(tenantId) {
       const match = this.galaxies.find(g => g.id === tenantId || g.slug === tenantId);
       return match?.slug || tenantId;
+    },
+
+    get visibleAuditEvents() {
+      if (!this.auditFilters.tenantId) return this.auditEvents;
+      return this.auditEvents.filter(e => e.tenantId === this.auditFilters.tenantId);
+    },
+
+    async loadAuditEvents() {
+      this.auditLoading = true;
+      this.auditError = null;
+      try {
+        const params = new URLSearchParams();
+        if (this.auditFilters.event) params.set('event', this.auditFilters.event);
+        if (this.auditFilters.taskId) params.set('taskId', this.auditFilters.taskId);
+        params.set('limit', '50');
+
+        const galaxiesPromise = this.galaxies.length === 0
+          ? this.loadGalaxies()
+          : Promise.resolve();
+        const [res] = await Promise.all([
+          api('GET', '/admin/audit?' + params.toString()),
+          galaxiesPromise,
+        ]);
+        this.auditEvents = res?.events || [];
+      } catch (e) {
+        this.auditError = e.message || 'Load failed';
+        this.pushToast(this.auditError, 'err');
+      } finally {
+        this.auditLoading = false;
+      }
+    },
+
+    toggleAuditRow(eventId) {
+      this.auditExpanded = this.auditExpanded === eventId ? null : eventId;
     },
 
     get livePlanets() {
