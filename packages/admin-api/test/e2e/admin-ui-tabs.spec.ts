@@ -33,6 +33,26 @@ const AGENT_BETA = {
   did: 'did:key:z6MkTestBeta',
 };
 
+const SAMPLE_AUDIT_EVENTS = [
+  {
+    eventId: '11111111-1111-1111-1111-111111111111',
+    timestamp: '2026-04-19T10:00:00.000Z',
+    tenantId: 'tenant_test',
+    agentId: 'alpha',
+    event: 'task_completed',
+    taskId: '22222222-2222-2222-2222-222222222222',
+    metadata: { status: 'success', durationMs: 1234 },
+  },
+  {
+    eventId: '33333333-3333-3333-3333-333333333333',
+    timestamp: '2026-04-19T09:00:00.000Z',
+    tenantId: 'tenant_test',
+    agentId: 'beta',
+    event: 'injection_detected',
+    metadata: { pattern: 'PROMPT_OVERRIDE', confidence: 0.92 },
+  },
+];
+
 async function mockAdminEndpoints(page: any) {
   await page.route('**/admin/tenants', async (route: any) => {
     if (route.request().method() === 'GET') {
@@ -46,6 +66,18 @@ async function mockAdminEndpoints(page: any) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ agents: [AGENT_ALPHA, AGENT_BETA], total: 2 }),
+    });
+  });
+  await page.route('**/admin/audit**', async (route: any) => {
+    const url = new URL(route.request().url());
+    const eventFilter = url.searchParams.get('event');
+    const events = eventFilter
+      ? SAMPLE_AUDIT_EVENTS.filter(e => e.event === eventFilter)
+      : SAMPLE_AUDIT_EVENTS;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ events, total: events.length }),
     });
   });
 }
@@ -169,11 +201,28 @@ test('Live tab: task SSE event renders a colored line per action', async ({ page
   await expect(page.locator('svg.nova-live-svg path.nova-live-line.is-completed')).toHaveCount(1);
 });
 
-test('Audit tab renders placeholder', async ({ page }) => {
+test('Audit tab renders event list and expands row on click', async ({ page }) => {
   await login(page);
   await page.click('.nova-nav-item:has-text("Audit")');
-  await expect(page.locator('.nova-placeholder')).toContainText('AUDIT');
-  await expect(page.locator('.nova-placeholder')).toContainText('Coming soon');
+
+  await expect(page.locator('.nova-audit-list')).toBeVisible();
+  await expect(page.locator('.nova-audit-row')).toHaveCount(2);
+  await expect(page.locator('.nova-audit-row').first()).toContainText('task_completed');
+  await expect(page.locator('.nova-audit-row').nth(1)).toContainText('injection_detected');
+
+  await page.locator('.nova-audit-row').first().click();
+  await expect(page.locator('.nova-audit-metadata').first()).toBeVisible();
+  await expect(page.locator('.nova-audit-metadata').first()).toContainText('durationMs');
+});
+
+test('Audit tab event-type filter triggers re-fetch', async ({ page }) => {
+  await login(page);
+  await page.click('.nova-nav-item:has-text("Audit")');
+  await expect(page.locator('.nova-audit-row')).toHaveCount(2);
+
+  await page.selectOption('select.nova-input >> nth=0', 'injection_detected');
+  await expect(page.locator('.nova-audit-row')).toHaveCount(1);
+  await expect(page.locator('.nova-audit-row').first()).toContainText('injection_detected');
 });
 
 test('no console errors during full tab tour', async ({ page }) => {
