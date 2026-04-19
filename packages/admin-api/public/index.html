@@ -273,12 +273,96 @@
         </div>
       </template>
 
-      <!-- PLACEHOLDER: Audit -->
+      <!-- AUDIT -->
       <template x-if="route.name === 'audit'">
-        <div class="nova-placeholder">
+        <div>
           <div class="nova-eyebrow">◉ AUDIT</div>
-          <h1 class="nova-display" style="font-size:32px;margin:8px 0 6px">Coming soon.</h1>
-          <p class="nova-subtitle">Task audit log — which agent sent what to whom, when, and with what result. Feeds from <code>/admin/audit</code>.</p>
+          <h1 class="nova-display" style="font-size:40px;margin:6px 0">Audit</h1>
+          <p class="nova-subtitle" style="margin-bottom:20px" x-text="auditEvents.length + ' ' + (auditEvents.length === 1 ? 'event' : 'events') + ' in the last 7 days'"></p>
+
+          <div class="nova-row" style="gap:12px;margin-bottom:20px;flex-wrap:wrap">
+            <select class="nova-input" style="width:auto;min-width:200px" x-model="auditFilters.event" @change="loadAuditEvents()">
+              <option value="">All event types</option>
+              <option value="task_started">task_started</option>
+              <option value="task_completed">task_completed</option>
+              <option value="task_expired">task_expired</option>
+              <option value="message_received">message_received</option>
+              <option value="message_parse_failed">message_parse_failed</option>
+              <option value="gate_503">gate_503</option>
+              <option value="ucan_verified">ucan_verified</option>
+              <option value="ucan_failed">ucan_failed</option>
+              <option value="actor_resolved">actor_resolved</option>
+              <option value="actor_unknown">actor_unknown</option>
+              <option value="schema_valid">schema_valid</option>
+              <option value="schema_invalid">schema_invalid</option>
+              <option value="injection_clear">injection_clear</option>
+              <option value="injection_pattern_match">injection_pattern_match</option>
+              <option value="injection_detected">injection_detected</option>
+              <option value="injection_suspected">injection_suspected</option>
+              <option value="injection_pattern_clear">injection_pattern_clear</option>
+              <option value="classifier_unavailable">classifier_unavailable</option>
+              <option value="confirm_requested">confirm_requested</option>
+              <option value="confirm_approved">confirm_approved</option>
+              <option value="confirm_denied">confirm_denied</option>
+              <option value="confirm_timeout">confirm_timeout</option>
+              <option value="delivery_success">delivery_success</option>
+              <option value="delivery_transient_failure">delivery_transient_failure</option>
+              <option value="delivery_permanent_failure">delivery_permanent_failure</option>
+              <option value="dead_letter_written">dead_letter_written</option>
+            </select>
+
+            <select class="nova-input" style="width:auto;min-width:180px" x-model="auditFilters.tenantId">
+              <option value="">All galaxies</option>
+              <template x-for="g in galaxies" :key="g.id">
+                <option :value="g.id" x-text="g.slug"></option>
+              </template>
+            </select>
+
+            <input class="nova-input" style="width:auto;min-width:280px;font-family:var(--font-mono);font-size:12px"
+                   placeholder="task id (uuid)" x-model.debounce.300ms="auditFilters.taskId" @input="loadAuditEvents()">
+
+            <button class="nova-input" style="width:auto;padding:10px 16px" @click="loadAuditEvents()">
+              Refresh
+            </button>
+          </div>
+
+          <div x-show="auditLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading events…
+          </div>
+
+          <div x-show="auditError" class="nova-glass" style="text-align:center;color:var(--status-error)" x-text="auditError"></div>
+
+          <div x-show="!auditLoading && !auditError && visibleAuditEvents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            No events match these filters.
+          </div>
+
+          <div x-show="!auditLoading && !auditError && visibleAuditEvents.length > 0" class="nova-audit-list">
+            <div class="nova-audit-head">
+              <span>Timestamp</span>
+              <span>Event</span>
+              <span>Galaxy</span>
+              <span>Agent</span>
+              <span>Task ID</span>
+            </div>
+            <template x-for="e in visibleAuditEvents" :key="e.eventId">
+              <div>
+                <div class="nova-audit-row" :class="auditExpanded === e.eventId && 'is-expanded'" @click="toggleAuditRow(e.eventId)">
+                  <span class="nova-mono" x-text="e.timestamp.slice(0, 19).replace('T', ' ')"></span>
+                  <span x-text="e.event"></span>
+                  <span x-text="galaxySlug(e.tenantId)"></span>
+                  <span class="nova-mono" x-text="e.agentId"></span>
+                  <span class="nova-mono" x-text="e.taskId ? e.taskId.slice(0, 8) + '…' : ''"></span>
+                </div>
+                <div x-show="auditExpanded === e.eventId" class="nova-audit-expanded">
+                  <pre class="nova-audit-metadata" x-text="JSON.stringify({ eventId: e.eventId, taskId: e.taskId, metadata: e.metadata }, null, 2)"></pre>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <p x-show="!auditLoading && !auditError && visibleAuditEvents.length >= 50" class="nova-subtitle" style="margin-top:12px;text-align:center">
+            Showing 50 most recent · refine filters for older events
+          </p>
         </div>
       </template>
 
