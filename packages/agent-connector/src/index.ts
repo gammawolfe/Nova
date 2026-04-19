@@ -235,8 +235,6 @@ initWorkerManager(processTask).catch(err => {
   process.exit(1);
 });
 
-startReclaimWorker();
-
 // ── Broker inbox reclaim worker ─────────────────────────────────────────────
 let reclaimTimer: NodeJS.Timeout | null = null;
 
@@ -266,6 +264,8 @@ function stopReclaimWorker(): void {
     reclaimTimer = null;
   }
 }
+
+startReclaimWorker();
 
 // --- Health/Metrics HTTP Server ---
 const HEALTH_PORT = process.env.HEALTH_PORT || 3003;
