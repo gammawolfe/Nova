@@ -356,7 +356,6 @@ window.novaApp = function () {
       const planets = this.livePlanets;
       const lines = this.activeLines;
       const NS = 'http://www.w3.org/2000/svg';
-      const XLINK = 'http://www.w3.org/1999/xlink';
 
       const planetsGroup = svg.querySelector('.nova-live-planets-group');
       const linesGroup = svg.querySelector('.nova-live-lines-group');

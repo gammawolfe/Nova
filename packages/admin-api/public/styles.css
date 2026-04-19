@@ -377,7 +377,6 @@ body {
 }
 
 .nova-live-planet-group { cursor: pointer; }
-.nova-live-planet-group a { text-decoration: none; }
 .nova-live-planet {
   transition: filter 0.15s ease;
 }
