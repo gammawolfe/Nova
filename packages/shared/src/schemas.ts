@@ -71,6 +71,7 @@ export const AuditEventSchema = z.object({
     'task_started',
     'task_broker_queued',
     'task_completed',
+    'task_failed',
     'task_error',
     'task_expired',
     'confirm_requested',

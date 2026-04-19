@@ -107,7 +107,11 @@ async function authSelfUcan(
     res.status(404).json({ error: 'AGENT_NOT_FOUND' });
     return null;
   }
-  if (meta.did && meta.did !== verification.subjectDid) {
+  if (!meta.did) {
+    res.status(401).json({ error: 'AGENT_DID_MISSING', hint: 'Agent record has no DID; re-register the agent' });
+    return null;
+  }
+  if (meta.did !== verification.subjectDid) {
     res.status(401).json({ error: 'UCAN_DID_MISMATCH' });
     return null;
   }
@@ -233,7 +237,7 @@ inboxRouter.post(
       }
 
       await auditLog(ctx, {
-        event: status === 'ok' ? 'task_completed' : 'task_started',
+        event: status === 'ok' ? 'task_completed' : 'task_failed',
         taskId,
         metadata: { mode: 'broker' },
       });
