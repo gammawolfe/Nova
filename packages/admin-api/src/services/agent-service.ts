@@ -259,12 +259,24 @@ export async function getActiveAgent(agentId: string): Promise<ParsedAgentMeta |
   };
 }
 
-export async function updateAgent(tenantId: string, agentId: string, updates: Partial<AgentConfig>): Promise<AgentConfig | null> {
+export type AgentUpdateInput =
+  Partial<Omit<AgentConfig, 'operatorUrl'>> & { operatorUrl?: string | null | undefined };
+
+export async function updateAgent(
+  tenantId: string,
+  agentId: string,
+  updates: AgentUpdateInput,
+): Promise<AgentConfig | null> {
   validateId(tenantId, 'tenantId');
   validateId(agentId, 'agentId');
   const config = await getAgent(tenantId, agentId);
   if (!config) return null;
-  const updated = { ...config, ...updates };
+  const updated: AgentConfig = { ...config, ...updates } as AgentConfig;
+  // null on operatorUrl is the explicit "clear" signal — delete the key so
+  // the broker gate (isBrokerAgent) sees the field as absent on disk.
+  if (updates.operatorUrl === null) {
+    delete (updated as { operatorUrl?: string }).operatorUrl;
+  }
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), updated);
   await indexAgentMeta(getSharedRedis(), updated);
   return updated;
