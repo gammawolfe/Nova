@@ -181,6 +181,7 @@ body {
 .nova-app {
   display: flex;
   min-height: calc(100vh - 28px);
+  margin-top: 28px;
   position: relative;
 }
 
