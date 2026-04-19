@@ -4,6 +4,7 @@ import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
+import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova/shared/src/agent-index';
 import { updateTaskStatus, publishTaskEvent } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
@@ -26,11 +27,33 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
   logger.info({ jobId: job.id, taskId: task.taskId, intent: task.intent }, 'Processing task');
 
+  // Resolve source agent for lifecycle events — may be null for unknown senders
+  const sourceAgent = await getAgentByDid(getSharedRedis(), task.senderDid);
+  const lifecycleBase: Omit<TaskLifecycleEvent, 'action'> = {
+    taskId: task.taskId,
+    toTenantId: task.tenantId,
+    toAgentId: task.agentId,
+    ...(sourceAgent ? { fromTenantId: sourceAgent.tenantId, fromAgentId: sourceAgent.agentId } : {}),
+  };
+
+  const publishLifecycle = async (action: TaskLifecycleEvent['action']) => {
+    try {
+      await getSharedRedis().publish(TASK_LIFECYCLE_CHANNEL, JSON.stringify({
+        action, ...lifecycleBase,
+      } satisfies TaskLifecycleEvent));
+    } catch (err: any) {
+      logger.warn({ err: err.message, taskId: task.taskId, action }, 'Failed to publish lifecycle event');
+    }
+  };
+
+  await publishLifecycle('queued');
+
   // Check TTL first
   if (new Date(task.expiresAt) <= new Date()) {
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Task TTL expired before processing' });
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'TTL_EXPIRED' } });
     await auditLog(taskCtx, { event: 'task_expired', taskId: task.taskId });
+    await publishLifecycle('failed');
     return;
   }
 
@@ -76,6 +99,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
       await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation denied by operator' });
       await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'HUMAN_DENIED' } });
       await auditLog(taskCtx, { event: 'confirm_denied', taskId: task.taskId });
+      await publishLifecycle('failed');
       return;
     }
 
@@ -83,6 +107,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
       await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'Confirmation timed out' });
       await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed', reason: 'CONFIRMATION_TIMEOUT' } });
       await auditLog(taskCtx, { event: 'confirm_timeout', taskId: task.taskId });
+      await publishLifecycle('failed');
       return;
     }
 
@@ -119,6 +144,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
     logger.error({ taskCtx }, 'No operator URL configured for agent');
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: 'No operator URL configured' });
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed' } });
+    await publishLifecycle('failed');
     return;
   }
 
@@ -154,6 +180,7 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
     await updateTaskStatus(taskCtx, task.taskId, 'failed', { statusMessage: delivery.error || 'Delivery failed' });
     await publishTaskEvent(taskCtx, task.taskId, { type: 'status_update', data: { status: 'failed' } });
+    await publishLifecycle('failed');
     return;
   }
 
@@ -187,6 +214,8 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
     deliveryOutcomes.inc({ target: 'replyTo', outcome: 'success' });
     await auditLog(taskCtx, { event: 'delivery_success', taskId: task.taskId });
   }
+
+  await publishLifecycle('completed');
 }
 
 initWorkerManager(processTask).catch(err => {

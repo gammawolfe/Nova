@@ -3,16 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:">
   <title>Nova Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
   <style>[x-cloak]{display:none!important}</style>
 </head>
 <body class="nova-surface" x-data="novaApp()" x-init="init()">
 
   <!-- Kinetic ticker -->
-  <div x-show="token" x-cloak style="position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,rgba(0,0,0,0.6),transparent);border-bottom:1px solid var(--glass-border);overflow:hidden;height:28px;display:flex;align-items:center;z-index:50">
-    <div style="display:flex;gap:48px;white-space:nowrap;animation:nova-scroll-x 24s linear infinite;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--ink-muted);padding-left:20px">
+  <div x-show="token" x-cloak style="position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,transparent,rgba(0,0,0,0.6),transparent);border-bottom:1px solid var(--border);overflow:hidden;height:28px;display:flex;align-items:center;z-index:50">
+    <div style="display:flex;gap:48px;white-space:nowrap;animation:nova-scroll-x 24s linear infinite;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-secondary);padding-left:20px">
       <span>◉ nova admin</span>
       <span x-text="`${galaxies.length} galaxies`"></span>
       <span x-text="`${pendingAgents.length} pending`"></span>
@@ -22,7 +25,7 @@
     </div>
   </div>
 
-  <main class="nova-shell">
+  <main class="nova-shell" :class="token && 'nova-shell--full'">
 
     <!-- LOGIN -->
     <section x-show="!token" x-cloak style="max-width:420px;margin-top:12vh">
@@ -31,10 +34,8 @@
       <p class="nova-subtitle" style="margin-bottom:24px">Bearer token required. Stored in this tab only.</p>
       <form @submit.prevent="login()">
         <label class="nova-label" for="admintok">admin token</label>
-        <div class="nova-spotlight" style="border-radius:10px">
-          <input id="admintok" class="nova-input" :class="loginError ? 'is-error' : ''"
-                 type="password" autocomplete="off" x-model="loginValue" required>
-        </div>
+        <input id="admintok" class="nova-input" :class="loginError ? 'is-error' : ''"
+               type="password" autocomplete="off" x-model="loginValue" required>
         <p class="nova-error" x-show="loginError" x-text="loginError"></p>
         <div style="margin-top:20px">
           <button class="nova-cta" :disabled="loginBusy || !loginValue">
@@ -46,11 +47,27 @@
     </section>
 
     <!-- AUTHENTICATED -->
-    <section x-show="token" x-cloak>
-      <div class="nova-row" style="justify-content:space-between;margin-bottom:24px">
-        <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
-        <button class="nova-input" style="width:auto;padding:6px 12px;font-size:12px" @click="logout()">Log out</button>
-      </div>
+    <section x-show="token" x-cloak class="nova-app" :class="sidebarCollapsed && 'is-sidebar-collapsed'">
+
+      <aside class="nova-sidebar">
+        <div class="nova-sidebar-brand">
+          <div class="nova-eyebrow">◉ NOVA · ADMIN</div>
+        </div>
+        <nav class="nova-nav">
+          <a href="#/"        class="nova-nav-item" :class="activeTab === 'galaxies' && 'is-active'">Galaxies</a>
+          <a href="#/agents"  class="nova-nav-item" :class="activeTab === 'agents'   && 'is-active'">Agents</a>
+          <a href="#/live"    class="nova-nav-item" :class="activeTab === 'live'     && 'is-active'">Live</a>
+          <a href="#/audit"   class="nova-nav-item" :class="activeTab === 'audit'    && 'is-active'">Audit</a>
+        </nav>
+        <div class="nova-sidebar-spacer"></div>
+        <button class="nova-sidebar-logout" @click="logout()">Log out</button>
+      </aside>
+
+      <button class="nova-sidebar-toggle" @click="toggleSidebar()" :aria-label="sidebarCollapsed ? 'Open sidebar' : 'Collapse sidebar'">
+        <span x-text="sidebarCollapsed ? '▶' : '◀'"></span>
+      </button>
+
+      <section class="nova-main">
 
       <!-- HOME: Galaxies -->
       <template x-if="route.name === 'home'">
@@ -69,7 +86,7 @@
                 <span class="nova-pill" :class="g.status === 'active' ? 'nova-pill-active' : 'nova-pill-danger'" x-text="g.status || 'unknown'"></span>
               </a>
             </template>
-            <div x-show="galaxies.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+            <div x-show="galaxies.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
               No galaxies yet.
             </div>
           </div>
@@ -85,7 +102,7 @@
       <!-- GALAXY DETAIL -->
       <template x-if="route.name === 'galaxy'">
         <div>
-          <a href="#/" class="nova-mono" style="color:var(--ink-muted);text-decoration:none">← All galaxies</a>
+          <a href="#/" class="nova-mono" style="color:var(--text-secondary);text-decoration:none">← All galaxies</a>
 
           <template x-if="currentGalaxy">
             <div style="margin-top:16px">
@@ -114,7 +131,7 @@
                     <button class="nova-input" style="width:auto;padding:8px 14px" @click="reject(a.agentId)">Reject</button>
                   </div>
                 </template>
-                <div x-show="pendingAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                <div x-show="pendingAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
                   No pending planets. Issue an invite below.
                 </div>
               </div>
@@ -133,7 +150,7 @@
                     <span class="nova-pill nova-pill-active">Active</span>
                   </div>
                 </template>
-                <div x-show="activeAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--ink-muted)">
+                <div x-show="activeAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
                   No active planets yet. Invite one below.
                 </div>
               </div>
@@ -146,12 +163,215 @@
           </template>
 
           <template x-if="!currentGalaxy">
-            <div class="nova-glass" style="margin-top:32px;text-align:center;color:var(--ink-muted)">
+            <div class="nova-glass" style="margin-top:32px;text-align:center;color:var(--text-secondary)">
               Galaxy not found.
             </div>
           </template>
         </div>
       </template>
+
+      <!-- AGENTS -->
+      <template x-if="route.name === 'agents'">
+        <div>
+          <div class="nova-eyebrow">◉ AGENTS</div>
+          <h1 class="nova-display" style="font-size:40px;margin:6px 0">Agents</h1>
+          <p class="nova-subtitle" style="margin-bottom:24px" x-text="`${allAgents.length} active ${allAgents.length === 1 ? 'agent' : 'agents'} across your galaxies`"></p>
+
+          <div x-show="allAgentsLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading agents…
+          </div>
+
+          <div x-show="allAgentsError" class="nova-glass" style="text-align:center;color:var(--status-error)" x-text="allAgentsError"></div>
+
+          <div x-show="!allAgentsLoading && !allAgentsError && allAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            No active agents yet. Approve a pending planet in a galaxy to see it here.
+          </div>
+
+          <div x-show="!allAgentsLoading && !allAgentsError && allAgents.length > 0" class="nova-agent-grid">
+            <template x-for="a in allAgents" :key="a.agentId">
+              <div class="nova-agent-card" role="button" tabindex="0"
+                   @click="openAgentDetail(a.agentId)"
+                   @keydown.enter="openAgentDetail(a.agentId)"
+                   @keydown.space.prevent="openAgentDetail(a.agentId)">
+                <div class="nova-row" style="margin-bottom:12px;align-items:flex-start">
+                  <div class="nova-planet" :style="planetStyle(galaxySlug(a.tenantId))" style="margin-top:2px"></div>
+                  <div style="flex:1;min-width:0">
+                    <div style="color:#fff;font-weight:500" x-text="a.name"></div>
+                    <div class="nova-mono" x-text="a.agentId"></div>
+                    <div class="nova-mono" x-show="a.did" style="overflow-wrap:anywhere;margin-top:2px;font-size:10px" x-text="a.did"></div>
+                  </div>
+                  <a class="nova-pill" :href="`#/galaxy/${encodeURIComponent(galaxySlug(a.tenantId))}`"
+                     style="color:var(--text-secondary);border-color:var(--border);text-decoration:none"
+                     @click.stop x-text="galaxySlug(a.tenantId)"></a>
+                </div>
+
+                <p x-show="a.description" class="nova-subtitle" style="margin-bottom:12px" x-text="a.description"></p>
+
+                <div x-show="a.skills && a.skills.length > 0" style="margin-bottom:12px">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px">
+                    <template x-for="s in a.skills" :key="s.id">
+                      <span class="nova-skill-chip" :title="s.description" x-text="s.name"></span>
+                    </template>
+                  </div>
+                </div>
+
+                <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px">
+                  <span class="nova-capability-indicator" :class="a.capabilities?.streaming && 'is-on'">streaming</span>
+                  <span class="nova-capability-indicator" :class="a.capabilities?.pushNotifications && 'is-on'">push</span>
+                  <span class="nova-capability-indicator" :class="a.capabilities?.stateTransitionHistory && 'is-on'">history</span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- LIVE -->
+      <template x-if="route.name === 'live'">
+        <div class="nova-live-wrap">
+          <div class="nova-row" style="justify-content:space-between;margin-bottom:24px;align-items:flex-start">
+            <div>
+              <div class="nova-eyebrow">◉ LIVE</div>
+              <h1 class="nova-display" style="font-size:40px;margin:6px 0">Live</h1>
+              <p class="nova-subtitle" x-text="`${allAgents.length} ${allAgents.length === 1 ? 'planet' : 'planets'} orbiting Nova`"></p>
+            </div>
+            <button class="nova-input" style="width:auto;padding:8px 14px;font-size:12px"
+                    @click="triggerDemoLine()" :disabled="allAgents.length < 2">
+              Simulate conversation
+            </button>
+          </div>
+
+          <div x-show="allAgentsLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading agents…
+          </div>
+
+          <div x-show="!allAgentsLoading && allAgents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            <div class="nova-live-empty-sun"></div>
+            <p style="margin-top:16px">No planets orbiting yet. Approve a pending planet in a galaxy to see it here.</p>
+          </div>
+
+          <svg x-show="!allAgentsLoading && allAgents.length > 0"
+               class="nova-live-svg"
+               viewBox="0 0 800 600"
+               preserveAspectRatio="xMidYMid meet"
+               role="img"
+               aria-label="Solar-system visualization of active agents"
+               x-effect="renderLiveSvg($el)">
+            <defs class="nova-live-defs">
+              <radialGradient id="nova-sun-gradient" cx="30%" cy="30%">
+                <stop offset="0%" stop-color="#ffe08a" />
+                <stop offset="100%" stop-color="#f5a623" />
+              </radialGradient>
+            </defs>
+
+            <circle class="nova-live-ring" cx="400" cy="300" r="220" />
+
+            <g class="nova-live-lines-group"></g>
+
+            <g class="nova-live-sun">
+              <circle cx="400" cy="300" r="24" fill="url(#nova-sun-gradient)" />
+              <text x="400" y="303" class="nova-live-sun-label" text-anchor="middle">NOVA</text>
+            </g>
+
+            <g class="nova-live-planets-group"></g>
+          </svg>
+        </div>
+      </template>
+
+      <!-- AUDIT -->
+      <template x-if="route.name === 'audit'">
+        <div>
+          <div class="nova-eyebrow">◉ AUDIT</div>
+          <h1 class="nova-display" style="font-size:40px;margin:6px 0">Audit</h1>
+          <p class="nova-subtitle" style="margin-bottom:20px" x-text="auditEvents.length + ' ' + (auditEvents.length === 1 ? 'event' : 'events') + ' in the last 7 days'"></p>
+
+          <div class="nova-row" style="gap:12px;margin-bottom:20px;flex-wrap:wrap">
+            <select class="nova-input" style="width:auto;min-width:200px" x-model="auditFilters.event" @change="loadAuditEvents()">
+              <option value="">All event types</option>
+              <option value="task_started">task_started</option>
+              <option value="task_completed">task_completed</option>
+              <option value="task_expired">task_expired</option>
+              <option value="message_received">message_received</option>
+              <option value="message_parse_failed">message_parse_failed</option>
+              <option value="gate_503">gate_503</option>
+              <option value="ucan_verified">ucan_verified</option>
+              <option value="ucan_failed">ucan_failed</option>
+              <option value="actor_resolved">actor_resolved</option>
+              <option value="actor_unknown">actor_unknown</option>
+              <option value="schema_valid">schema_valid</option>
+              <option value="schema_invalid">schema_invalid</option>
+              <option value="injection_clear">injection_clear</option>
+              <option value="injection_pattern_match">injection_pattern_match</option>
+              <option value="injection_detected">injection_detected</option>
+              <option value="injection_suspected">injection_suspected</option>
+              <option value="injection_pattern_clear">injection_pattern_clear</option>
+              <option value="classifier_unavailable">classifier_unavailable</option>
+              <option value="confirm_requested">confirm_requested</option>
+              <option value="confirm_approved">confirm_approved</option>
+              <option value="confirm_denied">confirm_denied</option>
+              <option value="confirm_timeout">confirm_timeout</option>
+              <option value="delivery_success">delivery_success</option>
+              <option value="delivery_transient_failure">delivery_transient_failure</option>
+              <option value="delivery_permanent_failure">delivery_permanent_failure</option>
+              <option value="dead_letter_written">dead_letter_written</option>
+            </select>
+
+            <select class="nova-input" style="width:auto;min-width:180px" x-model="auditFilters.tenantId">
+              <option value="">All galaxies</option>
+              <template x-for="g in galaxies" :key="g.id">
+                <option :value="g.id" x-text="g.slug"></option>
+              </template>
+            </select>
+
+            <input class="nova-input" style="width:auto;min-width:280px;font-family:var(--font-mono);font-size:12px"
+                   placeholder="task id (uuid)" x-model.debounce.300ms="auditFilters.taskId" @input="loadAuditEvents()">
+
+            <button class="nova-input" style="width:auto;padding:10px 16px" @click="loadAuditEvents()">
+              Refresh
+            </button>
+          </div>
+
+          <div x-show="auditLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading events…
+          </div>
+
+          <div x-show="auditError" class="nova-glass" style="text-align:center;color:var(--status-error)" x-text="auditError"></div>
+
+          <div x-show="!auditLoading && !auditError && visibleAuditEvents.length === 0" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            No events match these filters.
+          </div>
+
+          <div x-show="!auditLoading && !auditError && visibleAuditEvents.length > 0" class="nova-audit-list">
+            <div class="nova-audit-head">
+              <span>Timestamp</span>
+              <span>Event</span>
+              <span>Galaxy</span>
+              <span>Agent</span>
+              <span>Task ID</span>
+            </div>
+            <template x-for="e in visibleAuditEvents" :key="e.eventId">
+              <div>
+                <div class="nova-audit-row" :class="auditExpanded === e.eventId && 'is-expanded'" @click="toggleAuditRow(e.eventId)">
+                  <span class="nova-mono" x-text="e.timestamp.slice(0, 19).replace('T', ' ')"></span>
+                  <span x-text="e.event"></span>
+                  <span x-text="galaxySlug(e.tenantId)"></span>
+                  <span class="nova-mono" x-text="e.agentId"></span>
+                  <span class="nova-mono" x-text="e.taskId ? e.taskId.slice(0, 8) + '…' : ''"></span>
+                </div>
+                <div x-show="auditExpanded === e.eventId" class="nova-audit-expanded">
+                  <pre class="nova-audit-metadata" x-text="JSON.stringify({ eventId: e.eventId, taskId: e.taskId, metadata: e.metadata }, null, 2)"></pre>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <p x-show="!auditLoading && !auditError && visibleAuditEvents.length >= 50" class="nova-subtitle" style="margin-top:12px;text-align:center">
+            Showing 50 most recent · refine filters for older events
+          </p>
+        </div>
+      </template>
+
+      </section><!-- /.nova-main -->
 
       <!-- CREATE GALAXY MODAL -->
       <template x-if="showCreateGalaxy">
@@ -235,8 +455,8 @@
       <!-- INVITE ONE-TIME REVEAL -->
       <template x-if="revealedInvite">
         <div class="nova-modal-backdrop" @click.self="dismissReveal()">
-          <div class="nova-modal" x-data="{ copied: false }" x-init="$nextTick(() => { const el = $refs.qr; el.innerHTML=''; new QRCode(el, { text: revealedInvite.token, width: 180, height: 180, colorDark: '#fff', colorLight: '#050814' }); })">
-            <div class="nova-eyebrow" style="color:var(--signal-warn)">◉ ONE-TIME TOKEN</div>
+          <div class="nova-modal" x-data="{ copied: false }" x-init="$nextTick(() => { const el = $refs.qr; el.innerHTML=''; new QRCode(el, { text: revealedInvite.token, width: 180, height: 180, colorDark: '#fff', colorLight: '#000' }); })">
+            <div class="nova-eyebrow" style="color:var(--status-error)">◉ ONE-TIME TOKEN</div>
             <h2 class="nova-display" style="font-size:26px;margin:8px 0 8px">Share this now.</h2>
             <p class="nova-subtitle" style="margin-bottom:20px">This token is shown once. Save it or hand it to the planet operator now — a refresh will lose it.</p>
 
@@ -302,6 +522,56 @@
           </div>
         </div>
       </template>
+
+      <!-- AGENT DETAIL PANEL -->
+      <aside class="nova-agent-detail" x-show="selectedAgent" x-cloak>
+        <button class="nova-agent-detail-close" @click="closeAgentDetail()" aria-label="Close">×</button>
+
+        <div class="nova-eyebrow">◉ AGENT</div>
+        <h2 class="nova-display" style="font-size:28px;margin:8px 0 12px" x-text="selectedAgent?.name"></h2>
+
+        <div class="nova-mono" style="margin-bottom:16px" x-text="selectedAgent?.agentId"></div>
+
+        <div style="margin-bottom:16px">
+          <div class="nova-label">galaxy</div>
+          <a :href="`#/galaxy/${encodeURIComponent(galaxySlug(selectedAgent?.tenantId))}`"
+             class="nova-pill"
+             style="color:var(--text-secondary);border-color:var(--border);text-decoration:none"
+             x-text="galaxySlug(selectedAgent?.tenantId)"></a>
+        </div>
+
+        <div x-show="selectedAgent?.did" style="margin-bottom:16px">
+          <div class="nova-label">did</div>
+          <div class="nova-mono" style="overflow-wrap:anywhere;font-size:11px" x-text="selectedAgent?.did"></div>
+        </div>
+
+        <div x-show="selectedAgent?.description" style="margin-bottom:16px">
+          <div class="nova-label">description</div>
+          <p class="nova-subtitle" style="margin:0" x-text="selectedAgent?.description"></p>
+        </div>
+
+        <div x-show="selectedAgent?.skills?.length > 0" style="margin-bottom:16px">
+          <div class="nova-label" style="margin-bottom:8px">skills</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <template x-for="s in (selectedAgent?.skills || [])" :key="s.id">
+              <div style="padding:10px;border:1px solid var(--border);border-radius:8px">
+                <div style="color:#fff;font-weight:500" x-text="s.name"></div>
+                <div class="nova-mono" style="font-size:10px;margin-top:2px" x-text="s.id"></div>
+                <p x-show="s.description" class="nova-subtitle" style="margin:6px 0 0" x-text="s.description"></p>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div>
+          <div class="nova-label" style="margin-bottom:8px">capabilities</div>
+          <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px">
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.streaming && 'is-on'">streaming</span>
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.pushNotifications && 'is-on'">push</span>
+            <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.stateTransitionHistory && 'is-on'">history</span>
+          </div>
+        </div>
+      </aside>
 
     </section>
 

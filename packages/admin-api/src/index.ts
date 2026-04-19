@@ -6,6 +6,8 @@ import { adminAuth } from './middleware/auth';
 import { errorHandler } from './middleware/error-handler';
 import { tenantsRouter } from './routes/tenants';
 import { agentsRouter } from './routes/agents';
+import { allAgentsRouter } from './routes/all-agents';
+import { allAuditRouter } from './routes/all-audit';
 import { trustRouter } from './routes/trust';
 import { ucanRouter } from './routes/ucan';
 import { quarantineRouter } from './routes/quarantine';
@@ -116,6 +118,8 @@ app.get('/health', healthHandler('admin-api', adminStartTime, async () => ({
 
 // Mount routes per spec Section 5.5
 app.use('/admin/tenants', tenantsRouter);
+app.use('/admin/agents', allAgentsRouter);
+app.use('/admin/audit', allAuditRouter);
 app.use('/admin/tenants/:tenantId/invites', invitesRouter);
 app.use('/admin/tenants/:tenantId/agents', agentsRouter);
 app.use('/admin/tenants/:tenantId/agents/:agentId/trust', trustRouter);
