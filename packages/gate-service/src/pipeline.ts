@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath, DATA_ROOT } from '@nova/shared/src/tenant';
+import { TenantContext, tenantDataPath, KEY_ROOT } from '@nova/shared/src/tenant';
 import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
 import { TrustTier, ActorRecord } from '@nova/shared/src/types';
 import { auditLog } from '@nova/shared/src/audit';
@@ -11,6 +11,8 @@ import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
 import { gateDecisions, gateLatency, classifierResults, quarantineDepth } from './metrics';
+
+const GATE_LLM_FAIL_CLOSED = process.env.GATE_LLM_FAIL_CLOSED === 'true';
 
 export interface GateContext {
   tenantCtx: TenantContext;
@@ -311,6 +313,32 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       metadata: { classifierConfidence: llmResult.confidence, fromCache: llmResult.fromCache },
     });
   } catch (err: any) {
+    if (GATE_LLM_FAIL_CLOSED) {
+      await auditLog(tenantCtx, {
+        event: 'classifier_unavailable_quarantined',
+        senderDid: senderDid ?? undefined,
+        tier,
+        reason: err.message,
+      });
+      const qId = await writeQuarantine(tenantCtx, {
+        receivedAt,
+        senderDid,
+        rawTask: ctx.body,
+        gateStep: 'classifier',
+        reason: `classifier_unavailable:${err.message}`,
+      });
+      classifierResults.inc({ result: 'quarantine', stage: 'llm_error' });
+      return await recordAndReturn({
+        passed: false,
+        decision: 'quarantined',
+        errorCode: 'CLASSIFIER_UNAVAILABLE',
+        reason: `LLM classifier unavailable: ${err.message}`,
+        quarantineId: qId ?? undefined,
+        senderDid: senderDid ?? undefined,
+        trustTier: tier,
+      });
+    }
+
     // Classifier unavailable → skip the LLM check, let the request through.
     // The other 5 gates (actor, UCAN, audit, schema, pattern) still protect us.
     await auditLog(tenantCtx, {
@@ -369,7 +397,7 @@ let _cachedAgentDid: string | null = null;
 
 async function loadAgentDid(): Promise<string> {
   if (_cachedAgentDid) return _cachedAgentDid;
-  const didPath = path.join(DATA_ROOT, 'keys', 'nova.did');
+  const didPath = path.join(KEY_ROOT, 'nova.did');
   try {
     _cachedAgentDid = (await fsp.readFile(didPath, 'utf8')).trim();
     return _cachedAgentDid;

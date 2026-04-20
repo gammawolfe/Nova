@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT } from './tenant';
+import { DATA_ROOT, KEY_ROOT } from './tenant';
 import { getSharedRedis } from './redis';
 
 export interface InvitePayload {
@@ -15,7 +15,7 @@ export interface InvitePayload {
 const CONSUMED_PREFIX = 'nova:invite-consumed:';
 
 export async function loadNovaPrivateKey(): Promise<crypto.KeyObject> {
-  const keyPath = path.join(DATA_ROOT, 'keys', 'nova.private.pem');
+  const keyPath = path.join(KEY_ROOT, 'nova.private.pem');
   const content = await fsp.readFile(keyPath, 'utf8').catch(() => {
     throw new Error('Nova keys not found — run scripts/generate-keys.ts first');
   });

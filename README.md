@@ -295,7 +295,7 @@ npm run --workspace=@nova/agent-connector dev
 
 ### Enterprise key management
 
-`generate-keys.ts` writes Nova's private key to `data/keys/nova.private.pem`.
+`generate-keys.ts` writes Nova's private key to the `NOVA_KEY_DIR` (which defaults to `data/keys/nova.private.pem`).
 For multi-node deployments, generate in an external vault (AWS KMS,
 HashiCorp Vault) and load via environment variables at boot — do not rely
 on local PEM files.

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { KEY_ROOT } from '../packages/shared/src/tenant';
 
 function main() {
   const tenantId = 'tenant_seed_123';
@@ -58,7 +59,7 @@ function main() {
   );
 
   // Provide a trusted DID
-  const myDidPath = path.join(dataRoot, 'keys', 'nova.did');
+  const myDidPath = path.join(KEY_ROOT, 'nova.did');
   let allowedDid = 'did:example:stub';
   
   if (fs.existsSync(myDidPath)) {

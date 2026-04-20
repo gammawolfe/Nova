@@ -9,13 +9,14 @@ const BASE_URL = `http://localhost:${PORT}`;
 const ADMIN_TOKEN = 'e2e-token-fixed';
 
 const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nova-e2e-'));
+const keyRoot = path.join(dataRoot, 'keys');
 fs.mkdirSync(path.join(dataRoot, 'tenants'), { recursive: true });
-fs.mkdirSync(path.join(dataRoot, 'keys'), { recursive: true });
+fs.mkdirSync(keyRoot, { recursive: true });
 
-// Generate Nova Ed25519 identity keys into the E2E data root.
+// Generate Nova Ed25519 identity keys into the E2E keys root.
 // Runs generate-keys.ts as a subprocess so we avoid top-level await in this config.
 const repoRoot = path.resolve(__dirname, '..', '..');
-execSync(`npx tsx ${path.join('scripts', 'generate-keys-to.ts')} ${dataRoot}`, {
+execSync(`npx tsx ${path.join('scripts', 'generate-keys-to.ts')} ${keyRoot}`, {
   cwd: repoRoot,
   stdio: 'inherit',
 });
@@ -50,6 +51,7 @@ export default defineConfig({
       ADMIN_TOKEN,
       PORT: String(PORT),
       DATA_ROOT: dataRoot,
+      NOVA_KEY_DIR: keyRoot,
       REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379',
     },
     stdout: 'pipe',

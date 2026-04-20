@@ -310,7 +310,7 @@ export function redisKey(ctx: TenantContext, ...parts: string[]): string {
 
 ### 4.3 File System Namespacing
 
-All persistent data is scoped under `data/tenants/{tenant-id}/agents/{agent-id}/`. No data is ever written outside this path hierarchy (except Nova's own keypair at `data/keys/`).
+All persistent data is scoped under `data/tenants/{tenant-id}/agents/{agent-id}/`. No data is ever written outside this path hierarchy (except Nova's own keypair at `NOVA_KEY_DIR`, which defaults to `data/keys/`).
 
 ```typescript
 export function tenantDataPath(ctx: TenantContext, ...parts: string[]): string {
@@ -1687,12 +1687,13 @@ async function generateKeys(): Promise<void> {
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
   })
   
-  fs.writeFileSync('data/keys/nova.private.pem', privateKey, { mode: 0o600 })
-  fs.writeFileSync('data/keys/nova.public.pem', publicKey)
+  const keyDir = process.env.NOVA_KEY_DIR || 'data/keys';
+  fs.writeFileSync(`${keyDir}/nova.private.pem`, privateKey, { mode: 0o600 })
+  fs.writeFileSync(`${keyDir}/nova.public.pem`, publicKey)
   
   // Derive DID from public key
   const did = await deriveDidKey(publicKey)
-  fs.writeFileSync('data/keys/nova.did', did)
+  fs.writeFileSync(`${keyDir}/nova.did`, did)
   
   console.log(`Generated keys. Nova DID: ${did}`)
   console.log('Share the DID with operators who want to receive UCANs from Nova-mediated agents.')
@@ -1707,17 +1708,18 @@ async function generateKeys(): Promise<void> {
 // Generate a challenge for an incoming actor
 async function challenge(actorDid: string): Promise<void> {
   const nonce = crypto.randomBytes(32).toString('hex')
+  const keyDir = process.env.NOVA_KEY_DIR || 'data/keys';
   const challenge = {
     id: uuid4(),
     actorDid,
-    novaDid: fs.readFileSync('data/keys/nova.did', 'utf8').trim(),
+    novaDid: fs.readFileSync(`${keyDir}/nova.did`, 'utf8').trim(),
     nonce,
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
   }
   
   // Sign the challenge with Nova's private key
-  const signature = signRSA(JSON.stringify(challenge), fs.readFileSync('data/keys/nova.private.pem', 'utf8'))
+  const signature = signRSA(JSON.stringify(challenge), fs.readFileSync(`${keyDir}/nova.private.pem`, 'utf8'))
   const signedChallenge = { ...challenge, novaSignature: signature }
   
   // Store pending challenge
@@ -1765,8 +1767,9 @@ async function issueUCAN(opts: {
   agentDid: string
 }): Promise<string> {
   
-  const novaDid = fs.readFileSync('data/keys/nova.did', 'utf8').trim()
-  const privateKey = fs.readFileSync('data/keys/nova.private.pem', 'utf8')
+  const keyDir = process.env.NOVA_KEY_DIR || 'data/keys';
+  const novaDid = fs.readFileSync(`${keyDir}/nova.did`, 'utf8').trim()
+  const privateKey = fs.readFileSync(`${keyDir}/nova.private.pem`, 'utf8')
   
   const payload = {
     ucv: '0.10.0',
@@ -1825,7 +1828,7 @@ Never exposed:
 | `ANTHROPIC_API_KEY` | For injection classifier (Haiku) |
 | `DELIVERY_SIGNING_SECRET` | HMAC secret for agent delivery signatures |
 
-Private key file must have permissions `600`. Verify: `ls -la data/keys/`.
+Private key file must have permissions `600`. Verify: `ls -la ${NOVA_KEY_DIR:-data/keys}/`.
 
 ### 8.3 Key Rotation
 
@@ -2012,10 +2015,13 @@ Caddy handles TLS automatically via Let's Encrypt once DNS resolves. Allow 24–
 NOVA_BASE_URL=https://nova.example.com
 
 # Keys
-NOVA_PRIVATE_KEY_PATH=./data/keys/nova.private.pem
-NOVA_PUBLIC_KEY_PATH=./data/keys/nova.public.pem
-NOVA_OLD_PRIVATE_KEY_PATH=./data/keys/nova.private.old.pem
-NOVA_DID_PATH=./data/keys/nova.did
+# NOVA_KEY_DIR defaults to data/keys
+NOVA_KEY_DIR=./data/keys
+# Override specific paths (not recommended unless using external vault mounts)
+NOVA_PRIVATE_KEY_PATH=${NOVA_KEY_DIR}/nova.private.pem
+NOVA_PUBLIC_KEY_PATH=${NOVA_KEY_DIR}/nova.public.pem
+NOVA_OLD_PRIVATE_KEY_PATH=${NOVA_KEY_DIR}/nova.private.old.pem
+NOVA_DID_PATH=${NOVA_KEY_DIR}/nova.did
 
 # Redis
 REDIS_URL=redis://redis:6379
@@ -2200,7 +2206,7 @@ const activeSseStreams = new Gauge({ name: 'nova_active_sse_streams', labelNames
 
 | Data | Location | Criticality |
 |------|----------|-------------|
-| Nova private key | `data/keys/nova.private.pem` | Critical |
+| Nova private key | `NOVA_KEY_DIR/nova.private.pem` | Critical |
 | Tenant/agent configs | `data/tenants/` | High |
 | Trust registries | `data/tenants/*/agents/*/trust-registry/` | High |
 | UCAN revoked list | `data/tenants/*/ucans/revoked/` | High |
@@ -2221,7 +2227,8 @@ BACKUP_DIR="/backup/nova-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
 # Keys
-cp -r data/keys "$BACKUP_DIR/keys"
+KEY_DIR="${NOVA_KEY_DIR:-data/keys}"
+cp -r "$KEY_DIR" "$BACKUP_DIR/keys"
 chmod 600 "$BACKUP_DIR/keys/"*.pem
 
 # Tenant data (excludes quarantine and dead-letter — low value, high volume)
@@ -2251,7 +2258,7 @@ Cron: `0 2 * * * /opt/nova/scripts/backup.sh >> /var/log/nova-backup.log 2>&1`
 
 1. Provision VPS, install Docker, clone repository
 2. Extract backup: `tar -xzf nova-{date}.tar.gz`
-3. Restore keys: `cp backup/keys/* data/keys/ && chmod 600 data/keys/*.pem`
+3. Restore keys: `cp backup/keys/* ${NOVA_KEY_DIR:-data/keys}/ && chmod 600 ${NOVA_KEY_DIR:-data/keys}/*.pem`
 4. Restore tenants: `cp -r backup/tenants/ data/tenants/`
 5. Restore Redis: `docker cp backup/redis.aof nova-redis:/data/appendonly.aof`
 6. Start: `docker compose up -d`

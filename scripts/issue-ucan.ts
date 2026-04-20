@@ -15,6 +15,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import * as ucans from '@ucans/ucans';
+import { KEY_ROOT } from '../packages/shared/src/tenant';
 
 const DATA_ROOT = process.env.DATA_ROOT || path.resolve(process.cwd(), 'data');
 
@@ -44,7 +45,7 @@ async function main() {
   const skillsArg = get('--skills');
 
   // Load Nova's private key
-  const privKeyPath = path.join(DATA_ROOT, 'keys', 'nova.private.pem');
+  const privKeyPath = path.join(KEY_ROOT, 'nova.private.pem');
   if (!fs.existsSync(privKeyPath)) {
     console.error(`Private key not found at ${privKeyPath}. Run: npm run generate:keys`);
     process.exit(1);

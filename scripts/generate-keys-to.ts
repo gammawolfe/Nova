@@ -4,12 +4,11 @@ import path from 'path';
 import bs58 from 'bs58';
 
 async function main() {
-  const dataRoot = process.argv[2];
-  if (!dataRoot) {
-    console.error('Usage: generate-keys-to.ts <data-root>');
+  const keysDir = process.argv[2];
+  if (!keysDir) {
+    console.error('Usage: generate-keys-to.ts <keys-dir>');
     process.exit(1);
   }
-  const keysDir = path.join(dataRoot, 'keys');
 
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
 

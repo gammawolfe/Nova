@@ -2,7 +2,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { Router } from 'express';
 import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared/src/admin-schemas';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
+import { DATA_ROOT, KEY_ROOT } from '@nova/shared/src/tenant';
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
@@ -12,7 +12,7 @@ import { ctx } from '../middleware/ctx';
 
 async function loadNovaDid(): Promise<string | null> {
   try {
-    return (await fsp.readFile(path.join(DATA_ROOT, 'keys', 'nova.did'), 'utf8')).trim();
+    return (await fsp.readFile(path.join(KEY_ROOT, 'nova.did'), 'utf8')).trim();
   } catch { return null; }
 }
 

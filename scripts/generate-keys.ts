@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import * as ucans from '@ucans/ucans';
+import { KEY_ROOT } from '../packages/shared/src/tenant';
 
-const keysDir = path.join(process.cwd(), 'data', 'keys');
+const keysDir = KEY_ROOT;
 
 async function main() {
   console.log('Generating Nova cryptographic identity...');

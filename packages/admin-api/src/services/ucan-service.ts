@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
+import { DATA_ROOT, KEY_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { loadNovaPrivateKey } from '@nova/shared/src/invites';
 import { verifyAndConsumeNonce } from './nonce-service';
@@ -27,7 +27,7 @@ function computeCid(jwt: string): string {
 export async function issueUcan(tenantId: string, data: {
   subjectDid: string; capabilities: string[]; expiryDays: number;
 }): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-  const didPath = path.join(DATA_ROOT, 'keys', 'nova.did');
+  const didPath = path.join(KEY_ROOT, 'nova.did');
 
   let novaDid: string;
   try {

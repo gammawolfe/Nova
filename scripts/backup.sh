@@ -11,8 +11,9 @@ mkdir -p "${TEMP_DIR}"
 echo "=== Nova Backup: ${BACKUP_NAME} ==="
 
 # Keys (critical)
-if [ -d "data/keys" ]; then
-  cp -r data/keys "${TEMP_DIR}/keys"
+KEY_DIR="${NOVA_KEY_DIR:-data/keys}"
+if [ -d "${KEY_DIR}" ]; then
+  cp -r "${KEY_DIR}" "${TEMP_DIR}/keys"
   chmod 600 "${TEMP_DIR}/keys/"*.pem 2>/dev/null || true
   echo "  Keys backed up"
 fi
