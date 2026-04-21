@@ -422,8 +422,9 @@
             <div class="nova-eyebrow">◉ NEW INVITE</div>
             <h2 class="nova-display" style="font-size:28px;margin:8px 0 20px">Invite a planet.</h2>
 
-            <label class="nova-label" for="i-hint">agent id hint (optional)</label>
-            <input id="i-hint" class="nova-input" x-model="hint" placeholder="agent_alpha" pattern="[a-z0-9_-]+">
+            <label class="nova-label" for="i-hint">agent id hint</label>
+            <input id="i-hint" class="nova-input" x-model="hint" placeholder="agent_alpha" pattern="[a-z0-9_-]+" required>
+            <p class="nova-subtitle" style="margin-top:4px;font-size:11px">The agentId the receiving runtime will register as. Invite is bound to this id — one invite per agent.</p>
 
             <label class="nova-label" for="i-ttl" style="margin-top:14px">ttl</label>
             <select id="i-ttl" class="nova-input" x-model.number="ttl">
@@ -441,10 +442,10 @@
               <button class="nova-input" style="width:auto;padding:10px 16px" @click="showCreateInvite = false" :disabled="busy">Cancel</button>
               <button class="nova-cta" @click="(async () => {
                 busy = true; err = '';
-                try { await createInvite({ agentIdHint: hint || undefined, ttlSeconds: ttl, note: note || undefined }); }
+                try { await createInvite({ agentIdHint: hint, ttlSeconds: ttl, note: note || undefined }); }
                 catch (e) { err = (e.details && e.details[0]?.message) || e.message || 'Invite failed'; }
                 finally { busy = false; }
-              })()" :disabled="busy">
+              })()" :disabled="busy || !hint">
                 <span x-text="busy ? 'Issuing…' : 'Issue invite'"></span><span>→</span>
               </button>
             </div>

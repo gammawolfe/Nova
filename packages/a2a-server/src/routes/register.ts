@@ -79,8 +79,16 @@ registerRouter.post('/', async (req: Request, res: Response) => {
   const tenantId = invitePayload.tenantId;
   const agentIdHint = invitePayload.agentIdHint;
 
-  // Step 2: agentId must match the invite's hint if present.
-  if (agentIdHint && agentIdHint !== agentId) {
+  // Step 2: agentId must match the invite's hint. agentIdHint is required on
+  // newly-minted invites; rejecting hintless tokens closes a legacy path where
+  // an invite could be used to register any agentId the caller chose.
+  if (!agentIdHint) {
+    return res.status(400).json({
+      error: 'INVITE_INVALID',
+      message: 'Invite has no agentIdHint — re-mint the invite with an agentIdHint set',
+    });
+  }
+  if (agentIdHint !== agentId) {
     return res.status(400).json({
       error: 'AGENT_ID_MISMATCH',
       message: `Invite was minted for agentId '${agentIdHint}' but registration requested '${agentId}'`,

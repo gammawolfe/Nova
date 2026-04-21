@@ -199,7 +199,7 @@ export class NovaClient {
     return json('POST', joinUrl(this.adminBase(), '/admin/tenants'), data, this.adminHeaders());
   }
 
-  async createInvite(tenantId: string, data: { agentIdHint?: string; ttlSeconds?: number; note?: string } = {}): Promise<{ token: string; expiresAt: string; tenantId: string }> {
+  async createInvite(tenantId: string, data: { agentIdHint: string; ttlSeconds?: number; note?: string }): Promise<{ token: string; expiresAt: string; tenantId: string }> {
     return json('POST', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/invites`), data, this.adminHeaders());
   }
 
