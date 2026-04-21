@@ -39,30 +39,63 @@ review. Each item below is scoped to ship as its own PR.
 
 ### P1 — Robustness gaps
 
-- [ ] **UCAN claim window: extend + recovery path.** Bump default Redis
+- [x] **UCAN claim window: extend + recovery path.** Bump default Redis
   TTL on the one-time UCAN claim from 1h to 24h in
   `packages/a2a-server/src/services/ucan-service.ts`. Add
   `nova_reissue_ucan` admin tool + endpoint for operators to regenerate a
   missed claim (idempotent, no invite needed). Emit distinct
   `UCAN_CLAIM_EXPIRED` error code with remediation text.
-- [ ] **Polling backoff + recovery guidance in `nova_onboard` prompt.**
+  — Shipped 2026-04-21 (#18). TTL bump + reissue lives in
+  `packages/admin-api/src/routes/agents.ts` + `.../services/ucan-service.ts`
+  (not `a2a-server` — roadmap path was wrong). `UCAN_CLAIM_EXPIRED` is
+  client-emitted in `nova_check_registration` when status=active but both
+  the server claim and local cache are empty; the server can't
+  disambiguate "never claimed" from "claimed-and-re-polling" without extra
+  state, and the client already knows.
+- [x] **Polling backoff + recovery guidance in `nova_onboard` prompt.**
   Replace "every 10 seconds" forever with: 10s for first 2min, then 30s,
   cap at 60s, abort after 30min with operator-contact message. Add
   explicit handling for `UCAN_CLAIM_EXPIRED`. File:
   `packages/mcp-server/src/prompts.ts`.
-- [ ] **Concurrent-instance file locking on UCAN cache.** Add
+  — Shipped 2026-04-21 (#19, landed on main via #21). Cadence caps total
+  polls at ≤48 vs. prior unbounded 10s loop. UCAN_CLAIM_EXPIRED stops
+  polling immediately with a verbatim operator-handoff message.
+- [x] **Concurrent-instance file locking on UCAN cache.** Add
   `proper-lockfile` (or `fs.flock`) around reads/writes of
   `~/.nova/agents/{agentId}.ucan.json` in
   `packages/mcp-server/src/tools.ts`. On contention, re-read and reuse the
   fresh UCAN instead of re-renewing.
+  — Shipped 2026-04-21 (#20, landed on main via #21). Uses
+  `proper-lockfile` (atomic mkdir, 10s stale, 5s heartbeat). Fast-path
+  check happens without the lock; slow path locks + re-reads + renews so
+  the race loser picks up the winner's fresh UCAN for free. Helper lives
+  in `ucan-store.ts` as `withCacheLock`, reusable by future cache-mutating
+  tools.
 
 ### P2 — Security hardening (longer horizon)
 
-- [ ] **Key rotation flow.** New `nova_rotate_key(agentId)` tool +
+- [x] **Key rotation flow.** New `nova_rotate_key(agentId)` tool +
   `POST /agents/:agentId/rotate-key` endpoint. Generates new keypair
   locally, PoP-signs the rotation request with the *old* key. Server
   updates stored public key, issues fresh UCAN. ~200 LOC + migration note
   for existing agents.
+  — Shipped 2026-04-21 (PR). PoP signature covers
+  `${nonce}|${newDid}|${newPublicKey}` so a captured request can't be
+  replayed with a different public key. Endpoint is
+  `POST /admin/tenants/:tenantId/agents/:agentId/rotate-key` — mounted
+  before the `/admin` auth gate; auth boundary is the PoP sig, not a
+  bearer token. Server revokes every UCAN issued to the old DID in the
+  tenant, swaps `{did, publicKey}` atomically, rebuilds the trust-registry
+  actor with tier + allowedSkills preserved, and mints a fresh self-UCAN.
+  Client tool snapshots the previous identity to
+  `{agentId}.json.rotated-{ISO}.bak` and wipes perDestination UCAN cache
+  (all entries were bound to the old DID). Cross-tenant trust entries
+  that reference the old DID are left for the operator to re-seed — the
+  tool response surfaces the new DID so the user can notify counterparties.
+  Drive-by fix: `issueUcan` now adds `jti` to the payload so two UCANs
+  issued in the same second with identical capabilities get distinct CIDs
+  (without it, rotation's fresh UCAN collided with the old about-to-be-
+  revoked UCAN).
 - [ ] **OS keychain integration (opt-in).** `NOVA_KEY_BACKEND=keychain|file`
   env var. Keychain backend via `node-keytar` (macOS) / libsecret (Linux).
   File backend remains default for CI/containers. Abstraction in new
