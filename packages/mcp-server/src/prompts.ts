@@ -20,7 +20,7 @@ export function registerPrompts(_server: McpServer): void {
             '1. Call nova_whoami to see current state.',
             '2. If no identity exists for NOVA_AGENT_ID, call nova_generate_identity with a lowercase agent ID matching NOVA_AGENT_ID.',
             '3. Ask me for the invite token (provided by the tenant operator out-of-band), then call nova_accept_invite with it.',
-            '4. Before calling nova_register_agent, base64url-decode the middle segment of the invite JWT and read the "agentIdHint" claim. The agentId you pass to nova_register_agent MUST equal agentIdHint exactly. If they differ, STOP and ask me for a new invite minted with the correct hint — do NOT call nova_register_agent yet (see gotcha below).',
+            '4. Before calling nova_register_agent, call nova_inspect_invite with the token to read its claims. The agentId you pass to nova_register_agent MUST equal the returned agentIdHint exactly. If they differ (or agentIdHint is null, or expired is true), STOP and ask me for a new invite with the correct hint — do NOT call nova_register_agent yet (see gotcha below).',
             '5. Call nova_register_agent EXACTLY ONCE with the agent name, description, skills, and the invite token. Skills can start with just { id: "__sender_only", name: "Sender only", description: "send-only" } if the agent will not receive tasks.',
             '6. Poll nova_check_registration every 10 seconds until status is "active" (the operator must approve via the admin UI).',
             '7. Confirm nova_whoami shows a cached self-UCAN.',
