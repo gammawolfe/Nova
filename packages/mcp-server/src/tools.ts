@@ -496,10 +496,11 @@ export function registerTools(_server: McpServer): void {
     'nova_create_invite',
     {
       title: '[Operator] Mint an invite token for a tenant',
-      description: 'Requires NOVA_ADMIN_TOKEN. Returns a JWT to share with a new agent. One-time use.',
+      description: 'Requires NOVA_ADMIN_TOKEN. Returns a JWT to share with a new agent. One-time use. agentIdHint is required — mint one invite per agent you want to onboard.',
       inputSchema: {
         tenantId: z.string().min(1),
-        agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).optional(),
+        agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64)
+          .describe('The agentId the receiving runtime will register as. Invite can only be used to register exactly this agentId.'),
         ttlSeconds: z.number().int().min(60).max(7 * 24 * 3600).default(24 * 3600),
         note: z.string().max(200).optional(),
       },
@@ -508,7 +509,7 @@ export function registerTools(_server: McpServer): void {
       if (!process.env['NOVA_ADMIN_TOKEN']) return err('NOVA_ADMIN_TOKEN env var required for operator actions');
       const client = bootstrapClient();
       const res = await client.createInvite(args.tenantId, {
-        ...(args.agentIdHint !== undefined ? { agentIdHint: args.agentIdHint } : {}),
+        agentIdHint: args.agentIdHint,
         ttlSeconds: args.ttlSeconds,
         ...(args.note !== undefined ? { note: args.note } : {}),
       });

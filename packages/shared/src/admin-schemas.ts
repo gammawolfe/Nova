@@ -130,7 +130,7 @@ export const SelfRegisterSchema = z.object({
 // ── Tenant Invites ──────────────────────────────────────────────────────────
 
 export const InviteCreateSchema = z.object({
-  agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).optional(),
+  agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
   ttlSeconds: z.number().int().min(60).max(7 * 24 * 3600).default(24 * 3600),
   note: z.string().max(200).optional(),
 });

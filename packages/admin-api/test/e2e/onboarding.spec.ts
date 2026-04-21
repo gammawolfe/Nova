@@ -15,7 +15,12 @@ test('login → create galaxy → issue invite → reveal', async ({ page }) => 
   await expect(page.getByText('ACME E2E')).toBeVisible();
 
   await page.click('button:has-text("+ Issue invite")');
-  await page.click('.nova-modal button:has-text("Issue invite")');
+  // agentIdHint is required — button is disabled until it's filled.
+  const issue = page.locator('.nova-modal button:has-text("Issue invite")');
+  await expect(issue).toBeDisabled();
+  await page.fill('#i-hint', 'agent_e2e_' + Math.random().toString(36).slice(2, 8));
+  await expect(issue).toBeEnabled();
+  await issue.click();
   await expect(page.getByText('ONE-TIME TOKEN')).toBeVisible();
 
   const jwt = await page.locator('.nova-modal .nova-glass.nova-mono').first().innerText();

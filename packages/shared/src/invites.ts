@@ -51,7 +51,7 @@ async function loadNovaPublicKey(): Promise<crypto.KeyObject> {
 
 export async function createInvite(
   tenantId: string,
-  data: { agentIdHint?: string | undefined; ttlSeconds: number; note?: string | undefined }
+  data: { agentIdHint: string; ttlSeconds: number; note?: string | undefined }
 ): Promise<{ token: string; jti: string; expiresAt: string }> {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + data.ttlSeconds;
@@ -61,7 +61,7 @@ export async function createInvite(
   const payload: InvitePayload = {
     typ: 'invite',
     tenantId,
-    ...(data.agentIdHint ? { agentIdHint: data.agentIdHint } : {}),
+    agentIdHint: data.agentIdHint,
     exp,
     jti,
   };
