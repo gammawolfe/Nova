@@ -96,10 +96,23 @@ review. Each item below is scoped to ship as its own PR.
   issued in the same second with identical capabilities get distinct CIDs
   (without it, rotation's fresh UCAN collided with the old about-to-be-
   revoked UCAN).
-- [ ] **OS keychain integration (opt-in).** `NOVA_KEY_BACKEND=keychain|file`
+- [x] **OS keychain integration (opt-in).** `NOVA_KEY_BACKEND=keychain|file`
   env var. Keychain backend via `node-keytar` (macOS) / libsecret (Linux).
   File backend remains default for CI/containers. Abstraction in new
   `packages/mcp-server/src/key-backend.ts`. Ship after rotation.
+  — Shipped 2026-04-21 (PR). Substituted `@napi-rs/keyring` for `node-keytar`
+  — keytar is archived, napi-rs variant ships prebuilds and covers macOS
+  Keychain / libsecret / Windows Credential Manager through the same
+  `Entry(service, account)` API. File backend is unchanged from pre-P2.8
+  (inline PEM in `~/.nova/agents/{agentId}.json`), so existing deployments
+  and CI/containers keep working without any config. Keychain backend
+  stores the PEM in the OS credential store and keeps only metadata + a
+  `keyBackend:"keychain"` marker on disk. Transparent one-way migration
+  on load (file→keychain): legacy records picked up under the new env
+  move into the keychain and the on-disk JSON is rewritten. Orphaned-
+  metadata case (marker says keychain but no entry) surfaces an explicit
+  error pointing at remediation. Invalid `NOVA_KEY_BACKEND` values fail
+  fast rather than silently defaulting.
 - [x] **Opportunistic revocation-check on send.** Add lightweight
   `nova_check_status()`; have `nova_send_task` call it with a 5-min cache
   to surface operator revocations before the task submit fails silently.
