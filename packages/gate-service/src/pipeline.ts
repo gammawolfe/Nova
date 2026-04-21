@@ -315,7 +315,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   } catch (err: any) {
     if (GATE_LLM_FAIL_CLOSED) {
       await auditLog(tenantCtx, {
-        event: 'classifier_unavailable_quarantined',
+        event: 'classifier_unavailable',
         senderDid: senderDid ?? undefined,
         tier,
         reason: err.message,
