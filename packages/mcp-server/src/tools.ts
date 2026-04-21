@@ -20,6 +20,7 @@ import {
 } from './ucan-store.js';
 import { agentIdentityPath } from './paths.js';
 import fsp from 'fs/promises';
+import type { NovaClient } from './nova-client.js';
 
 function ok(data: unknown): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
