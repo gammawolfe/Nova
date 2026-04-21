@@ -51,7 +51,7 @@ async function loadNovaPublicKey(): Promise<crypto.KeyObject> {
 
 export async function createInvite(
   tenantId: string,
-  data: { agentIdHint?: string | undefined; ttlSeconds: number; note?: string | undefined }
+  data: { agentIdHint: string; ttlSeconds: number; note?: string | undefined }
 ): Promise<{ token: string; jti: string; expiresAt: string }> {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + data.ttlSeconds;
@@ -61,7 +61,7 @@ export async function createInvite(
   const payload: InvitePayload = {
     typ: 'invite',
     tenantId,
-    ...(data.agentIdHint ? { agentIdHint: data.agentIdHint } : {}),
+    agentIdHint: data.agentIdHint,
     exp,
     jti,
   };
@@ -81,10 +81,14 @@ export async function createInvite(
 }
 
 /**
- * Verify an invite JWT and atomically mark it consumed.
- * Throws on invalid signature, expired token, or already-consumed jti.
+ * Verify an invite JWT's signature, structure, and expiry. Does NOT consume.
+ *
+ * Throws on malformed token, invalid signature, wrong typ, missing claims, or
+ * expired token. The returned payload is safe to use for downstream validation
+ * (agentIdHint match, tenant existence, duplicate-agent checks) before the
+ * caller decides to consume. See `consumeInvite`.
  */
-export async function verifyAndConsumeInvite(token: string): Promise<InvitePayload> {
+export async function verifyInvite(token: string): Promise<InvitePayload> {
   const parts = token.split('.');
   if (parts.length !== 3) {
     throw Object.assign(new Error('Malformed invite token'), { status: 400 });
@@ -117,6 +121,17 @@ export async function verifyAndConsumeInvite(token: string): Promise<InvitePaylo
     throw Object.assign(new Error('Invite expired'), { status: 410 });
   }
 
+  return payload;
+}
+
+/**
+ * Atomically mark an invite jti as consumed. Call this only after all other
+ * validation has passed — consumption is one-shot and irreversible within the
+ * TTL window.
+ *
+ * Throws with status 409 if the jti has already been consumed.
+ */
+export async function consumeInvite(payload: InvitePayload): Promise<void> {
   const redis = getSharedRedis();
   const remainingSec = Math.max(60, payload.exp - Math.floor(Date.now() / 1000));
   const reserved = await redis.set(
@@ -129,6 +144,17 @@ export async function verifyAndConsumeInvite(token: string): Promise<InvitePaylo
   if (reserved !== 'OK') {
     throw Object.assign(new Error('Invite already consumed'), { status: 409 });
   }
+}
 
+/**
+ * Verify an invite JWT and atomically mark it consumed in a single step.
+ *
+ * Prefer `verifyInvite` + `consumeInvite` in flows where downstream validation
+ * can fail after verify but before consume (e.g. the self-registration route),
+ * so that failures don't burn the invite.
+ */
+export async function verifyAndConsumeInvite(token: string): Promise<InvitePayload> {
+  const payload = await verifyInvite(token);
+  await consumeInvite(payload);
   return payload;
 }

@@ -145,12 +145,12 @@ export function registerTools(_server: McpServer): void {
     'nova_register_agent',
     {
       title: 'Register this agent with the joined Nova tenant',
-      description: 'POST /register using the stored invite and local identity. Agent starts in pending status; use nova_check_registration to await approval. IMPORTANT: the invite is consumed atomically on this call BEFORE validation runs, so any failure (AGENT_ID_MISMATCH, schema error, duplicate agent, etc.) still burns the token — retries will return INVITE_INVALID. Before calling, base64url-decode the invite JWT payload and verify agentIdHint exactly matches the agentId you pass here. If they differ, request a fresh invite instead of calling this tool.',
+      description: 'POST /register using the stored invite and local identity. Agent starts in pending status; use nova_check_registration to await approval. The invite is only consumed after server-side validation succeeds, so AGENT_ID_MISMATCH / TENANT_NOT_FOUND / AGENT_EXISTS errors leave the token reusable — fix the input and retry with the same token. Call nova_inspect_invite first to confirm agentIdHint matches the agentId you will pass here.',
       inputSchema: {
-        agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).describe('Must match an identity created via nova_generate_identity AND the agentIdHint claim in the invite JWT. Mismatches return AGENT_ID_MISMATCH and burn the invite.'),
+        agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).describe('Must match an identity created via nova_generate_identity AND the agentIdHint claim in the invite JWT. Mismatches return AGENT_ID_MISMATCH but leave the invite reusable.'),
         name: z.string().min(1).max(200).describe('Human-readable agent name (displayed in admin UI / agent cards)'),
         description: z.string().min(1).max(1000).describe('Short description of what this agent does (required — appears on the public agent card).'),
-        invite: z.string().min(1).describe('The invite JWT from the operator. Consumed atomically on this call, success OR failure — do not retry with the same token. Any retry returns INVITE_INVALID; request a fresh invite instead.'),
+        invite: z.string().min(1).describe('The invite JWT from the operator. Consumed only after server-side validation passes, so agent-side errors (mismatch, missing tenant, duplicate agent) leave it reusable. On successful 201, or on INVITE_INVALID, request a fresh token.'),
         skills: z.array(z.object({
           id: z.string().min(1),
           name: z.string().min(1),
@@ -496,10 +496,11 @@ export function registerTools(_server: McpServer): void {
     'nova_create_invite',
     {
       title: '[Operator] Mint an invite token for a tenant',
-      description: 'Requires NOVA_ADMIN_TOKEN. Returns a JWT to share with a new agent. One-time use.',
+      description: 'Requires NOVA_ADMIN_TOKEN. Returns a JWT to share with a new agent. One-time use. agentIdHint is required — mint one invite per agent you want to onboard.',
       inputSchema: {
         tenantId: z.string().min(1),
-        agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64).optional(),
+        agentIdHint: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64)
+          .describe('The agentId the receiving runtime will register as. Invite can only be used to register exactly this agentId.'),
         ttlSeconds: z.number().int().min(60).max(7 * 24 * 3600).default(24 * 3600),
         note: z.string().max(200).optional(),
       },
@@ -508,7 +509,7 @@ export function registerTools(_server: McpServer): void {
       if (!process.env['NOVA_ADMIN_TOKEN']) return err('NOVA_ADMIN_TOKEN env var required for operator actions');
       const client = bootstrapClient();
       const res = await client.createInvite(args.tenantId, {
-        ...(args.agentIdHint !== undefined ? { agentIdHint: args.agentIdHint } : {}),
+        agentIdHint: args.agentIdHint,
         ttlSeconds: args.ttlSeconds,
         ...(args.note !== undefined ? { note: args.note } : {}),
       });
