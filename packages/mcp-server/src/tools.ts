@@ -217,17 +217,20 @@ export function registerTools(_server: McpServer): void {
       const status = await client.registrationStatus(tenant.tenantId, resolvedAgentId);
 
       if (status.status === 'active' && status.ucan) {
-        const { loadCache, saveCache } = await import('./ucan-store.js');
-        // Merge into existing cache — preserves any perDestination entries
-        // from a prior incarnation of this agentId rather than clobbering them.
-        const cache = await loadCache(resolvedAgentId);
-        cache.self = {
-          jwt: status.ucan.jwt,
-          cid: status.ucan.cid,
-          expiresAt: status.ucan.expiresAt,
-          ...(status.ucan.ucanRenewalUrl ? { ucanRenewalUrl: status.ucan.ucanRenewalUrl } : {}),
-        };
-        await saveCache(cache);
+        const { loadCache, saveCache, withCacheLock } = await import('./ucan-store.js');
+        // Lock + re-read + merge + save, so a concurrent nova_renew_ucan on
+        // the same agent can't clobber the freshly-claimed self-UCAN (or
+        // vice versa).
+        await withCacheLock(resolvedAgentId, async () => {
+          const cache = await loadCache(resolvedAgentId);
+          cache.self = {
+            jwt: status.ucan!.jwt,
+            cid: status.ucan!.cid,
+            expiresAt: status.ucan!.expiresAt,
+            ...(status.ucan!.ucanRenewalUrl ? { ucanRenewalUrl: status.ucan!.ucanRenewalUrl } : {}),
+          };
+          await saveCache(cache);
+        });
         return ok({
           status: 'active',
           claimed: true,
