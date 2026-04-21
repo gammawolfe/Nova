@@ -29,6 +29,37 @@ function err(message: string): { isError: true; content: [{ type: 'text'; text: 
   return { isError: true, content: [{ type: 'text', text: message }] };
 }
 
+// ── nova_check_status cache ────────────────────────────────────────────────
+//
+// Process-local 5-minute cache of (agentId, cid) → health response. Keyed by
+// cid so a UCAN rotation (which changes the cid) effectively invalidates the
+// entry for free. Bounded purely by the MCP-server process lifetime; a fresh
+// process starts with an empty cache, which is the right default for stdio
+// transports that get spawned per session.
+
+type HealthResponse = {
+  agentId: string;
+  agentStatus: 'active' | 'pending' | 'deregistered' | 'unknown';
+  ucan?: { cid: string; revoked: boolean; found: boolean; expiresAt?: string };
+};
+
+const HEALTH_CACHE_TTL_MS = 5 * 60 * 1000;
+const healthCache = new Map<string, { at: number; response: HealthResponse }>();
+
+async function getHealth(
+  client: NovaClient,
+  agentId: string,
+  ucanCid: string | undefined,
+): Promise<HealthResponse> {
+  const key = `${agentId}|${ucanCid ?? ''}`;
+  const now = Date.now();
+  const hit = healthCache.get(key);
+  if (hit && now - hit.at < HEALTH_CACHE_TTL_MS) return hit.response;
+  const response = await client.getAgentHealth(agentId, ucanCid);
+  healthCache.set(key, { at: now, response });
+  return response;
+}
+
 export function registerTools(_server: McpServer): void {
   // Cast to any: the MCP SDK's zod-compat generics blow TypeScript's inference depth
   // when combined with nested z.object/z.array/z.record. Runtime zod validation still runs
@@ -460,9 +491,34 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
+      // Pre-flight: is THIS agent still active and its self-UCAN still valid?
+      // Cached for 5 min per (agentId, cid) so the hot path is one map lookup.
+      // Catches operator-driven revocations that would otherwise quarantine
+      // the task at the destination's gate with no clear signal to the sender.
+      try {
+        const selfCache = await loadUcanCache(rt.agentId);
+        const selfHealth = await getHealth(rt.client, rt.agentId, selfCache.self?.cid);
+        if (selfHealth.agentStatus === 'deregistered') {
+          return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is deregistered in Nova. Contact the tenant operator — a fresh invite + registration is required before sending tasks.`);
+        }
+        if (selfHealth.agentStatus === 'pending') {
+          return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is still pending operator approval. Run nova_check_registration and wait for approval before sending tasks.`);
+        }
+        if (selfHealth.ucan?.revoked) {
+          return err(`UCAN_REVOKED: this agent's self-UCAN (cid=${selfHealth.ucan.cid}) has been revoked. Ask the operator to run nova_reissue_ucan and then call nova_check_registration to pick up the fresh credential.`);
+        }
+      } catch (e: any) {
+        // Advisory-only: don't block sends if the probe itself fails (e.g.
+        // a2a-server unreachable). The gate will still enforce at submit time.
+        // Just log through the tool output — keeps behaviour no worse than pre-P2.9.
+      }
+
       const target = await rt.client.getAgent(args.targetAgentId);
       const destTenantId: string | undefined = target?.tenantId;
       if (!destTenantId) return err(`Destination agent '${args.targetAgentId}' not found or has no tenantId`);
+      if (target?.status && target.status !== 'active') {
+        return err(`DEST_AGENT_INACTIVE: destination '${args.targetAgentId}' is ${target.status}. Pick a different target via nova_list_agents or wait for the operator to approve it.`);
+      }
 
       const ucan = await ensureDestinationUcan(
         rt.client,

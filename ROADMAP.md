@@ -100,10 +100,23 @@ review. Each item below is scoped to ship as its own PR.
   env var. Keychain backend via `node-keytar` (macOS) / libsecret (Linux).
   File backend remains default for CI/containers. Abstraction in new
   `packages/mcp-server/src/key-backend.ts`. Ship after rotation.
-- [ ] **Opportunistic revocation-check on send.** Add lightweight
+- [x] **Opportunistic revocation-check on send.** Add lightweight
   `nova_check_status()`; have `nova_send_task` call it with a 5-min cache
   to surface operator revocations before the task submit fails silently.
   File: `packages/mcp-server/src/tools.ts`.
+  — Shipped 2026-04-21 (PR). Server-side: new public
+  `GET /agents/:agentId/health?ucanCid=XYZ` on a2a-server returns
+  `{ agentStatus, ucan?: { revoked, found, expiresAt } }`. Agent status via
+  Redis agent-meta (O(1)); UCAN state via filesystem probe of
+  `ucans/issued/{cid}.json` + `ucans/revoked/{cid}.json`. cid format
+  validated against `[0-9a-f]{32}` to close the path-traversal surface on
+  the filesystem probe. Client-side: `nova_check_status()` MCP tool +
+  process-local 5-min in-memory cache keyed by `(agentId, cid)` — rotation
+  invalidates for free since cid changes. `nova_send_task` now does two
+  pre-flight checks: self-agent status + UCAN revocation (abort with
+  AGENT_INACTIVE / UCAN_REVOKED and operator remediation text), and
+  destination agent status (abort with DEST_AGENT_INACTIVE). Probe
+  failures are swallowed — advisory only, gate remains authoritative.
 
 ### Out of scope for this block (named so we don't re-debate)
 
