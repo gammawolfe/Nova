@@ -6,6 +6,7 @@ import {
   saveIdentity,
   loadIdentity,
   listAgentIds,
+  sign,
 } from './identity.js';
 import { loadTenantConfig, saveTenantConfig, decodeInvitePayload } from './tenant-config.js';
 import { loadAgentRuntime, bootstrapClient } from './context.js';
@@ -13,9 +14,12 @@ import {
   ensureSelfUcan,
   ensureDestinationUcan,
   loadCache as loadUcanCache,
+  saveCache as saveUcanCache,
+  withCacheLock,
   remainingFraction,
 } from './ucan-store.js';
-import type { NovaClient } from './nova-client.js';
+import { agentIdentityPath } from './paths.js';
+import fsp from 'fs/promises';
 
 function ok(data: unknown): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
@@ -316,37 +320,92 @@ export function registerTools(_server: McpServer): void {
   );
 
   server.registerTool(
-    'nova_check_status',
+    'nova_rotate_key',
     {
-      title: 'Probe an agent\'s status and optionally its UCAN state',
+      title: 'Rotate this agent\'s Ed25519 keypair',
       description:
-        'Lightweight pre-flight probe against GET /agents/:agentId/health. Returns { agentStatus, ucan? } where agentStatus is active|pending|deregistered|unknown and ucan (when a cid is provided) tells you whether that specific UCAN has been revoked or is still issued. Responses cache in-process for 5 minutes keyed by (agentId, cid) so repeated calls are cheap — the cache auto-invalidates on rotation because the cid changes. Advisory only: the gate pipeline remains the authoritative boundary.',
+        'Generates a fresh keypair locally, proves possession of the old key, and swaps the registered public key + DID on Nova. All UCANs issued to the old DID in this tenant are revoked; a fresh self-UCAN is minted for the new DID. The old identity file is preserved at {agentId}.json.rotated-{ISO}.bak for audit. Trust-registry tier + allowedSkills carry over automatically. NOTE: same-tenant trust is rebuilt transparently, but other tenants that trusted the old DID must re-seed with the new DID — the response lists nothing explicit (cross-tenant discovery is operator-driven) so surface the new DID to the user so they can notify counterparties.',
       inputSchema: {
-        agentId: z.string().optional().describe('Agent to probe. Defaults to the active agent (NOVA_AGENT_ID).'),
-        ucanCid: z.string().optional().describe('Optional CID of a UCAN to check for revocation. Defaults to the cached self-UCAN of the active agent.'),
+        agentId: z.string().optional().describe('Defaults to NOVA_AGENT_ID env var.'),
       },
     },
-    async ({ agentId, ucanCid }) => {
+    async ({ agentId }) => {
       const rt = await loadAgentRuntime();
-      const client = rt?.client ?? bootstrapClient();
-      const resolvedAgentId = agentId ?? rt?.agentId;
-      if (!resolvedAgentId) return err('agentId argument or NOVA_AGENT_ID env var required');
+      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID and ensure identity + tenant are configured.');
+      const resolved = agentId ?? rt.agentId;
+      const tenant = await loadTenantConfig();
+      if (!tenant) return err('No tenant joined');
+      const old = await loadIdentity(resolved);
+      if (!old) return err(`No identity for '${resolved}'`);
 
-      // If no cid passed and the caller is probing their own agent, default
-      // to the cached self-UCAN cid so the common "is my current UCAN still
-      // good?" question is answerable without extra plumbing.
-      let resolvedCid = ucanCid;
-      if (!resolvedCid && rt && resolvedAgentId === rt.agentId) {
-        const cache = await loadUcanCache(rt.agentId);
-        resolvedCid = cache.self?.cid;
-      }
+      // Generate the new keypair up front — if anything downstream fails,
+      // the on-disk state is untouched.
+      const fresh = generateIdentity(resolved);
 
+      // PoP: sign (nonce | newDid | newPublicKey) with the OLD private key.
+      // Binding all three prevents an attacker with transient control of the
+      // request path from swapping in a newPublicKey of their own.
+      const { nonce } = await rt.client.renewNonce(tenant.tenantId, old.did, resolved);
+      const signature = sign(old.privateKeyPem, `${nonce}|${fresh.did}|${fresh.publicKey}`);
+
+      let result;
       try {
-        const response = await getHealth(client, resolvedAgentId, resolvedCid);
-        return ok(response);
+        result = await rt.client.rotateKey(tenant.tenantId, resolved, {
+          oldDid: old.did,
+          newDid: fresh.did,
+          newPublicKey: fresh.publicKey,
+          nonce,
+          signature,
+        });
       } catch (e: any) {
-        return err(`Status probe failed: ${e.message}`);
+        return err(`Rotation failed: ${e.message}`);
       }
+
+      // Commit local state under the cache lock so that a concurrent
+      // nova_send_task / nova_renew_ucan on this agent can't observe a
+      // half-rotated state (new identity on disk but old UCANs in cache).
+      await withCacheLock(resolved, async () => {
+        // Snapshot the pre-rotation identity to a timestamped backup so an
+        // operator can reconstruct the old did if needed (incident review).
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const bakPath = agentIdentityPath(resolved) + `.rotated-${ts}.bak`;
+        try {
+          await fsp.rename(agentIdentityPath(resolved), bakPath);
+        } catch (e: any) {
+          // If the identity file was already swapped out by a crashed prior
+          // attempt, proceed with the save — we have the credentials we need.
+          if (e.code !== 'ENOENT') throw e;
+        }
+
+        await saveIdentity({
+          ...fresh,
+          ucan: {
+            jwt: result!.jwt,
+            expiresAt: result!.expiresAt,
+            trustTier: result!.trustTier,
+          },
+        });
+
+        // Reset the UCAN cache: self is replaced with the freshly-issued one;
+        // perDestination is wiped because every cached entry was issued to
+        // the old DID and is now revoked server-side.
+        await saveUcanCache({
+          agentId: resolved,
+          self: { jwt: result!.jwt, cid: result!.cid, expiresAt: result!.expiresAt },
+        });
+      });
+
+      return ok({
+        status: 'rotated',
+        agentId: resolved,
+        oldDid: old.did,
+        newDid: result.newDid,
+        trustTier: result.trustTier,
+        allowedSkills: result.allowedSkills,
+        revokedCount: result.revokedCids.length,
+        ucanExpiresAt: result.expiresAt,
+        note: 'If other tenants had this agent in their trust registry under the old DID, those entries are now stale and must be re-seeded with the new DID.',
+      });
     },
   );
 

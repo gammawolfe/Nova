@@ -212,6 +212,28 @@ export class NovaClient {
     return json('POST', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/invites`), data, this.adminHeaders());
   }
 
+  async rotateKey(tenantId: string, agentId: string, data: {
+    oldDid: string;
+    newDid: string;
+    newPublicKey: string;
+    nonce: string;
+    signature: string;
+  }): Promise<{
+    jwt: string;
+    cid: string;
+    expiresAt: string;
+    newDid: string;
+    revokedCids: string[];
+    trustTier: number;
+    allowedSkills: string[];
+  }> {
+    return json(
+      'POST',
+      joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/agents/${agentId}/rotate-key`),
+      data,
+    );
+  }
+
   async reissueUcan(tenantId: string, agentId: string, opts: { expiryDays?: number } = {}): Promise<{
     status: 'reissued';
     tenantId: string;
