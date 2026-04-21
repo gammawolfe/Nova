@@ -146,7 +146,13 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   }
 
   const agentDid = ctx.agentDid ?? await loadAgentDid();
-  const ucanResult = await verifyUCAN(ucanJwt, actorRecord!, agentDid, tenantCtx);
+  // In the sender-signed delegation model the gate is the audience on every
+  // invocation (aud = novaDid). The invocation's att must express a capability
+  // for this specific destination agent — we allow any sub-scope under
+  // `nova:<tenantId>:<agentId>:skill:*` (skill granularity is enforced later
+  // in schema validation against the destination's registered skill list).
+  const requiredScope = `nova:${tenantCtx.tenantId}:${tenantCtx.agentId}:skill:*`;
+  const ucanResult = await verifyUCAN(ucanJwt, tenantCtx, agentDid, requiredScope);
 
   if (!ucanResult.valid) {
     await auditLog(tenantCtx, {
@@ -171,6 +177,15 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       ucan_wrong_audience: 'UCAN_WRONG_AUDIENCE',
       ucan_insufficient_capability: 'UCAN_INSUFFICIENT_CAPABILITY',
       ucan_invalid_jwt: 'UCAN_INVALID_JWT',
+      ucan_invalid_signature: 'UCAN_INVALID_JWT',
+      ucan_malformed: 'UCAN_INVALID_JWT',
+      ucan_no_proof: 'UCAN_INSUFFICIENT_CAPABILITY',
+      grant_expired: 'UCAN_EXPIRED',
+      grant_invalid_signature: 'UCAN_INVALID_JWT',
+      grant_malformed: 'UCAN_INVALID_JWT',
+      grant_not_from_nova: 'UCAN_WRONG_AUDIENCE',
+      grant_wrong_audience: 'UCAN_DID_MISMATCH',
+      grant_does_not_subsume_invocation: 'UCAN_INSUFFICIENT_CAPABILITY',
     };
 
     return await recordAndReturn({
@@ -382,14 +397,44 @@ async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): P
     return { tier: 0, actorRecord: null };
   }
 
+  // Destination operator's explicit trust record wins if present — this is
+  // how operators upgrade a specific sender to tier 2/3 or blacklist them.
   const recordPath = tenantDataPath(tenantCtx, 'trust-registry', didHash(did) + '.json');
-
   try {
     const record = JSON.parse(await fsp.readFile(recordPath, 'utf8')) as ActorRecord;
     return { tier: record.tier as TrustTier, actorRecord: record };
   } catch {
-    return { tier: 0, actorRecord: null };
+    // no explicit record — fall through
   }
+
+  // Sender-signed delegation-chain fallback: any active Nova-registered agent
+  // defaults to tier 1. The grant chain's Nova-signed root is the actual
+  // authority; per-destination trust is operational admission control layered
+  // on top of protocol-level identity. Forged `iss` DIDs that don't match a
+  // registered agent still fall through to tier 0 (unknown actor).
+  try {
+    const { getSharedRedis } = await import('@nova/shared/src/redis');
+    const { getAgentByDid } = await import('@nova/shared/src/agent-index');
+    const agent = await getAgentByDid(getSharedRedis(), did);
+    if (agent && agent.status === 'active') {
+      return {
+        tier: 1 as TrustTier,
+        actorRecord: {
+          did,
+          displayName: agent.name,
+          tier: 1,
+          allowedSkills: ['*'],
+          addedAt: new Date().toISOString(),
+          addedBy: 'auto',
+          notes: 'Default tier-1 for active Nova-registered agent (no explicit trust record).',
+        },
+      };
+    }
+  } catch {
+    // Redis unavailable — degrade to no-default behaviour. Tier-0 below.
+  }
+
+  return { tier: 0, actorRecord: null };
 }
 
 /** Read the agent's own DID from the data directory. Cached after first read. */

@@ -18,7 +18,7 @@ import { systemRouter } from './routes/system';
 import { discoverRouter } from './routes/discover';
 import { invitesRouter } from './routes/invites';
 import { eventsRouter } from './routes/events';
-import { UcanRenewSchema, UcanRequestSchema, AgentRotateKeySchema } from '@nova/shared/src/admin-schemas';
+import { AgentRotateKeySchema } from '@nova/shared/src/admin-schemas';
 import { healthHandler, timedCheck } from '@nova/shared/src/health';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import * as ucanService from './services/ucan-service';
@@ -38,10 +38,16 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 // ── Public routes (no auth needed) ──────────────────────────────────────────
 app.use('/discover', discoverRouter);
 
-// UCAN renewal — proof-of-possession, not admin auth
-const ucanRenewRouter = Router({ mergeParams: true });
-
-ucanRenewRouter.get('/', async (req, res) => {
+// Note: /ucans/renew and /ucans/request were removed when Nova dropped the
+// notary-model UCANs. Senders now mint invocation tokens locally with their
+// own Ed25519 key; the approval grant (issued at operator approval) is the
+// only Nova-signed UCAN in the chain. Grant renewal goes through /ucans/
+// reissue (operator admin auth) — see routes/agents.ts:ucans/reissue.
+//
+// The nonce issuance endpoint below is still needed for key rotation, which
+// PoP-signs the new identity with the old private key.
+const nonceRouter = Router({ mergeParams: true });
+nonceRouter.get('/', async (req, res) => {
   try {
     const did = req.query.did as string | undefined;
     const agentId = req.query.agentId as string | undefined;
@@ -54,52 +60,7 @@ ucanRenewRouter.get('/', async (req, res) => {
     res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
   }
 });
-
-ucanRenewRouter.post('/', async (req, res) => {
-  try {
-    const parseResult = UcanRenewSchema.safeParse(req.body);
-    if (!parseResult.success) {
-      return res.status(400).json({
-        error: 'RENEW_INVALID',
-        details: parseResult.error.issues.map((i: any) => ({ field: i.path.join('.'), message: i.message })),
-      });
-    }
-    const { tenantId } = req.params as { tenantId: string };
-    const result = await ucanService.renewUcan(tenantId, parseResult.data);
-    logger.info({ tenantId, did: parseResult.data.did, cid: result.cid }, 'UCAN renewed via proof-of-possession');
-    res.status(200).json(result);
-  } catch (err: any) {
-    const status = err.status ?? 500;
-    res.status(status).json({ error: err.message });
-  }
-});
-
-app.use('/admin/tenants/:tenantId/ucans/renew', ucanRenewRouter);
-
-// UCAN request — cross-destination issuance via proof-of-possession
-const ucanRequestRouter = Router({ mergeParams: true });
-ucanRequestRouter.post('/', async (req, res) => {
-  try {
-    const parseResult = UcanRequestSchema.safeParse(req.body);
-    if (!parseResult.success) {
-      return res.status(400).json({
-        error: 'REQUEST_INVALID',
-        details: parseResult.error.issues.map((i: any) => ({ field: i.path.join('.'), message: i.message })),
-      });
-    }
-    const { tenantId } = req.params as { tenantId: string };
-    const result = await ucanService.requestUcan(tenantId, parseResult.data);
-    logger.info(
-      { sourceTenant: tenantId, sourceAgent: parseResult.data.agentId, destTenant: parseResult.data.destTenantId, destAgent: parseResult.data.destAgentId, cid: result.cid },
-      'Cross-destination UCAN issued',
-    );
-    res.status(200).json(result);
-  } catch (err: any) {
-    const status = err.status ?? 500;
-    res.status(status).json({ error: err.message });
-  }
-});
-app.use('/admin/tenants/:tenantId/ucans/request', ucanRequestRouter);
+app.use('/admin/tenants/:tenantId/nonces', nonceRouter);
 
 // Agent key rotation — proof-of-possession of OLD key; no admin auth.
 // Mounted before the /admin adminAuth gate (same trick as ucans/renew) —

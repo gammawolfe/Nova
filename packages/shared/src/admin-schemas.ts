@@ -144,15 +144,6 @@ export const AgentApprovalSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
-// ── UCAN Renewal (Proof-of-Possession) ──────────────────────────────────────
-
-export const UcanRenewSchema = z.object({
-  did: z.string().startsWith('did:'),
-  agentId: z.string().min(1).max(64),
-  nonce: z.string().min(1),
-  signature: z.string().min(1),
-});
-
 // ── Agent Key Rotation (Proof-of-Possession of OLD key) ────────────────────
 //
 // Signature MUST cover `${nonce}|${newDid}|${newPublicKey}` — binding the
@@ -165,19 +156,6 @@ export const AgentRotateKeySchema = z.object({
   newPublicKey: z.string().min(1),      // base64 raw 32-byte Ed25519
   nonce: z.string().min(1),
   signature: z.string().min(1),         // base64url Ed25519 signature from OLD private key
-});
-
-// ── UCAN Request — cross-destination (Proof-of-Possession) ──────────────────
-
-export const UcanRequestSchema = z.object({
-  did: z.string().startsWith('did:'),
-  agentId: z.string().min(1).max(64),
-  nonce: z.string().min(1),
-  signature: z.string().min(1),
-  destTenantId: z.string().min(1).max(64),
-  destAgentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
-  skills: z.array(z.string().min(1)).min(1),
-  expiryDays: z.number().int().min(1).max(365).default(30),
 });
 
 // ── Discovery Query ────────────────────────────────────────────────────────

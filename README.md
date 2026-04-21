@@ -324,7 +324,6 @@ Acceptance tests require Redis, admin-api (`:3005`), and a2a-server
 | `npm run generate:keys` | Bootstrap Nova's gateway Ed25519 keypair |
 | `npm run rotate:keys` | Rotate gateway keys |
 | `npm run seed-tenant` | Seed a test tenant for local dev |
-| `npm run issue:ucan` | Manually issue a UCAN for debugging |
 | `npm run revoke:ucan` | Revoke a UCAN by CID |
 
 ---

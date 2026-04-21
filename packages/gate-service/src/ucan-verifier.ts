@@ -1,102 +1,162 @@
-import crypto from 'crypto';
 import fsp from 'fs/promises';
-import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
+import { validate as ucansValidate } from '@ucans/ucans';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { ActorRecord } from '@nova/shared/src/types';
 import { logger } from '@nova/shared/src/logger';
+import {
+  computeCid,
+  parseUcanJwt,
+  capsSubsumeAll,
+  UcanCapability,
+  UcanPayload,
+} from '@nova/shared/src/ucan';
 
 export interface UCANVerificationResult {
   valid: boolean;
   reason?: string;
   issuerDid?: string;
+  grantCid?: string;
 }
 
 /**
- * Step 3 — Verify the UCAN JWT cryptographically.
+ * Verify a sender-signed delegation-chain UCAN at ingress.
  *
- * Checks (in order):
- * 1. JWT signature and expiry via ucans.validate()
- * 2. Issuer DID matches the registered actor record
- * 3. Audience DID matches this Nova agent's DID
- * 4. Capability chain contains required prefix or wildcard
- * 5. Not in the revocation list
+ * Token shape expected:
  *
- * All failures are quarantine events (not drops) — sender may need to renew.
+ *   outer (invocation):
+ *     iss: sender agent DID
+ *     aud: Nova gateway DID
+ *     att: [narrow destination-scoped capability]
+ *     prf: [grantJwt]
+ *     exp: short (minutes)
+ *
+ *   prf[0] (approval grant):
+ *     iss: Nova gateway DID
+ *     aud: sender agent DID
+ *     att: [broad tenant-scoped capability]
+ *     prf: []
+ *     exp: long (~30 days)
+ *
+ * Checks:
+ *   1. Outer signature + expiry (via @ucans/ucans, which derives the signing
+ *      pubkey from the outer iss did:key).
+ *   2. Outer aud === Nova's gateway DID.
+ *   3. Outer has at least one prf entry — the approval grant.
+ *   4. Grant signature + expiry (pubkey derived from grant iss did:key; this
+ *      iss is equal to novaDid, so the signing key is Nova's).
+ *   5. Grant iss === novaDid (can't be bypassed with an arbitrary root token).
+ *   6. Grant aud === outer iss (chain linkage — the grant was issued to this
+ *      sender specifically).
+ *   7. Grant att subsumes outer att (delegation is narrowing, not widening).
+ *   8. Outer att subsumes the required capability (the invocation actually
+ *      authorizes this specific destination + skill).
+ *   9. Neither outer CID nor grant CID is in the per-tenant revocation
+ *      tombstone directory. Revoking the grant cascades to every invocation
+ *      derived from it — which is why invocation tokens are ephemeral (5 min)
+ *      and don't individually need to be revoked.
  */
 export async function verifyUCAN(
   ucanJwt: string,
-  actorRecord: ActorRecord,
-  agentDid: string,
-  ctx: TenantContext
+  ctx: TenantContext,
+  novaDid: string,
+  requiredScope: string,
 ): Promise<UCANVerificationResult> {
-  // 1. Validate signature + expiry
-  let decoded: Awaited<ReturnType<typeof ucansParse>>;
+  let outer: { payload: UcanPayload };
+  try {
+    outer = parseUcanJwt(ucanJwt);
+  } catch {
+    return { valid: false, reason: 'ucan_malformed' };
+  }
+
+  // 1. Outer signature + expiry
   try {
     await ucansValidate(ucanJwt);
-    decoded = await ucansParse(ucanJwt);
   } catch (err: any) {
-    const msg: string = err.message || '';
-    if (msg.toLowerCase().includes('expir')) {
-      return { valid: false, reason: 'ucan_expired' };
-    }
-    logger.warn({ err: err.message }, 'UCAN signature validation failed');
-    return { valid: false, reason: 'ucan_invalid_jwt' };
+    const msg: string = (err.message ?? '').toLowerCase();
+    if (msg.includes('expir')) return { valid: false, reason: 'ucan_expired' };
+    logger.warn({ err: err.message }, 'Outer UCAN validation failed');
+    return { valid: false, reason: 'ucan_invalid_signature' };
   }
 
-  const payload = decoded.payload;
-
-  // 2. Issuer DID must match registered actor
-  if (payload.iss !== actorRecord.did) {
-    logger.warn(
-      { expected: actorRecord.did, received: payload.iss },
-      'UCAN DID mismatch — possible key theft'
-    );
-    return { valid: false, reason: 'ucan_did_mismatch' };
-  }
-
-  // 3. Audience must be this agent's DID
-  if (payload.aud !== agentDid) {
+  // 2. Outer aud check
+  if (outer.payload.aud !== novaDid) {
     return { valid: false, reason: 'ucan_wrong_audience' };
   }
 
-  // 4. Capability check — must include nova:task/* or the specific nova:{tenantId}:{agentId} prefix
-  // att.with is a ResourcePointer { scheme, hierPart } from ucans.parse()
-  const requiredPrefix = `nova:${ctx.tenantId}:${ctx.agentId}`;
-  const hasCapability = payload.att.some((att: any) => {
-    const w = att.with;
-    if (!w) return false;
-    // Handle both string and ResourcePointer formats
-    const wStr = typeof w === 'string' ? w : `${w.scheme}:${w.hierPart}`;
-    return wStr === 'nova:task/*' || wStr.startsWith(requiredPrefix);
-  });
-  if (!hasCapability) {
+  // 3. Proof chain present
+  const proofs = outer.payload.prf ?? [];
+  if (proofs.length === 0 || !proofs[0]) {
+    return { valid: false, reason: 'ucan_no_proof' };
+  }
+  const grantJwt = proofs[0];
+
+  // 4. Grant signature + expiry
+  try {
+    await ucansValidate(grantJwt);
+  } catch (err: any) {
+    const msg: string = (err.message ?? '').toLowerCase();
+    if (msg.includes('expir')) return { valid: false, reason: 'grant_expired' };
+    logger.warn({ err: err.message }, 'Grant UCAN validation failed');
+    return { valid: false, reason: 'grant_invalid_signature' };
+  }
+
+  let grant: { payload: UcanPayload };
+  try {
+    grant = parseUcanJwt(grantJwt);
+  } catch {
+    return { valid: false, reason: 'grant_malformed' };
+  }
+
+  // 5. Grant iss = novaDid (root of trust)
+  if (grant.payload.iss !== novaDid) {
+    return { valid: false, reason: 'grant_not_from_nova' };
+  }
+  // 6. Grant aud = outer iss (chain linkage)
+  if (grant.payload.aud !== outer.payload.iss) {
+    return { valid: false, reason: 'grant_wrong_audience' };
+  }
+
+  // 7. Grant subsumes outer (narrowing only)
+  if (!capsSubsumeAll(grant.payload.att, outer.payload.att)) {
+    return { valid: false, reason: 'grant_does_not_subsume_invocation' };
+  }
+
+  // 8. Invocation targets this destination — the invocation's capabilities
+  // must fall within the destination's namespace. requiredScope is the broad
+  // `nova:<destTenant>:<destAgent>:skill:*` envelope; the invocation's att can
+  // be this or narrower (e.g. a specific skill ID).
+  const destEnvelope: UcanCapability[] = [{ with: requiredScope, can: 'invoke' }];
+  if (!capsSubsumeAll(destEnvelope, outer.payload.att)) {
     return { valid: false, reason: 'ucan_insufficient_capability' };
   }
 
-  // 5. Revocation check — check for CID tombstone file
-  // We use sha256(jwt) as the stable CID-equivalent (avoids @web3-storage/content dependency)
-  const cid = crypto.createHash('sha256').update(ucanJwt).digest('hex');
-  const revokedPath = tenantDataPath(ctx, '..', 'ucans', 'revoked', cid + '.json');
-  try {
-    await fsp.access(revokedPath);
-    return { valid: false, reason: 'ucan_revoked' };
-  } catch {
-    // Not revoked
+  // 9. Revocation — check both the invocation CID and the grant CID against
+  // the per-tenant tombstone directory. The revoked path is shared across
+  // tenants at data/ucans/revoked/ (tenantDataPath('..',...) walks up).
+  const outerCid = computeCid(ucanJwt);
+  const grantCid = computeCid(grantJwt);
+  for (const cid of [outerCid, grantCid]) {
+    const revokedPath = tenantDataPath(ctx, '..', 'ucans', 'revoked', cid + '.json');
+    try {
+      await fsp.access(revokedPath);
+      return { valid: false, reason: 'ucan_revoked' };
+    } catch {
+      // Not revoked — continue.
+    }
   }
 
-  return { valid: true, issuerDid: payload.iss };
+  return { valid: true, issuerDid: outer.payload.iss, grantCid };
 }
 
 /**
- * Decode the UCAN JWT and extract the issuer DID without full validation.
- * Used in Step 1 to get the DID for trust tier lookup before full verification.
+ * Decode the outer UCAN JWT and return the issuer DID without full validation.
+ *
+ * In the sender-signed delegation model, `iss` is the sender agent's DID — the
+ * value the gate uses for trust-tier resolution before launching the expensive
+ * signature-verification step.
  */
 export function extractIssuerDid(ucanJwt: string): string | null {
   try {
-    // UCAN JWT is base64url-encoded header.payload.signature
-    const parts = ucanJwt.split('.');
-    if (parts.length !== 3 || !parts[1]) return null;
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const { payload } = parseUcanJwt(ucanJwt);
     return payload.iss || null;
   } catch {
     return null;

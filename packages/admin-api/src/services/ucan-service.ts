@@ -1,73 +1,94 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT, KEY_ROOT } from '@nova/shared/src/tenant';
+import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { loadNovaPrivateKey } from '@nova/shared/src/invites';
+import { loadNovaPrivateKey, loadNovaDid } from '@nova/shared/src/invites';
 import { verifyAndConsumeNonce } from './nonce-service';
 import * as agentService from './agent-service';
 import * as trustService from './trust-service';
 import { logger } from '@nova/shared/src/logger';
+import { buildUcanJwt, computeCid, type UcanCapability, type UcanPayload } from '@nova/shared/src/ucan';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sender-signed delegation-chain UCAN model.
+//
+// Nova no longer issues self-UCANs signed with its own key and presented back
+// as the sender's bearer token (the "Nova-as-notary" model). Instead:
+//
+//   - At operator approval, Nova issues an **approval grant** — a UCAN where
+//     iss = novaDid, aud = sender.did, att = broad tenant-scoped capability.
+//     The sender holds this as its long-lived root-of-trust.
+//
+//   - When sending a task, the sender mints an **invocation token** locally
+//     with its own private key: iss = sender.did, aud = novaDid, att = narrow
+//     destination-scoped capability, prf = [grantJwt]. Nova verifies the chain
+//     at ingress: the outer signature proves the sender authored the request;
+//     the grant in prf proves Nova authorized the capability.
+//
+// This file issues the grants. Invocation minting happens client-side in
+// @nova/mcp-server. Verification happens in @nova/gate-service.
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface UcanMetadata {
   cid: string;
-  issuedTo: string;
-  capabilities: string[];
+  issuedTo: string;       // subject DID (the sender receiving the grant)
+  capabilities: string[]; // flattened "with" strings for convenience
   expiresAt: string;
   issuedAt: string;
   tenantId: string;
   revoked: boolean;
+  kind: 'grant';          // Always 'grant' in the new model; kept as a field for future-proofing
 }
 
 const issuedDir = path.join(DATA_ROOT, 'ucans', 'issued');
 const revokedDir = path.join(DATA_ROOT, 'ucans', 'revoked');
 
-function computeCid(jwt: string): string {
-  return crypto.createHash('sha256').update(jwt).digest('hex').slice(0, 32);
-}
+// ── Grant issuance ──────────────────────────────────────────────────────────
 
-export async function issueUcan(tenantId: string, data: {
-  subjectDid: string; capabilities: string[]; expiryDays: number;
+/**
+ * Issue an approval grant to a sender agent.
+ *
+ * Produces a UCAN:
+ *   iss: Nova gateway DID  (signs with Nova's private key)
+ *   aud: subject DID       (the sender agent receiving the grant)
+ *   att: capability list   (typically [{ with: "nova:<tenantId>:*", can: "invoke" }])
+ *   prf: []                (root of the delegation chain)
+ *   exp: now + expiryDays
+ *
+ * The sender carries this token as prf when minting narrower invocation tokens.
+ * Revocation is keyed by cid (sha256(jwt) truncated to 32 hex); tombstoning a
+ * grant invalidates every invocation derived from it, immediately.
+ */
+export async function issueApprovalGrant(tenantId: string, data: {
+  subjectDid: string;
+  capabilities: string[];
+  expiryDays: number;
 }): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-  const didPath = path.join(KEY_ROOT, 'nova.did');
-
-  let novaDid: string;
-  try {
-    novaDid = (await fsp.readFile(didPath, 'utf8')).trim();
-  } catch {
-    throw new Error('Nova keys not found — run scripts/generate-keys.ts first');
+  const novaDid = await loadNovaDid();
+  if (!novaDid) {
+    throw new Error('Nova DID not found — run scripts/generate-keys.ts first');
+  }
+  if (!data.subjectDid) {
+    throw new Error('issueApprovalGrant requires subjectDid');
   }
 
   const exp = Math.floor(Date.now() / 1000) + data.expiryDays * 86400;
   const expiresAt = new Date(exp * 1000).toISOString();
 
-  const header = { alg: 'EdDSA', typ: 'JWT', ucv: '0.10.0' };
-  // Nova-as-notary model: UCAN is presented to Nova's gateway, which verifies
-  // aud === its own DID. Both iss and aud are Nova's root DID; the subject
-  // agent is the bearer. Sender identity in audits derives from the trust-
-  // registry lookup of the bearer's DID during the Gate pipeline.
-  //
-  // jti is included so two UCANs with identical capabilities issued within
-  // the same second (e.g. revoke-old + issue-new during key rotation) get
-  // distinct JWTs and therefore distinct CIDs — without it, sha256(jwt)
-  // collides and a freshly-issued UCAN could appear in the revoked set.
-  const payload = {
+  const att: UcanCapability[] = data.capabilities.map(cap => ({ with: cap, can: 'invoke' }));
+
+  const payload: UcanPayload = {
     iss: novaDid,
-    aud: novaDid,
+    aud: data.subjectDid,
     exp,
-    att: data.capabilities.map(cap => ({ with: cap, can: 'invoke' })),
+    att,
     prf: [],
     jti: crypto.randomUUID(),
   };
 
-  const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-
   const privateKey = await loadNovaPrivateKey();
-  const signature = crypto.sign(null, Buffer.from(`${headerB64}.${payloadB64}`), privateKey);
-  const signatureB64 = signature.toString('base64url');
-
-  const jwt = `${headerB64}.${payloadB64}.${signatureB64}`;
+  const jwt = buildUcanJwt(payload, privateKey);
   const cid = computeCid(jwt);
 
   await fsp.mkdir(issuedDir, { recursive: true });
@@ -79,12 +100,21 @@ export async function issueUcan(tenantId: string, data: {
     issuedAt: new Date().toISOString(),
     tenantId,
     revoked: false,
+    kind: 'grant',
   };
   await writeAtomicallyAsync(path.join(issuedDir, cid + '.json'), metadata);
 
   return { jwt, cid, expiresAt };
 }
 
+// ── Revocation ──────────────────────────────────────────────────────────────
+
+/**
+ * Tombstone a grant by cid. Invalidates every invocation token that chains to
+ * this grant as prf. Idempotent: returns false if the cid has no issued record.
+ * Writes the tombstone under data/ucans/revoked/ — keyed by the same 32-char
+ * cid used at issuance and at gate-side verification.
+ */
 export async function revokeUcan(cid: string): Promise<boolean> {
   const issuedPath = path.join(issuedDir, cid + '.json');
   let metadata: UcanMetadata;
@@ -128,162 +158,15 @@ export async function listUcans(tenantId: string, expiringWithin?: string): Prom
   return all.filter((m): m is UcanMetadata => m !== null);
 }
 
-// ── Proof-of-Possession UCAN Renewal ────────────────────────────────────────
-
-
 /**
- * Renew a UCAN via proof-of-possession:
- * 1. Verify and consume the nonce
- * 2. Verify the Ed25519 signature of the nonce using the agent's stored public key
- * 3. Verify the agent is active and the DID matches
- * 4. Issue a fresh UCAN
- */
-export async function renewUcan(
-  tenantId: string,
-  data: { did: string; agentId: string; nonce: string; signature: string }
-): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-  // Step 1: Verify and consume the nonce
-  const nonceCheck = verifyAndConsumeNonce(data.nonce, data.did, data.agentId);
-  if (!nonceCheck.valid) {
-    const err: any = new Error(`Nonce verification failed: ${nonceCheck.reason}`);
-    if (nonceCheck.reason === 'nonce_expired') err.status = 410;
-    else if (['nonce_did_mismatch', 'nonce_agent_mismatch'].includes(nonceCheck.reason!)) err.status = 401;
-    else err.status = 400;
-    throw err;
-  }
-
-  // Step 2: Verify the agent exists and is active
-  const agent = await agentService.getAgent(tenantId, data.agentId);
-  if (!agent) {
-    throw Object.assign(new Error(`Agent ${data.agentId} not found`), { status: 404 });
-  }
-  if (agent.status !== 'active') {
-    throw Object.assign(new Error(`Agent ${data.agentId} is not active (status: ${agent.status})`), { status: 403 });
-  }
-
-  // Step 3: Verify the DID matches the registered DID
-  if (agent.did !== data.did) {
-    throw Object.assign(new Error('DID does not match registered agent DID'), { status: 401 });
-  }
-
-  // Step 4: Proof-of-possession — verify Ed25519 signature
-  if (!agent.publicKey) {
-    throw Object.assign(new Error('Agent has no registered public key'), { status: 403 });
-  }
-
-  try {
-    // Ed25519 public key stored as raw bytes — wrap in SPKI DER to import
-    const rawKeyBytes = Buffer.from(agent.publicKey, 'base64');
-    // SPKI DER prefix for Ed25519: 30 2A 30 05 06 03 2B 65 70 03 21 00 (12 bytes)
-    const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
-    const spkiDer = Buffer.concat([spkiPrefix, rawKeyBytes]);
-    const publicKey = crypto.createPublicKey({
-      key: spkiDer,
-      format: 'der',
-      type: 'spki',
-    });
-    const valid = crypto.verify(
-      null,
-      Buffer.from(data.nonce, 'utf8'),
-      publicKey,
-      Buffer.from(data.signature, 'base64url')
-    );
-    if (!valid) {
-      throw Object.assign(new Error('Signature verification failed — invalid proof of possession'), { status: 401 });
-    }
-  } catch (err: any) {
-    if (err.status) throw err;
-    throw Object.assign(new Error(`Signature verification failed: ${err.message}`), { status: 401 });
-  }
-
-  // Step 5: Issue a new UCAN — capability scoped to this agent's namespace
-  return issueUcan(tenantId, {
-    subjectDid: data.did,
-    capabilities: [`nova:${tenantId}:${data.agentId}`],
-    expiryDays: 30, // Default for renewals — can be overridden later
-  });
-}
-
-// ── Cross-destination UCAN issuance (Proof-of-Possession) ───────────────────
-
-/**
- * Issue a UCAN scoped to a specific destination tenant + agent + skills.
- * Same PoP flow as renewUcan: caller proves ownership of its DID by signing
- * a nonce; we then mint a narrow UCAN targeting the destination.
- *
- * Used when agent A in tenant X wants to send tasks to agent Z in tenant Y —
- * A requests a UCAN with capability `nova:Y:Z:skill:*` instead of carrying a
- * wildcard credential.
- */
-export async function requestUcan(
-  sourceTenantId: string,
-  data: {
-    did: string;
-    agentId: string;
-    nonce: string;
-    signature: string;
-    destTenantId: string;
-    destAgentId: string;
-    skills: string[];
-    expiryDays: number;
-  }
-): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-  // PoP: verify nonce + signature against source agent's stored public key
-  const nonceCheck = verifyAndConsumeNonce(data.nonce, data.did, data.agentId);
-  if (!nonceCheck.valid) {
-    const err: any = new Error(`Nonce verification failed: ${nonceCheck.reason}`);
-    if (nonceCheck.reason === 'nonce_expired') err.status = 410;
-    else if (['nonce_did_mismatch', 'nonce_agent_mismatch'].includes(nonceCheck.reason!)) err.status = 401;
-    else err.status = 400;
-    throw err;
-  }
-
-  const agent = await agentService.getAgent(sourceTenantId, data.agentId);
-  if (!agent) throw Object.assign(new Error(`Agent ${data.agentId} not found`), { status: 404 });
-  if (agent.status !== 'active') {
-    throw Object.assign(new Error(`Agent ${data.agentId} is not active`), { status: 403 });
-  }
-  if (agent.did !== data.did) {
-    throw Object.assign(new Error('DID does not match registered agent DID'), { status: 401 });
-  }
-  if (!agent.publicKey) {
-    throw Object.assign(new Error('Agent has no registered public key'), { status: 403 });
-  }
-
-  const rawKeyBytes = Buffer.from(agent.publicKey, 'base64');
-  const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
-  const spkiDer = Buffer.concat([spkiPrefix, rawKeyBytes]);
-  const publicKey = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
-  const valid = crypto.verify(
-    null,
-    Buffer.from(data.nonce, 'utf8'),
-    publicKey,
-    Buffer.from(data.signature, 'base64url')
-  );
-  if (!valid) {
-    throw Object.assign(new Error('Signature verification failed — invalid proof of possession'), { status: 401 });
-  }
-
-  const capabilities = data.skills.map(s => `nova:${data.destTenantId}:${data.destAgentId}:skill:${s}`);
-
-  // UCAN is recorded under the destination tenant for audit / revocation by that operator
-  return issueUcan(data.destTenantId, {
-    subjectDid: data.did,
-    capabilities,
-    expiryDays: data.expiryDays,
-  });
-}
-
-// ── Bulk revocation by subject ───────────────────────────────────────────────
-
-/**
- * Revoke every issued UCAN whose `issuedTo` matches the given DID in the
+ * Revoke every issued grant whose `issuedTo` matches the given DID in the
  * given tenant. Returns the list of revoked CIDs. Tolerates the revoked-dir
  * not existing yet (first-rotate case).
  *
  * Used by key rotation to invalidate the old DID's credentials atomically
- * with the public-key swap — otherwise a stolen UCAN issued to the prior
- * identity would remain valid until natural expiry.
+ * with the public-key swap — otherwise a grant issued to the prior identity
+ * would remain valid until natural expiry, and derived invocation tokens
+ * would continue to verify.
  */
 export async function revokeUcansForSubject(tenantId: string, did: string): Promise<string[]> {
   let files: string[];
@@ -313,18 +196,18 @@ export async function revokeUcansForSubject(tenantId: string, did: string): Prom
  * Side effects, in order:
  *   1. Verify nonce (bound to oldDid + agentId) and signature against the
  *      currently-stored public key.
- *   2. Revoke every UCAN previously issued to oldDid in this tenant.
+ *   2. Revoke every grant previously issued to oldDid in this tenant. This
+ *      cascades through the delegation chain: every invocation token derived
+ *      from those grants fails verification at the gate.
  *   3. Swap {did, publicKey} on agent-config and re-index.
  *   4. Remove old trust-registry actor; add new actor with the same tier +
  *      allowedSkills. A missing actor (reissue-after-approval edge case)
  *      degrades to tier-1 wildcard with a logged warning.
- *   5. Mint a fresh self-UCAN for the new DID.
+ *   5. Issue a fresh approval grant for the new DID.
  *
  * Same-tenant trust registry is rebuilt automatically. Cross-tenant trust
  * entries that reference oldDid become stale — those tenants must re-seed
- * their actor table with newDid before inter-tenant traffic resumes. The
- * caller-facing response includes `affectedPeerTenants` so the operator can
- * action this manually; a structured warn log also fires.
+ * their actor table with newDid before inter-tenant traffic resumes.
  */
 export async function rotateAgentKey(
   tenantId: string,
@@ -392,8 +275,8 @@ export async function rotateAgentKey(
   // band (legacy agent, or operator-driven cleanup), fall back to tier-1
   // wildcard — same degradation the reissue path uses, for consistency.
   const existingActor = await trustService.getActor({ tenantId, agentId }, data.oldDid);
-  let trustTier = existingActor?.tier ?? 1;
-  let allowedSkills = existingActor?.allowedSkills ?? ['*'];
+  const trustTier = existingActor?.tier ?? 1;
+  const allowedSkills = existingActor?.allowedSkills ?? ['*'];
   const displayName = existingActor?.displayName ?? agent.name;
   if (!existingActor) {
     logger.warn(
@@ -402,9 +285,9 @@ export async function rotateAgentKey(
     );
   }
 
-  // Revoke before the swap — any concurrent task-send that holds an old
-  // destination UCAN fails closed at the gate rather than slipping through
-  // after the agent record has been updated.
+  // Revoke before the swap — any concurrent invocation that chains to an old
+  // grant fails closed at the gate rather than slipping through after the
+  // agent record has been updated.
   const revokedCids = await revokeUcansForSubject(tenantId, data.oldDid);
 
   // Atomically swap {did, publicKey} — writeAtomicallyAsync uses tmp+rename.
@@ -423,11 +306,12 @@ export async function rotateAgentKey(
     notes: `Rotated from ${data.oldDid} at ${new Date().toISOString()}`,
   });
 
-  // Mint the fresh self-UCAN. Expiry defaults to 30d, same as reissue.
-  const capabilities = allowedSkills.map(s => `nova:${tenantId}:${agentId}:skill:${s}`);
-  const result = await issueUcan(tenantId, {
+  // Issue the fresh approval grant. Tenant-broad scope so the new key can
+  // mint invocations for any discovered destination — narrowing happens in
+  // the invocation token at send time.
+  const result = await issueApprovalGrant(tenantId, {
     subjectDid: data.newDid,
-    capabilities,
+    capabilities: [`nova:${tenantId}:*`],
     expiryDays: 30,
   });
 
@@ -448,19 +332,19 @@ export async function rotateAgentKey(
 // ── Operator-initiated reissue (no PoP required — admin-auth gated) ──────────
 
 /**
- * Reissue a self-UCAN for an already-approved agent. Used when the one-time
- * claim has expired or been lost before the agent could pick it up.
+ * Reissue an approval grant for an already-approved agent. Used when the
+ * one-time claim has expired or been lost before the agent could pick it up.
  *
- * Capabilities are recovered from the trust-registry entry created at approval
- * (agent's own DID). Expiry defaults to 30 days. The fresh UCAN is minted and
- * returned; the caller is responsible for re-stashing the Redis claim so the
- * agent can pick it up via GET /register/status.
+ * Always issues a tenant-broad grant (`nova:<tenantId>:*`). Per-skill narrowing
+ * is enforced at the destination by its own registered skill list; the grant
+ * doesn't need to be any tighter than the tenant envelope.
  *
  * Throws with .status=404 (agent missing), .status=409 (agent not active),
- * .status=412 (agent has no DID recorded). Trust-registry miss degrades to
- * a wildcard-tier-1 capability with a logged warning.
+ * .status=412 (agent has no DID recorded). Trust-registry miss is tolerated
+ * — the grant shape doesn't depend on the per-skill list anymore, so the
+ * reissued grant is always tenant-broad regardless of prior tier entry.
  */
-export async function reissueUcan(
+export async function reissueGrant(
   tenantId: string,
   agentId: string,
   opts: { expiryDays?: number } = {},
@@ -487,10 +371,9 @@ export async function reissueUcan(
     );
   }
 
-  const capabilities = allowedSkills.map(s => `nova:${tenantId}:${agentId}:skill:${s}`);
-  const result = await issueUcan(tenantId, {
+  const result = await issueApprovalGrant(tenantId, {
     subjectDid: agent.did,
-    capabilities,
+    capabilities: [`nova:${tenantId}:*`],
     expiryDays: opts.expiryDays ?? 30,
   });
 

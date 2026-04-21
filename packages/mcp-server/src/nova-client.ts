@@ -59,7 +59,7 @@ export class NovaClient {
     status: 'pending' | 'active' | 'deregistered';
     tenantId: string;
     agentId: string;
-    ucan?: { jwt: string; cid: string; expiresAt: string; trustTier?: number; ucanRenewalUrl?: string };
+    grant?: { jwt: string; cid: string; expiresAt: string; trustTier?: number };
   }> {
     return json('GET', joinUrl(this.opts.novaUrl, `/register/status/${tenantId}/${agentId}`));
   }
@@ -92,30 +92,11 @@ export class NovaClient {
     return json('GET', joinUrl(this.opts.novaUrl, `/agents/${agentId}/health${qs}`));
   }
 
-  // ── UCAN ─────────────────────────────────────────────────────────────────
+  // ── Proof-of-possession nonces (used by key rotation) ───────────────────
 
-  async renewNonce(tenantId: string, did: string, agentId: string): Promise<{ nonce: string; expiresAt: string }> {
+  async getNonce(tenantId: string, did: string, agentId: string): Promise<{ nonce: string; expiresAt: string }> {
     const qs = new URLSearchParams({ did, agentId });
-    return json('GET', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/ucans/renew?${qs}`));
-  }
-
-  async renewSubmit(tenantId: string, data: { did: string; agentId: string; nonce: string; signature: string }): Promise<{
-    jwt: string; cid: string; expiresAt: string;
-  }> {
-    return json('POST', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/ucans/renew`), data);
-  }
-
-  async requestUcan(sourceTenantId: string, data: {
-    did: string;
-    agentId: string;
-    nonce: string;
-    signature: string;
-    destTenantId: string;
-    destAgentId: string;
-    skills: string[];
-    expiryDays?: number;
-  }): Promise<{ jwt: string; cid: string; expiresAt: string }> {
-    return json('POST', joinUrl(this.adminBase(), `/admin/tenants/${sourceTenantId}/ucans/request`), data);
+    return json('GET', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/nonces?${qs}`));
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
@@ -321,7 +302,7 @@ export class NovaClient {
     );
   }
 
-  async reissueUcan(tenantId: string, agentId: string, opts: { expiryDays?: number } = {}): Promise<{
+  async reissueGrant(tenantId: string, agentId: string, opts: { expiryDays?: number } = {}): Promise<{
     status: 'reissued';
     tenantId: string;
     agentId: string;
@@ -329,7 +310,6 @@ export class NovaClient {
     cid: string;
     trustTier: number;
     allowedSkills: string[];
-    ucanRenewalUrl: string;
     nextStep: string;
   }> {
     return json(

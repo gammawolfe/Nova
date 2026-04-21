@@ -184,14 +184,15 @@ registerRouter.post('/', async (req: Request, res: Response) => {
 /**
  * GET /register/status/:tenantId/:agentId — polling endpoint for pending registrations.
  *
- * Returns the current agent status and, on first fetch after approval, the UCAN JWT
- * (stashed in Redis by the admin-api approve route with 1h TTL). The claim is deleted
- * on read so a compromised endpoint can't re-read credentials.
+ * Returns the current agent status and, on first fetch after approval, the
+ * approval-grant JWT (stashed in Redis by the admin-api approve route with a
+ * 24h TTL). The claim is deleted on read so a compromised endpoint can't
+ * re-read credentials.
  *
  * Response shapes:
  *   { status: 'pending' }
- *   { status: 'active', ucan: { jwt, expiresAt, trustTier, ucanRenewalUrl } }   // only on first fetch
- *   { status: 'active' }                                                          // subsequent fetches
+ *   { status: 'active', grant: { jwt, cid, expiresAt, trustTier } }   // only on first fetch
+ *   { status: 'active' }                                               // subsequent fetches
  *   { status: 'deregistered' }
  *   404 if agent does not exist
  */
@@ -220,14 +221,14 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
 
   if (agent.status === 'active') {
     const redis = getSharedRedis();
-    const claimKey = `nova:ucan-claim:${tenantId}:${agentId}`;
+    const claimKey = `nova:grant-claim:${tenantId}:${agentId}`;
     const claim = await redis.get(claimKey);
     if (claim) {
       try {
-        response.ucan = JSON.parse(claim);
+        response.grant = JSON.parse(claim);
         await redis.del(claimKey);
       } catch {
-        logger.warn({ tenantId, agentId }, 'Malformed UCAN claim payload');
+        logger.warn({ tenantId, agentId }, 'Malformed grant claim payload');
       }
     }
   }

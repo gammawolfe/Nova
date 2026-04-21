@@ -11,13 +11,13 @@ import {
 import { loadTenantConfig, saveTenantConfig, decodeInvitePayload } from './tenant-config.js';
 import { loadAgentRuntime, bootstrapClient } from './context.js';
 import {
-  ensureSelfUcan,
-  ensureDestinationUcan,
   loadCache as loadUcanCache,
   saveCache as saveUcanCache,
   withCacheLock,
   remainingFraction,
+  getGrantIfFresh,
 } from './ucan-store.js';
+import { mintInvocationToken, mintSelfAuthToken } from './ucan-mint.js';
 import { agentIdentityPath } from './paths.js';
 import fsp from 'fs/promises';
 import type { NovaClient } from './nova-client.js';
@@ -100,22 +100,19 @@ export function registerTools(_server: McpServer): void {
       const agentIds = await listAgentIds();
       const active = process.env['NOVA_AGENT_ID'];
       const activeIdentity = active ? await loadIdentity(active) : null;
-      let ucanSummary: any = null;
+      let grantSummary: any = null;
       if (active && activeIdentity) {
         const cache = await loadUcanCache(active);
-        ucanSummary = {
-          self: cache.self ? { expiresAt: cache.self.expiresAt, lifetimeRemaining: remainingFraction(cache.self) } : null,
-          destinations: Object.fromEntries(
-            Object.entries(cache.perDestination ?? {}).map(([k, v]) => [k, { expiresAt: v.expiresAt, lifetimeRemaining: remainingFraction(v) }]),
-          ),
-        };
+        grantSummary = cache.grant
+          ? { expiresAt: cache.grant.expiresAt, lifetimeRemaining: remainingFraction(cache.grant) }
+          : null;
       }
       return ok({
         activeAgentId: active ?? null,
         activeDid: activeIdentity?.did ?? null,
         tenant: tenant ?? null,
         allLocalAgents: agentIds,
-        ucan: ucanSummary,
+        grant: grantSummary,
         env: {
           NOVA_URL: process.env['NOVA_URL'] ?? null,
           NOVA_AGENT_ID: active ?? null,
@@ -253,45 +250,39 @@ export function registerTools(_server: McpServer): void {
       const client = bootstrapClient(tenant.novaUrl);
       const status = await client.registrationStatus(tenant.tenantId, resolvedAgentId);
 
-      if (status.status === 'active' && status.ucan) {
-        const { loadCache, saveCache, withCacheLock } = await import('./ucan-store.js');
-        // Lock + re-read + merge + save, so a concurrent nova_renew_ucan on
-        // the same agent can't clobber the freshly-claimed self-UCAN (or
-        // vice versa).
+      if (status.status === 'active' && status.grant) {
         await withCacheLock(resolvedAgentId, async () => {
-          const cache = await loadCache(resolvedAgentId);
-          cache.self = {
-            jwt: status.ucan!.jwt,
-            cid: status.ucan!.cid,
-            expiresAt: status.ucan!.expiresAt,
-            ...(status.ucan!.ucanRenewalUrl ? { ucanRenewalUrl: status.ucan!.ucanRenewalUrl } : {}),
+          const cache = await loadUcanCache(resolvedAgentId);
+          cache.grant = {
+            jwt: status.grant!.jwt,
+            cid: status.grant!.cid,
+            expiresAt: status.grant!.expiresAt,
           };
-          await saveCache(cache);
+          await saveUcanCache(cache);
         });
         return ok({
           status: 'active',
           claimed: true,
-          trustTier: status.ucan.trustTier,
-          ucanExpiresAt: status.ucan.expiresAt,
+          trustTier: status.grant.trustTier,
+          grantExpiresAt: status.grant.expiresAt,
         });
       }
 
-      // Status active, no UCAN in response. Either (a) the claim was already
+      // Status active, no grant in response. Either (a) the claim was already
       // consumed by a prior call and the local cache holds it, or (b) the
       // claim window expired before we polled. Disambiguate via local cache.
       if (status.status === 'active') {
-        const { loadCache } = await import('./ucan-store.js');
-        const cache = await loadCache(resolvedAgentId);
-        if (!cache.self) {
+        const cache = await loadUcanCache(resolvedAgentId);
+        if (!cache.grant) {
           return err(
-            `UCAN_CLAIM_EXPIRED: Agent '${resolvedAgentId}' is active, but the one-time UCAN claim is no longer available and no UCAN is cached locally. Ask the operator to run nova_reissue_ucan with tenantId='${tenant.tenantId}' agentId='${resolvedAgentId}' (requires NOVA_ADMIN_TOKEN), then call nova_check_registration again.`,
+            `GRANT_CLAIM_EXPIRED: Agent '${resolvedAgentId}' is active, but the one-time grant claim is no longer available and no grant is cached locally. Ask the operator to run nova_reissue_ucan with tenantId='${tenant.tenantId}' agentId='${resolvedAgentId}' (requires NOVA_ADMIN_TOKEN), then call nova_check_registration again.`,
           );
         }
         return ok({
           status: 'active',
           claimed: false,
-          note: 'Agent active; UCAN claim already consumed — using cached self-UCAN.',
-          ucanExpiresAt: cache.self.expiresAt,
+          note: 'Agent active; grant claim already consumed — using cached grant.',
+          grantExpiresAt: cache.grant.expiresAt,
         });
       }
 
@@ -304,19 +295,21 @@ export function registerTools(_server: McpServer): void {
   server.registerTool(
     'nova_renew_ucan',
     {
-      title: 'Renew the self-UCAN via proof-of-possession',
-      description: 'Force a UCAN refresh (even if current one is still fresh). Normally not needed — nova_send_task renews automatically below 20% lifetime.',
+      title: 'Report approval-grant status (refresh is operator-gated)',
+      description:
+        'In the delegation-chain model there is no client-side UCAN to refresh — per-request invocation tokens are minted locally on each nova_send_task. The long-lived approval grant is the only Nova-signed credential; if it is near expiry, ask the operator to run nova_reissue_ucan. This tool reports current grant status (expiry, lifetime remaining, cid).',
       inputSchema: {},
     },
     async () => {
       const rt = await loadAgentRuntime();
       if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID and ensure identity + tenant are configured.');
-      const identity = await loadIdentity(rt.agentId);
-      if (!identity) return err(`Identity missing for ${rt.agentId}`);
-      const tenant = await loadTenantConfig();
-      if (!tenant) return err('No tenant config');
-      const jwt = await ensureSelfUcan(rt.client, tenant.tenantId, rt.agentId, identity.did, identity.privateKeyPem, 1.1 /* force */);
-      return ok({ status: 'renewed', jwtPreview: jwt.slice(0, 48) + '…' });
+      const grant = await getGrantIfFresh(rt.agentId, 0);
+      if (!grant) return err('No grant cached locally. Run nova_check_registration after operator approval.');
+      return ok({
+        cid: grant.cid,
+        expiresAt: grant.expiresAt,
+        lifetimeRemaining: remainingFraction(grant),
+      });
     },
   );
 
@@ -346,7 +339,7 @@ export function registerTools(_server: McpServer): void {
       // PoP: sign (nonce | newDid | newPublicKey) with the OLD private key.
       // Binding all three prevents an attacker with transient control of the
       // request path from swapping in a newPublicKey of their own.
-      const { nonce } = await rt.client.renewNonce(tenant.tenantId, old.did, resolved);
+      const { nonce } = await rt.client.getNonce(tenant.tenantId, old.did, resolved);
       const signature = sign(old.privateKeyPem, `${nonce}|${fresh.did}|${fresh.publicKey}`);
 
       let result;
@@ -378,21 +371,15 @@ export function registerTools(_server: McpServer): void {
           if (e.code !== 'ENOENT') throw e;
         }
 
-        await saveIdentity({
-          ...fresh,
-          ucan: {
-            jwt: result!.jwt,
-            expiresAt: result!.expiresAt,
-            trustTier: result!.trustTier,
-          },
-        });
+        await saveIdentity({ ...fresh });
 
-        // Reset the UCAN cache: self is replaced with the freshly-issued one;
-        // perDestination is wiped because every cached entry was issued to
-        // the old DID and is now revoked server-side.
+        // Reset the grant cache with the freshly-issued approval grant bound
+        // to the new DID. Every invocation token now derives from this grant;
+        // any stale in-flight invocation (rare, given 5-minute TTLs) would
+        // fail the chain's aud check (grant.aud = newDid != old iss).
         await saveUcanCache({
           agentId: resolved,
-          self: { jwt: result!.jwt, cid: result!.cid, expiresAt: result!.expiresAt },
+          grant: { jwt: result!.jwt, cid: result!.cid, expiresAt: result!.expiresAt },
         });
       });
 
@@ -404,7 +391,7 @@ export function registerTools(_server: McpServer): void {
         trustTier: result.trustTier,
         allowedSkills: result.allowedSkills,
         revokedCount: result.revokedCids.length,
-        ucanExpiresAt: result.expiresAt,
+        grantExpiresAt: result.expiresAt,
         note: 'If other tenants had this agent in their trust registry under the old DID, those entries are now stale and must be re-seeded with the new DID.',
       });
     },
@@ -413,8 +400,9 @@ export function registerTools(_server: McpServer): void {
   server.registerTool(
     'nova_ucan_status',
     {
-      title: 'Show UCAN cache state',
-      description: 'List self-UCAN and cached per-destination UCANs with remaining lifetime.',
+      title: 'Show approval-grant status',
+      description:
+        'Reports the approval grant cached locally: expiry, lifetime remaining, cid. In the delegation-chain model the grant is the only Nova-signed credential held client-side; invocation tokens are minted per-send and not cached.',
       inputSchema: {},
     },
     async () => {
@@ -422,10 +410,9 @@ export function registerTools(_server: McpServer): void {
       if (!active) return err('NOVA_AGENT_ID not set');
       const cache = await loadUcanCache(active);
       return ok({
-        self: cache.self ? { expiresAt: cache.self.expiresAt, lifetimeRemaining: remainingFraction(cache.self) } : null,
-        destinations: Object.entries(cache.perDestination ?? {}).map(([k, v]) => ({
-          destination: k, expiresAt: v.expiresAt, lifetimeRemaining: remainingFraction(v),
-        })),
+        grant: cache.grant
+          ? { cid: cache.grant.cid, expiresAt: cache.grant.expiresAt, lifetimeRemaining: remainingFraction(cache.grant) }
+          : null,
       });
     },
   );
@@ -474,7 +461,8 @@ export function registerTools(_server: McpServer): void {
     'nova_send_task',
     {
       title: 'Send a task to another agent via Nova',
-      description: 'Acquires a per-destination UCAN (cached after first use) and submits a task. Returns taskId + statusUrl/streamUrl for tracking.',
+      description:
+        'Mints a short-lived invocation token locally (signed by this agent\'s Ed25519 key, with the approval grant carried as proof) and submits the task. Returns taskId + statusUrl/streamUrl for tracking.',
       inputSchema: {
         targetAgentId: z.string().min(1).describe('Destination agent ID (from nova_list_agents)'),
         intent: z.string().min(1).describe('Skill ID declared in the destination agent card'),
@@ -492,13 +480,13 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
-      // Pre-flight: is THIS agent still active and its self-UCAN still valid?
-      // Cached for 5 min per (agentId, cid) so the hot path is one map lookup.
-      // Catches operator-driven revocations that would otherwise quarantine
-      // the task at the destination's gate with no clear signal to the sender.
+      // Pre-flight: is THIS agent still active and is its grant still valid?
+      // Cached for 5 min per (agentId, cid). Catches operator-driven grant
+      // revocations that would otherwise quarantine the task at the gate with
+      // no clear signal to the sender.
+      const grant = await getGrantIfFresh(rt.agentId);
       try {
-        const selfCache = await loadUcanCache(rt.agentId);
-        const selfHealth = await getHealth(rt.client, rt.agentId, selfCache.self?.cid);
+        const selfHealth = await getHealth(rt.client, rt.agentId, grant?.cid);
         if (selfHealth.agentStatus === 'deregistered') {
           return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is deregistered in Nova. Contact the tenant operator — a fresh invite + registration is required before sending tasks.`);
         }
@@ -506,12 +494,14 @@ export function registerTools(_server: McpServer): void {
           return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is still pending operator approval. Run nova_check_registration and wait for approval before sending tasks.`);
         }
         if (selfHealth.ucan?.revoked) {
-          return err(`UCAN_REVOKED: this agent's self-UCAN (cid=${selfHealth.ucan.cid}) has been revoked. Ask the operator to run nova_reissue_ucan and then call nova_check_registration to pick up the fresh credential.`);
+          return err(`GRANT_REVOKED: this agent's approval grant (cid=${selfHealth.ucan.cid}) has been revoked. Ask the operator to run nova_reissue_ucan and then call nova_check_registration to pick up the fresh grant.`);
         }
       } catch (e: any) {
-        // Advisory-only: don't block sends if the probe itself fails (e.g.
-        // a2a-server unreachable). The gate will still enforce at submit time.
-        // Just log through the tool output — keeps behaviour no worse than pre-P2.9.
+        // Advisory-only: don't block sends if the probe itself fails.
+      }
+
+      if (!grant) {
+        return err(`GRANT_MISSING: no valid grant cached for '${rt.agentId}'. Run nova_check_registration (after operator approval) to claim it.`);
       }
 
       const target = await rt.client.getAgent(args.targetAgentId);
@@ -521,14 +511,16 @@ export function registerTools(_server: McpServer): void {
         return err(`DEST_AGENT_INACTIVE: destination '${args.targetAgentId}' is ${target.status}. Pick a different target via nova_list_agents or wait for the operator to approve it.`);
       }
 
-      const ucan = await ensureDestinationUcan(
-        rt.client,
-        tenant.tenantId,
-        rt.agentId,
-        identity.did,
-        identity.privateKeyPem,
-        { tenantId: destTenantId, agentId: args.targetAgentId, skills: [args.intent] },
-      );
+      // Mint the invocation token locally — signed by THIS agent's Ed25519
+      // private key, with the broad-scope approval grant carried as prf. 5m
+      // TTL is the server-side default; long enough for queued retries, short
+      // enough that a leaked token can't be replayed for long.
+      const ucan = mintInvocationToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+        grantJwt: grant.jwt,
+        scope: `nova:${destTenantId}:${args.targetAgentId}:skill:${args.intent}`,
+      });
 
       const ttlMs = args.ttlMinutes * 60 * 1000;
       const payload: {
@@ -577,13 +569,10 @@ export function registerTools(_server: McpServer): void {
 
       // Prefer the broker reply inbox — returns the actual TaskResult payload.
       try {
-        const selfUcan = await ensureSelfUcan(
-          rt.client,
-          tenant.tenantId,
-          rt.agentId,
-          identity.did,
-          identity.privateKeyPem,
-        );
+        const selfUcan = mintSelfAuthToken({
+          senderDid: identity.did,
+          senderPrivateKeyPem: identity.privateKeyPem,
+        });
         const stored = await rt.client.getStoredResult(rt.agentId, selfUcan, taskId);
         if (stored) return ok({ source: 'broker_reply', result: stored });
       } catch {
@@ -614,13 +603,10 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
-      const selfUcan = await ensureSelfUcan(
-        rt.client,
-        tenant.tenantId,
-        rt.agentId,
-        identity.did,
-        identity.privateKeyPem,
-      );
+      const selfUcan = mintSelfAuthToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+      });
 
       try {
         const result = await rt.client.inboxPull(rt.agentId, selfUcan, waitMs);
@@ -650,13 +636,10 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
-      const selfUcan = await ensureSelfUcan(
-        rt.client,
-        tenant.tenantId,
-        rt.agentId,
-        identity.did,
-        identity.privateKeyPem,
-      );
+      const selfUcan = mintSelfAuthToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+      });
 
       try {
         const reply = await rt.client.pullReply(rt.agentId, selfUcan, waitMs);
@@ -686,13 +669,10 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
-      const selfUcan = await ensureSelfUcan(
-        rt.client,
-        tenant.tenantId,
-        rt.agentId,
-        identity.did,
-        identity.privateKeyPem,
-      );
+      const selfUcan = mintSelfAuthToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+      });
 
       try {
         const response = await rt.client.ackReply(rt.agentId, selfUcan, taskId);
@@ -731,13 +711,10 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
-      const selfUcan = await ensureSelfUcan(
-        rt.client,
-        tenant.tenantId,
-        rt.agentId,
-        identity.did,
-        identity.privateKeyPem,
-      );
+      const selfUcan = mintSelfAuthToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+      });
 
       try {
         const response = await rt.client.inboxRespond(rt.agentId, selfUcan, taskId, {
@@ -787,7 +764,7 @@ export function registerTools(_server: McpServer): void {
       if (!process.env['NOVA_ADMIN_TOKEN']) return err('NOVA_ADMIN_TOKEN env var required for operator actions');
       const client = bootstrapClient();
       try {
-        const res = await client.reissueUcan(args.tenantId, args.agentId, {
+        const res = await client.reissueGrant(args.tenantId, args.agentId, {
           ...(args.expiryDays !== undefined ? { expiryDays: args.expiryDays } : {}),
         });
         return ok(res);

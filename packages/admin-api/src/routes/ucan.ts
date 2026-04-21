@@ -8,10 +8,13 @@ function tenantId(req: any): string {
   return (req.params as { tenantId: string }).tenantId;
 }
 
+// Manual operator issuance of an approval grant. Normally grants are created
+// by the approve handler (routes/agents.ts); this is the operator escape hatch
+// for debug + recovery scenarios where approve has already fired.
 ucanRouter.post('/issue', async (req, res, next) => {
   try {
     const data = UcanIssueSchema.parse(req.body);
-    const result = await ucanService.issueUcan(tenantId(req), data);
+    const result = await ucanService.issueApprovalGrant(tenantId(req), data);
     res.status(201).json(result);
   } catch (err) { next(err); }
 });

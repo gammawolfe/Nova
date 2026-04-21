@@ -127,7 +127,7 @@ async function main() {
   const pendingStatus = await a2aFetch(`/register/status/${tenant.id}/${agentId}`);
   const pendingBody = await pendingStatus.json() as any;
   assert(pendingBody.status === 'pending', `expected pending, got ${pendingBody.status}`);
-  assert(!pendingBody.ucan, 'no UCAN before approval');
+  assert(!pendingBody.grant, 'no grant before approval');
   console.log('[PASS] Status reports pending\n');
 
   // --- Test 6: Operator approves agent ---
@@ -145,16 +145,16 @@ async function main() {
   const claim1 = await a2aFetch(`/register/status/${tenant.id}/${agentId}`);
   const claim1Body = await claim1.json() as any;
   assert(claim1Body.status === 'active', `expected active, got ${claim1Body.status}`);
-  assert(!!claim1Body.ucan?.jwt, 'first post-approval fetch must include UCAN');
-  assert(claim1Body.ucan.jwt.split('.').length === 3, 'UCAN JWT shape');
-  console.log(`[PASS] UCAN claimed (expires ${claim1Body.ucan.expiresAt})\n`);
+  assert(!!claim1Body.grant?.jwt, 'first post-approval fetch must include grant');
+  assert(claim1Body.grant.jwt.split('.').length === 3, 'grant JWT shape');
+  console.log(`[PASS] Grant claimed (expires ${claim1Body.grant.expiresAt})\n`);
 
   // --- Test 8: Second poll must NOT re-deliver UCAN ---
   console.log('--- Test 8: UCAN claim is one-time ---');
   const claim2 = await a2aFetch(`/register/status/${tenant.id}/${agentId}`);
   const claim2Body = await claim2.json() as any;
   assert(claim2Body.status === 'active', 'still active');
-  assert(!claim2Body.ucan, 'second fetch must not re-deliver UCAN');
+  assert(!claim2Body.grant, 'second fetch must not re-deliver grant');
   console.log('[PASS] Second fetch has no UCAN\n');
 
   // --- Test 9: Agent shows up in discovery ---

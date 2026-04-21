@@ -26,7 +26,6 @@
     "rotate:keys": "tsx scripts/rotate-keys.ts",
     "backup": "bash scripts/backup.sh",
     "did:exchange": "tsx scripts/did-exchange.ts",
-    "issue:ucan": "tsx scripts/issue-ucan.ts",
     "revoke:ucan": "tsx scripts/revoke-ucan.ts",
     "lint": "eslint packages/*/src/**/*.ts"
   },

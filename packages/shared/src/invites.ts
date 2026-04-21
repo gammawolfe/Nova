@@ -49,6 +49,19 @@ async function loadNovaPublicKey(): Promise<crypto.KeyObject> {
   return crypto.createPublicKey(await loadNovaPrivateKey());
 }
 
+/**
+ * Load Nova's gateway DID from data/keys/nova.did. Returns null if the file
+ * doesn't exist (fresh install before generate-keys). Trims whitespace.
+ */
+export async function loadNovaDid(): Promise<string | null> {
+  const didPath = path.join(KEY_ROOT, 'nova.did');
+  try {
+    return (await fsp.readFile(didPath, 'utf8')).trim();
+  } catch {
+    return null;
+  }
+}
+
 export async function createInvite(
   tenantId: string,
   data: { agentIdHint: string; ttlSeconds: number; note?: string | undefined }

@@ -3,10 +3,17 @@
  *
  * Milestone 1 acceptance test — end-to-end task lifecycle.
  *
+ * ⚠ NEEDS UPDATE: this test predates the sender-signed UCAN refactor
+ * (2026-04-21). It loads a Nova-signed UCAN from data/tenants/.../ucans/issued
+ * — a shape that no longer represents a valid invocation token in the new
+ * model. Invocation tokens now need to be minted locally by the sender
+ * (iss=sender.did, aud=novaDid, prf=[approval_grant]); see m4 for the current
+ * onboarding flow and scripts/acceptance-test-broker-reply.ts for the Redis
+ * plumbing verification.
+ *
  * Prerequisites:
  *   - All services running (docker compose up -d)
- *   - UCAN issued: npx tsx scripts/issue-ucan.ts …
- *   - Redis agent index set: nova:agent-index:agent_aria → tenant_seed_123
+ *   - Test pending rewrite to use the new grant + local mint flow.
  */
 
 import fs from 'fs';

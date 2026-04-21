@@ -1,8 +1,5 @@
-import fsp from 'fs/promises';
-import path from 'path';
 import { Router } from 'express';
 import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared/src/admin-schemas';
-import { DATA_ROOT, KEY_ROOT } from '@nova/shared/src/tenant';
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
@@ -10,19 +7,13 @@ import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { ctx } from '../middleware/ctx';
 
-async function loadNovaDid(): Promise<string | null> {
-  try {
-    return (await fsp.readFile(path.join(KEY_ROOT, 'nova.did'), 'utf8')).trim();
-  } catch { return null; }
-}
-
 // 24h window for the agent to poll GET /register/status after approval.
 // Long enough that an operator can approve + the agent can pick up the claim
 // on any reasonable timezone offset or reboot cycle; short enough that an
-// abandoned claim garbage-collects before the UCAN itself expires (30d).
-const UCAN_CLAIM_TTL_SECONDS = 24 * 3600;
-function ucanClaimKey(tenantId: string, agentId: string): string {
-  return `nova:ucan-claim:${tenantId}:${agentId}`;
+// abandoned claim garbage-collects before the grant itself expires (30d).
+const GRANT_CLAIM_TTL_SECONDS = 24 * 3600;
+function grantClaimKey(tenantId: string, agentId: string): string {
+  return `nova:grant-claim:${tenantId}:${agentId}`;
 }
 
 export const agentsRouter = Router({ mergeParams: true });
@@ -94,45 +85,28 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
       });
     }
 
-    // Auto-seed Nova's root DID so cross-destination UCANs (issued by Nova) pass the gate.
-    // Nova signs every cross-agent UCAN; every recipient needs Nova's DID in its trust
-    // registry or inter-agent messaging is dead-on-arrival.
-    const novaDid = await loadNovaDid();
-    if (novaDid) {
-      try {
-        await trustService.addActor({ tenantId, agentId }, {
-          did: novaDid,
-          displayName: 'Nova root (notary)',
-          tier: 3,
-          allowedSkills: data.allowedSkills,
-          notes: 'Auto-seeded at approval so cross-destination Nova-signed UCANs are accepted',
-        });
-      } catch (err: any) {
-        // Non-fatal: agent still approved. Log for visibility.
-        logger.warn({ err: err.message, tenantId, agentId }, 'Failed to auto-seed Nova root trust entry');
-      }
-    }
-
-    // Issue initial UCAN
-    const ucanResult = await ucanService.issueUcan(tenantId, {
+    // Issue the approval grant — broad tenant-scope capability. The sender
+    // uses this as the root-of-trust in the prf chain of every invocation
+    // token it mints locally. Per-skill narrowing is enforced at the
+    // destination's own registered skill list, not at the grant layer.
+    const grant = await ucanService.issueApprovalGrant(tenantId, {
       subjectDid: agent.did ?? '',
-      capabilities: data.allowedSkills.map(s => `nova:${tenantId}:${agentId}:skill:${s}`),
+      capabilities: [`nova:${tenantId}:*`],
       expiryDays: data.ucanExpiryDays,
     });
 
-    // Stash UCAN for one-time claim via GET /register/status (for stdio MCP clients without a webhook listener)
-    const ucanRenewalUrl = `/admin/tenants/${tenantId}/ucans/renew`;
+    // Stash grant for one-time claim via GET /register/status (for stdio MCP
+    // clients without a webhook listener).
     await getSharedRedis().set(
-      ucanClaimKey(tenantId, agentId),
+      grantClaimKey(tenantId, agentId),
       JSON.stringify({
-        jwt: ucanResult.jwt,
-        cid: ucanResult.cid,
-        expiresAt: ucanResult.expiresAt,
+        jwt: grant.jwt,
+        cid: grant.cid,
+        expiresAt: grant.expiresAt,
         trustTier: data.trustTier,
-        ucanRenewalUrl,
       }),
       'EX',
-      UCAN_CLAIM_TTL_SECONDS,
+      GRANT_CLAIM_TTL_SECONDS,
     );
 
     // Fire webhook notification to agent's replyUrl (still supported for agents that listen)
@@ -146,9 +120,8 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
             tenantId,
             agentId,
             trustTier: data.trustTier,
-            ucan: ucanResult.jwt,
-            ucanExpiresAt: ucanResult.expiresAt,
-            ucanRenewalUrl,
+            grant: grant.jwt,
+            grantExpiresAt: grant.expiresAt,
           }),
           signal: AbortSignal.timeout(10_000),
         });
@@ -162,10 +135,10 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
     res.status(200).json({
       status: 'approved',
       agent,
-      ucan: {
-        jwt: ucanResult.jwt,
-        expiresAt: ucanResult.expiresAt,
-        cid: ucanResult.cid,
+      grant: {
+        jwt: grant.jwt,
+        expiresAt: grant.expiresAt,
+        cid: grant.cid,
       },
     });
   } catch (err: any) { next(err); }
@@ -189,25 +162,23 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
 agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
   try {
     const { tenantId, agentId } = p(req);
-    const result = await ucanService.reissueUcan(tenantId, agentId);
+    const result = await ucanService.reissueGrant(tenantId, agentId);
 
-    const ucanRenewalUrl = `/admin/tenants/${tenantId}/ucans/renew`;
     await getSharedRedis().set(
-      ucanClaimKey(tenantId, agentId),
+      grantClaimKey(tenantId, agentId),
       JSON.stringify({
         jwt: result.jwt,
         cid: result.cid,
         expiresAt: result.expiresAt,
         trustTier: result.trustTier,
-        ucanRenewalUrl,
       }),
       'EX',
-      UCAN_CLAIM_TTL_SECONDS,
+      GRANT_CLAIM_TTL_SECONDS,
     );
 
     logger.info(
       { tenantId, agentId, cid: result.cid, tier: result.trustTier },
-      'UCAN reissued for claim pickup',
+      'Grant reissued for claim pickup',
     );
     res.status(200).json({
       status: 'reissued',
@@ -217,8 +188,7 @@ agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
       cid: result.cid,
       trustTier: result.trustTier,
       allowedSkills: result.allowedSkills,
-      ucanRenewalUrl,
-      nextStep: 'Agent should call GET /register/status (or nova_check_registration) to pick up the fresh UCAN.',
+      nextStep: 'Agent should call GET /register/status (or nova_check_registration) to pick up the fresh grant.',
     });
   } catch (err: any) { next(err); }
 });
