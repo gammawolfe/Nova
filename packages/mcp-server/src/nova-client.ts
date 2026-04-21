@@ -83,6 +83,15 @@ export class NovaClient {
     return json('GET', joinUrl(this.opts.novaUrl, `/agents/${agentId}/.well-known/agent.json`));
   }
 
+  async getAgentHealth(agentId: string, ucanCid?: string): Promise<{
+    agentId: string;
+    agentStatus: 'active' | 'pending' | 'deregistered' | 'unknown';
+    ucan?: { cid: string; revoked: boolean; found: boolean; expiresAt?: string };
+  }> {
+    const qs = ucanCid ? `?ucanCid=${encodeURIComponent(ucanCid)}` : '';
+    return json('GET', joinUrl(this.opts.novaUrl, `/agents/${agentId}/health${qs}`));
+  }
+
   // ── UCAN ─────────────────────────────────────────────────────────────────
 
   async renewNonce(tenantId: string, did: string, agentId: string): Promise<{ nonce: string; expiresAt: string }> {

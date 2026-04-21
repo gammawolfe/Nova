@@ -14,6 +14,7 @@ import { registerRouter } from './routes/register';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
 import { inboxRouter } from './routes/inbox';
+import { healthRouter } from './routes/health';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
@@ -316,6 +317,11 @@ app.use('/register', registerRouter);
 // Broker inbox pull endpoints — mounted before agentRouter so /:agentId/inbox
 // routes take priority over the tenantRouter middleware in agentRouter.
 app.use('/agents', inboxRouter);
+
+// Public status probe — mounted before agentRouter for the same tenant-
+// middleware-bypass reason. Advisory pre-flight check used by MCP clients
+// to catch operator revocations before sending tasks.
+app.use('/agents', healthRouter);
 
 app.use('/agents/:agentId', agentRouter);
 

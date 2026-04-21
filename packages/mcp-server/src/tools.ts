@@ -15,6 +15,7 @@ import {
   loadCache as loadUcanCache,
   remainingFraction,
 } from './ucan-store.js';
+import type { NovaClient } from './nova-client.js';
 
 function ok(data: unknown): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
@@ -22,6 +23,37 @@ function ok(data: unknown): { content: [{ type: 'text'; text: string }] } {
 
 function err(message: string): { isError: true; content: [{ type: 'text'; text: string }] } {
   return { isError: true, content: [{ type: 'text', text: message }] };
+}
+
+// ── nova_check_status cache ────────────────────────────────────────────────
+//
+// Process-local 5-minute cache of (agentId, cid) → health response. Keyed by
+// cid so a UCAN rotation (which changes the cid) effectively invalidates the
+// entry for free. Bounded purely by the MCP-server process lifetime; a fresh
+// process starts with an empty cache, which is the right default for stdio
+// transports that get spawned per session.
+
+type HealthResponse = {
+  agentId: string;
+  agentStatus: 'active' | 'pending' | 'deregistered' | 'unknown';
+  ucan?: { cid: string; revoked: boolean; found: boolean; expiresAt?: string };
+};
+
+const HEALTH_CACHE_TTL_MS = 5 * 60 * 1000;
+const healthCache = new Map<string, { at: number; response: HealthResponse }>();
+
+async function getHealth(
+  client: NovaClient,
+  agentId: string,
+  ucanCid: string | undefined,
+): Promise<HealthResponse> {
+  const key = `${agentId}|${ucanCid ?? ''}`;
+  const now = Date.now();
+  const hit = healthCache.get(key);
+  if (hit && now - hit.at < HEALTH_CACHE_TTL_MS) return hit.response;
+  const response = await client.getAgentHealth(agentId, ucanCid);
+  healthCache.set(key, { at: now, response });
+  return response;
 }
 
 export function registerTools(_server: McpServer): void {
@@ -284,6 +316,41 @@ export function registerTools(_server: McpServer): void {
   );
 
   server.registerTool(
+    'nova_check_status',
+    {
+      title: 'Probe an agent\'s status and optionally its UCAN state',
+      description:
+        'Lightweight pre-flight probe against GET /agents/:agentId/health. Returns { agentStatus, ucan? } where agentStatus is active|pending|deregistered|unknown and ucan (when a cid is provided) tells you whether that specific UCAN has been revoked or is still issued. Responses cache in-process for 5 minutes keyed by (agentId, cid) so repeated calls are cheap — the cache auto-invalidates on rotation because the cid changes. Advisory only: the gate pipeline remains the authoritative boundary.',
+      inputSchema: {
+        agentId: z.string().optional().describe('Agent to probe. Defaults to the active agent (NOVA_AGENT_ID).'),
+        ucanCid: z.string().optional().describe('Optional CID of a UCAN to check for revocation. Defaults to the cached self-UCAN of the active agent.'),
+      },
+    },
+    async ({ agentId, ucanCid }) => {
+      const rt = await loadAgentRuntime();
+      const client = rt?.client ?? bootstrapClient();
+      const resolvedAgentId = agentId ?? rt?.agentId;
+      if (!resolvedAgentId) return err('agentId argument or NOVA_AGENT_ID env var required');
+
+      // If no cid passed and the caller is probing their own agent, default
+      // to the cached self-UCAN cid so the common "is my current UCAN still
+      // good?" question is answerable without extra plumbing.
+      let resolvedCid = ucanCid;
+      if (!resolvedCid && rt && resolvedAgentId === rt.agentId) {
+        const cache = await loadUcanCache(rt.agentId);
+        resolvedCid = cache.self?.cid;
+      }
+
+      try {
+        const response = await getHealth(client, resolvedAgentId, resolvedCid);
+        return ok(response);
+      } catch (e: any) {
+        return err(`Status probe failed: ${e.message}`);
+      }
+    },
+  );
+
+  server.registerTool(
     'nova_ucan_status',
     {
       title: 'Show UCAN cache state',
@@ -365,9 +432,34 @@ export function registerTools(_server: McpServer): void {
       const tenant = await loadTenantConfig();
       if (!tenant) return err('No tenant joined');
 
+      // Pre-flight: is THIS agent still active and its self-UCAN still valid?
+      // Cached for 5 min per (agentId, cid) so the hot path is one map lookup.
+      // Catches operator-driven revocations that would otherwise quarantine
+      // the task at the destination's gate with no clear signal to the sender.
+      try {
+        const selfCache = await loadUcanCache(rt.agentId);
+        const selfHealth = await getHealth(rt.client, rt.agentId, selfCache.self?.cid);
+        if (selfHealth.agentStatus === 'deregistered') {
+          return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is deregistered in Nova. Contact the tenant operator — a fresh invite + registration is required before sending tasks.`);
+        }
+        if (selfHealth.agentStatus === 'pending') {
+          return err(`AGENT_INACTIVE: this agent '${rt.agentId}' is still pending operator approval. Run nova_check_registration and wait for approval before sending tasks.`);
+        }
+        if (selfHealth.ucan?.revoked) {
+          return err(`UCAN_REVOKED: this agent's self-UCAN (cid=${selfHealth.ucan.cid}) has been revoked. Ask the operator to run nova_reissue_ucan and then call nova_check_registration to pick up the fresh credential.`);
+        }
+      } catch (e: any) {
+        // Advisory-only: don't block sends if the probe itself fails (e.g.
+        // a2a-server unreachable). The gate will still enforce at submit time.
+        // Just log through the tool output — keeps behaviour no worse than pre-P2.9.
+      }
+
       const target = await rt.client.getAgent(args.targetAgentId);
       const destTenantId: string | undefined = target?.tenantId;
       if (!destTenantId) return err(`Destination agent '${args.targetAgentId}' not found or has no tenantId`);
+      if (target?.status && target.status !== 'active') {
+        return err(`DEST_AGENT_INACTIVE: destination '${args.targetAgentId}' is ${target.status}. Pick a different target via nova_list_agents or wait for the operator to approve it.`);
+      }
 
       const ucan = await ensureDestinationUcan(
         rt.client,
