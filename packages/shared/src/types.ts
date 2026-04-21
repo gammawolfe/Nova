@@ -35,7 +35,12 @@ export interface QuarantineEntry {
   reviewedBy: string | null;
 }
 
-export type DeadLetterFailureReason = 'http_4xx' | 'exhausted_retries' | 'broker_no_response';
+export type DeadLetterFailureReason =
+  | 'http_4xx'
+  | 'exhausted_retries'
+  | 'broker_no_response'
+  | 'reply_sender_inactive'
+  | 'broker_reply_no_response';
 
 export interface DeadLetterEntry {
   id: string;

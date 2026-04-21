@@ -531,15 +531,26 @@ export function registerTools(_server: McpServer): void {
       );
 
       const ttlMs = args.ttlMinutes * 60 * 1000;
-      const payload = {
+      const payload: {
+        id: string;
+        schemaVersion: '1.0';
+        intent: string;
+        params: Record<string, unknown>;
+        ttl: string;
+        idempotencyKey: string;
+        replyTo?: string;
+      } = {
         id: randomUUID(),
         schemaVersion: '1.0' as const,
         intent: args.intent,
         params: args.params,
-        replyTo: args.replyTo ?? `${rt.novaUrl.replace(/\/$/, '')}/agents/${rt.agentId}/replies`,
         ttl: new Date(Date.now() + ttlMs).toISOString(),
         idempotencyKey: args.idempotencyKey ?? randomUUID(),
       };
+      // When the caller doesn't supply a replyTo, Nova routes the result to
+      // this agent's broker reply inbox (GET /agents/:agentId/replies), keyed
+      // by the sender's DID. Fetch via nova_next_reply or nova_get_task_result.
+      if (args.replyTo) payload.replyTo = args.replyTo;
       const result = await rt.client.sendTask(args.targetAgentId, ucan, payload);
       return ok(result);
     },
@@ -548,8 +559,9 @@ export function registerTools(_server: McpServer): void {
   server.registerTool(
     'nova_get_task_result',
     {
-      title: 'Poll a task until terminal, or return current state',
-      description: 'Call once to get current status; call repeatedly to poll. Does not block for long — poll externally.',
+      title: 'Fetch the final TaskResult for a sent task, falling back to status',
+      description:
+        'Returns the TaskResult payload when available from this agent\'s broker reply inbox (preferred for broker-mode senders). Falls back to the target\'s task state if no stored reply exists — useful while a task is still in progress or for webhook-mode senders whose result is delivered to their replyTo URL rather than a Nova inbox.',
       inputSchema: {
         targetAgentId: z.string().min(1),
         taskId: z.string().min(1),
@@ -558,8 +570,29 @@ export function registerTools(_server: McpServer): void {
     async ({ targetAgentId, taskId }) => {
       const rt = await loadAgentRuntime();
       if (!rt) return err('No active agent runtime');
+      const identity = await loadIdentity(rt.agentId);
+      if (!identity) return err(`Identity missing for ${rt.agentId}`);
+      const tenant = await loadTenantConfig();
+      if (!tenant) return err('No tenant joined');
+
+      // Prefer the broker reply inbox — returns the actual TaskResult payload.
+      try {
+        const selfUcan = await ensureSelfUcan(
+          rt.client,
+          tenant.tenantId,
+          rt.agentId,
+          identity.did,
+          identity.privateKeyPem,
+        );
+        const stored = await rt.client.getStoredResult(rt.agentId, selfUcan, taskId);
+        if (stored) return ok({ source: 'broker_reply', result: stored });
+      } catch {
+        // Fall through to status lookup on reply-inbox errors — the task may
+        // still be in flight, or the sender may have used a webhook replyTo.
+      }
+
       const state = await rt.client.getTaskStatus(targetAgentId, taskId);
-      return ok(state);
+      return ok({ source: 'task_state', state });
     },
   );
 
@@ -595,6 +628,77 @@ export function registerTools(_server: McpServer): void {
         return ok(result);
       } catch (e: any) {
         return err(`Inbox pull failed: ${e.message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'nova_next_reply',
+    {
+      title: 'Pull the next TaskResult from this agent\'s broker reply inbox',
+      description:
+        'Long-polls up to waitMs for a TaskResult addressed to the active agent as sender. Returns null on timeout. Replies are claimed into an in-flight state with a 5-minute visibility timeout — call nova_ack_reply before it expires or the reply will be redelivered. Use this when you sent a task without a replyTo webhook and need to collect the result.',
+      inputSchema: {
+        waitMs: z.number().int().min(0).max(60_000).default(30_000).describe('Max milliseconds to wait for a reply. Server caps at 60s.'),
+      },
+    },
+    async ({ waitMs }) => {
+      const rt = await loadAgentRuntime();
+      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
+      const identity = await loadIdentity(rt.agentId);
+      if (!identity) return err(`Identity missing for ${rt.agentId}`);
+      const tenant = await loadTenantConfig();
+      if (!tenant) return err('No tenant joined');
+
+      const selfUcan = await ensureSelfUcan(
+        rt.client,
+        tenant.tenantId,
+        rt.agentId,
+        identity.did,
+        identity.privateKeyPem,
+      );
+
+      try {
+        const reply = await rt.client.pullReply(rt.agentId, selfUcan, waitMs);
+        if (!reply) return ok({ reply: null, message: 'No reply available within wait window.' });
+        return ok(reply);
+      } catch (e: any) {
+        return err(`Reply pull failed: ${e.message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'nova_ack_reply',
+    {
+      title: 'Ack a reply this agent pulled from its broker reply inbox',
+      description:
+        'Clears the in-flight state for a pulled reply so it is not redelivered. Must be called within the visibility timeout (5 minutes from nova_next_reply). Idempotent — a second call returns { status: "already_acked" }. The stored TaskResult remains retrievable via nova_get_task_result for 24 hours regardless.',
+      inputSchema: {
+        taskId: z.string().uuid().describe('The taskId from the reply returned by nova_next_reply'),
+      },
+    },
+    async ({ taskId }) => {
+      const rt = await loadAgentRuntime();
+      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
+      const identity = await loadIdentity(rt.agentId);
+      if (!identity) return err(`Identity missing for ${rt.agentId}`);
+      const tenant = await loadTenantConfig();
+      if (!tenant) return err('No tenant joined');
+
+      const selfUcan = await ensureSelfUcan(
+        rt.client,
+        tenant.tenantId,
+        rt.agentId,
+        identity.did,
+        identity.privateKeyPem,
+      );
+
+      try {
+        const response = await rt.client.ackReply(rt.agentId, selfUcan, taskId);
+        return ok(response);
+      } catch (e: any) {
+        return err(`Reply ack failed: ${e.message}`);
       }
     },
   );

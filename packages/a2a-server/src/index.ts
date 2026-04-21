@@ -14,11 +14,12 @@ import { registerRouter } from './routes/register';
 import { keyManager } from './key-manager';
 import { streamRouter } from './stream';
 import { inboxRouter } from './routes/inbox';
+import { repliesRouter } from './routes/replies';
 import { healthRouter } from './routes/health';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
-import { listActiveAgentMeta, getAgentMeta } from '@nova/shared/src/agent-index';
+import { listActiveAgentMeta, getAgentMeta, getAgentByDid } from '@nova/shared/src/agent-index';
 import { getSharedRedis } from '@nova/shared/src/redis';
 
 const app = express();
@@ -248,13 +249,40 @@ agentRouter.post('/tasks', async (req, res) => {
   // --- Map to Queue ---
   const generatedTaskId = crypto.randomUUID();
   const parsed = gateResult.parsedTask as { intent?: string; params?: Record<string, unknown>; replyTo?: string; ttl?: string } | undefined;
+
+  // Sender resolution: map the verified senderDid to a Nova-registered agent
+  // so broker-mode reply routing works when replyTo is omitted. Unregistered
+  // senders (external callers) are still accepted as long as replyTo is set.
+  let senderTenantId: string | undefined;
+  let senderAgentId: string | undefined;
+  if (gateResult.senderDid) {
+    try {
+      const senderAgent = await getAgentByDid(getSharedRedis(), gateResult.senderDid);
+      if (senderAgent && senderAgent.status === 'active') {
+        senderTenantId = senderAgent.tenantId;
+        senderAgentId = senderAgent.agentId;
+      }
+    } catch (err: any) {
+      logger.warn({ err: err.message, senderDid: gateResult.senderDid }, 'Sender DID lookup failed; continuing without sender resolution');
+    }
+  }
+
+  if (!parsed?.replyTo && !senderAgentId) {
+    return res.status(400).json({
+      error: 'REPLY_TARGET_UNRESOLVED',
+      message: 'Task has no replyTo URL and sender DID is not a registered Nova agent; result would be undeliverable',
+    });
+  }
+
   const queuedTask: QueuedTask = {
     taskId: generatedTaskId,
     tenantId: ctx.tenantId,
     agentId: ctx.agentId,
     intent: parsed?.intent || 'unknown_intent',
     params: parsed?.params || {},
-    replyTo: parsed?.replyTo || 'https://unknown.reply.domain.com/webhook',
+    ...(parsed?.replyTo ? { replyTo: parsed.replyTo } : {}),
+    ...(senderTenantId ? { senderTenantId } : {}),
+    ...(senderAgentId ? { senderAgentId } : {}),
     senderDid: gateResult.senderDid!,
     tier: gateResult.trustTier!,
     queuedAt: new Date().toISOString(),
@@ -317,6 +345,11 @@ app.use('/register', registerRouter);
 // Broker inbox pull endpoints — mounted before agentRouter so /:agentId/inbox
 // routes take priority over the tenantRouter middleware in agentRouter.
 app.use('/agents', inboxRouter);
+
+// Broker reply inbox — symmetric to inboxRouter. Handles result collection
+// for broker-mode senders. Also mounted before agentRouter to bypass tenant
+// middleware, since self-UCAN auth is the access gate here.
+app.use('/agents', repliesRouter);
 
 // Public status probe — mounted before agentRouter for the same tenant-
 // middleware-bypass reason. Advisory pre-flight check used by MCP clients
