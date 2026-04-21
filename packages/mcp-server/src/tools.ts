@@ -200,7 +200,7 @@ export function registerTools(_server: McpServer): void {
     'nova_check_registration',
     {
       title: 'Poll registration status and claim UCAN on approval',
-      description: 'Polls GET /register/status. When agent is active, retrieves the one-time UCAN claim, stores it locally, and returns the trust tier.',
+      description: 'Polls GET /register/status. When agent is active, retrieves the one-time UCAN claim, stores it locally, and returns the trust tier. If status is active but no UCAN is available AND no UCAN is cached locally, returns the UCAN_CLAIM_EXPIRED error — the claim window has lapsed and an operator must run nova_reissue_ucan.',
       inputSchema: {
         agentId: z.string().optional().describe('Defaults to NOVA_AGENT_ID env var.'),
       },
@@ -217,16 +217,17 @@ export function registerTools(_server: McpServer): void {
       const status = await client.registrationStatus(tenant.tenantId, resolvedAgentId);
 
       if (status.status === 'active' && status.ucan) {
-        const { saveCache } = await import('./ucan-store.js');
-        await saveCache({
-          agentId: resolvedAgentId,
-          self: {
-            jwt: status.ucan.jwt,
-            cid: status.ucan.cid,
-            expiresAt: status.ucan.expiresAt,
-            ...(status.ucan.ucanRenewalUrl ? { ucanRenewalUrl: status.ucan.ucanRenewalUrl } : {}),
-          },
-        });
+        const { loadCache, saveCache } = await import('./ucan-store.js');
+        // Merge into existing cache — preserves any perDestination entries
+        // from a prior incarnation of this agentId rather than clobbering them.
+        const cache = await loadCache(resolvedAgentId);
+        cache.self = {
+          jwt: status.ucan.jwt,
+          cid: status.ucan.cid,
+          expiresAt: status.ucan.expiresAt,
+          ...(status.ucan.ucanRenewalUrl ? { ucanRenewalUrl: status.ucan.ucanRenewalUrl } : {}),
+        };
+        await saveCache(cache);
         return ok({
           status: 'active',
           claimed: true,
@@ -234,6 +235,26 @@ export function registerTools(_server: McpServer): void {
           ucanExpiresAt: status.ucan.expiresAt,
         });
       }
+
+      // Status active, no UCAN in response. Either (a) the claim was already
+      // consumed by a prior call and the local cache holds it, or (b) the
+      // claim window expired before we polled. Disambiguate via local cache.
+      if (status.status === 'active') {
+        const { loadCache } = await import('./ucan-store.js');
+        const cache = await loadCache(resolvedAgentId);
+        if (!cache.self) {
+          return err(
+            `UCAN_CLAIM_EXPIRED: Agent '${resolvedAgentId}' is active, but the one-time UCAN claim is no longer available and no UCAN is cached locally. Ask the operator to run nova_reissue_ucan with tenantId='${tenant.tenantId}' agentId='${resolvedAgentId}' (requires NOVA_ADMIN_TOKEN), then call nova_check_registration again.`,
+          );
+        }
+        return ok({
+          status: 'active',
+          claimed: false,
+          note: 'Agent active; UCAN claim already consumed — using cached self-UCAN.',
+          ucanExpiresAt: cache.self.expiresAt,
+        });
+      }
+
       return ok({ status: status.status, claimed: false });
     },
   );
@@ -489,6 +510,31 @@ export function registerTools(_server: McpServer): void {
       const client = bootstrapClient();
       const res = await client.createTenant(args);
       return ok(res);
+    },
+  );
+
+  server.registerTool(
+    'nova_reissue_ucan',
+    {
+      title: '[Operator] Reissue a self-UCAN for an approved agent',
+      description: 'Requires NOVA_ADMIN_TOKEN. Use when an already-approved agent missed its one-time UCAN claim window (returns UCAN_CLAIM_EXPIRED from nova_check_registration) or lost the cached credential. Idempotent: overwrites any pending claim with a fresh UCAN. The agent should call nova_check_registration afterwards to pick it up. Capabilities are recovered from the trust-registry entry seeded at approval — tier + allowedSkills are preserved.',
+      inputSchema: {
+        tenantId: z.string().min(1).describe('Tenant the agent belongs to'),
+        agentId: z.string().min(1).max(64).describe('Agent to reissue for — must already be in status=active'),
+        expiryDays: z.number().int().min(1).max(365).optional().describe('UCAN expiry in days. Defaults to 30.'),
+      },
+    },
+    async (args) => {
+      if (!process.env['NOVA_ADMIN_TOKEN']) return err('NOVA_ADMIN_TOKEN env var required for operator actions');
+      const client = bootstrapClient();
+      try {
+        const res = await client.reissueUcan(args.tenantId, args.agentId, {
+          ...(args.expiryDays !== undefined ? { expiryDays: args.expiryDays } : {}),
+        });
+        return ok(res);
+      } catch (e: any) {
+        return err(`Reissue failed: ${e.message}`);
+      }
     },
   );
 

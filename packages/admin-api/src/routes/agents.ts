@@ -16,7 +16,11 @@ async function loadNovaDid(): Promise<string | null> {
   } catch { return null; }
 }
 
-const UCAN_CLAIM_TTL_SECONDS = 3600;
+// 24h window for the agent to poll GET /register/status after approval.
+// Long enough that an operator can approve + the agent can pick up the claim
+// on any reasonable timezone offset or reboot cycle; short enough that an
+// abandoned claim garbage-collects before the UCAN itself expires (30d).
+const UCAN_CLAIM_TTL_SECONDS = 24 * 3600;
 function ucanClaimKey(tenantId: string, agentId: string): string {
   return `nova:ucan-claim:${tenantId}:${agentId}`;
 }
@@ -163,6 +167,58 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
         expiresAt: ucanResult.expiresAt,
         cid: ucanResult.cid,
       },
+    });
+  } catch (err: any) { next(err); }
+});
+
+// ── UCAN Reissue (operator recovery path) ───────────────────────────────────
+
+/**
+ * POST /admin/tenants/:tenantId/agents/:agentId/ucans/reissue
+ *
+ * Operator recovery for the one-time UCAN claim. Use when an already-approved
+ * agent missed its claim window (Redis TTL expired) or lost the claim before
+ * the local runtime could cache it. Idempotent: overwrites any pending claim
+ * with a fresh UCAN and a fresh TTL.
+ *
+ * Capabilities are recovered from the trust-registry entry seeded at approval.
+ * Deliberately does not return the JWT in the HTTP response — the credential
+ * is handed to the agent via the same one-time-claim path as approval, so
+ * operator UIs never hold the token in transit.
+ */
+agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
+  try {
+    const { tenantId, agentId } = p(req);
+    const result = await ucanService.reissueUcan(tenantId, agentId);
+
+    const ucanRenewalUrl = `/admin/tenants/${tenantId}/ucans/renew`;
+    await getSharedRedis().set(
+      ucanClaimKey(tenantId, agentId),
+      JSON.stringify({
+        jwt: result.jwt,
+        cid: result.cid,
+        expiresAt: result.expiresAt,
+        trustTier: result.trustTier,
+        ucanRenewalUrl,
+      }),
+      'EX',
+      UCAN_CLAIM_TTL_SECONDS,
+    );
+
+    logger.info(
+      { tenantId, agentId, cid: result.cid, tier: result.trustTier },
+      'UCAN reissued for claim pickup',
+    );
+    res.status(200).json({
+      status: 'reissued',
+      tenantId,
+      agentId,
+      expiresAt: result.expiresAt,
+      cid: result.cid,
+      trustTier: result.trustTier,
+      allowedSkills: result.allowedSkills,
+      ucanRenewalUrl,
+      nextStep: 'Agent should call GET /register/status (or nova_check_registration) to pick up the fresh UCAN.',
     });
   } catch (err: any) { next(err); }
 });

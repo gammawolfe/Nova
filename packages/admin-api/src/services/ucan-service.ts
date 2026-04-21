@@ -6,6 +6,8 @@ import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { loadNovaPrivateKey } from '@nova/shared/src/invites';
 import { verifyAndConsumeNonce } from './nonce-service';
 import * as agentService from './agent-service';
+import * as trustService from './trust-service';
+import { logger } from '@nova/shared/src/logger';
 
 interface UcanMetadata {
   cid: string;
@@ -264,4 +266,56 @@ export async function requestUcan(
     capabilities,
     expiryDays: data.expiryDays,
   });
+}
+
+// ── Operator-initiated reissue (no PoP required — admin-auth gated) ──────────
+
+/**
+ * Reissue a self-UCAN for an already-approved agent. Used when the one-time
+ * claim has expired or been lost before the agent could pick it up.
+ *
+ * Capabilities are recovered from the trust-registry entry created at approval
+ * (agent's own DID). Expiry defaults to 30 days. The fresh UCAN is minted and
+ * returned; the caller is responsible for re-stashing the Redis claim so the
+ * agent can pick it up via GET /register/status.
+ *
+ * Throws with .status=404 (agent missing), .status=409 (agent not active),
+ * .status=412 (agent has no DID recorded). Trust-registry miss degrades to
+ * a wildcard-tier-1 capability with a logged warning.
+ */
+export async function reissueUcan(
+  tenantId: string,
+  agentId: string,
+  opts: { expiryDays?: number } = {},
+): Promise<{ jwt: string; cid: string; expiresAt: string; allowedSkills: string[]; trustTier: number }> {
+  const agent = await agentService.getAgent(tenantId, agentId);
+  if (!agent) throw Object.assign(new Error(`Agent ${agentId} not found`), { status: 404 });
+  if (agent.status !== 'active') {
+    throw Object.assign(new Error(`Agent ${agentId} is not active (status: ${agent.status})`), { status: 409 });
+  }
+  if (!agent.did) {
+    throw Object.assign(new Error(`Agent ${agentId} has no DID recorded; approve it first`), { status: 412 });
+  }
+
+  let allowedSkills: string[] = ['*'];
+  let trustTier = 1;
+  const actor = await trustService.getActor({ tenantId, agentId }, agent.did);
+  if (actor) {
+    allowedSkills = actor.allowedSkills;
+    trustTier = actor.tier;
+  } else {
+    logger.warn(
+      { tenantId, agentId, did: agent.did },
+      'Trust-registry entry missing on reissue — defaulting to wildcard tier-1',
+    );
+  }
+
+  const capabilities = allowedSkills.map(s => `nova:${tenantId}:${agentId}:skill:${s}`);
+  const result = await issueUcan(tenantId, {
+    subjectDid: agent.did,
+    capabilities,
+    expiryDays: opts.expiryDays ?? 30,
+  });
+
+  return { ...result, allowedSkills, trustTier };
 }

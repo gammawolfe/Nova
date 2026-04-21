@@ -203,6 +203,25 @@ export class NovaClient {
     return json('POST', joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/invites`), data, this.adminHeaders());
   }
 
+  async reissueUcan(tenantId: string, agentId: string, opts: { expiryDays?: number } = {}): Promise<{
+    status: 'reissued';
+    tenantId: string;
+    agentId: string;
+    expiresAt: string;
+    cid: string;
+    trustTier: number;
+    allowedSkills: string[];
+    ucanRenewalUrl: string;
+    nextStep: string;
+  }> {
+    return json(
+      'POST',
+      joinUrl(this.adminBase(), `/admin/tenants/${tenantId}/agents/${agentId}/ucans/reissue`),
+      opts.expiryDays !== undefined ? { expiryDays: opts.expiryDays } : {},
+      this.adminHeaders(),
+    );
+  }
+
   private adminBase(): string {
     return this.opts.adminUrl ?? this.opts.novaUrl;
   }
