@@ -153,6 +153,20 @@ export const UcanRenewSchema = z.object({
   signature: z.string().min(1),
 });
 
+// ── Agent Key Rotation (Proof-of-Possession of OLD key) ────────────────────
+//
+// Signature MUST cover `${nonce}|${newDid}|${newPublicKey}` — binding the
+// nonce to the specific new identity prevents an attacker who captures a
+// rotation request in flight from replaying it with a different newPublicKey.
+
+export const AgentRotateKeySchema = z.object({
+  oldDid: z.string().startsWith('did:'),
+  newDid: z.string().startsWith('did:'),
+  newPublicKey: z.string().min(1),      // base64 raw 32-byte Ed25519
+  nonce: z.string().min(1),
+  signature: z.string().min(1),         // base64url Ed25519 signature from OLD private key
+});
+
 // ── UCAN Request — cross-destination (Proof-of-Possession) ──────────────────
 
 export const UcanRequestSchema = z.object({

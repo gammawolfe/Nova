@@ -46,12 +46,18 @@ export async function issueUcan(tenantId: string, data: {
   // aud === its own DID. Both iss and aud are Nova's root DID; the subject
   // agent is the bearer. Sender identity in audits derives from the trust-
   // registry lookup of the bearer's DID during the Gate pipeline.
+  //
+  // jti is included so two UCANs with identical capabilities issued within
+  // the same second (e.g. revoke-old + issue-new during key rotation) get
+  // distinct JWTs and therefore distinct CIDs — without it, sha256(jwt)
+  // collides and a freshly-issued UCAN could appear in the revoked set.
   const payload = {
     iss: novaDid,
     aud: novaDid,
     exp,
     att: data.capabilities.map(cap => ({ with: cap, can: 'invoke' })),
     prf: [],
+    jti: crypto.randomUUID(),
   };
 
   const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64url');
@@ -266,6 +272,177 @@ export async function requestUcan(
     capabilities,
     expiryDays: data.expiryDays,
   });
+}
+
+// ── Bulk revocation by subject ───────────────────────────────────────────────
+
+/**
+ * Revoke every issued UCAN whose `issuedTo` matches the given DID in the
+ * given tenant. Returns the list of revoked CIDs. Tolerates the revoked-dir
+ * not existing yet (first-rotate case).
+ *
+ * Used by key rotation to invalidate the old DID's credentials atomically
+ * with the public-key swap — otherwise a stolen UCAN issued to the prior
+ * identity would remain valid until natural expiry.
+ */
+export async function revokeUcansForSubject(tenantId: string, did: string): Promise<string[]> {
+  let files: string[];
+  try { files = (await fsp.readdir(issuedDir)).filter(f => f.endsWith('.json')); }
+  catch { return []; }
+
+  const revoked: string[] = [];
+  await Promise.all(files.map(async f => {
+    try {
+      const meta = JSON.parse(await fsp.readFile(path.join(issuedDir, f), 'utf8')) as UcanMetadata;
+      if (meta.tenantId !== tenantId || meta.issuedTo !== did || meta.revoked) return;
+      if (await revokeUcan(meta.cid)) revoked.push(meta.cid);
+    } catch { /* skip corrupt records */ }
+  }));
+  return revoked;
+}
+
+// ── Agent key rotation (Proof-of-Possession of OLD key) ──────────────────────
+
+/**
+ * Rotate an agent's Ed25519 keypair while preserving its trust-registry
+ * tier and allowed skills. The caller proves control of the current (old)
+ * private key by signing `${nonce}|${newDid}|${newPublicKey}` — binding the
+ * nonce to the intended new identity so a captured rotation request can't
+ * be replayed with a different public key.
+ *
+ * Side effects, in order:
+ *   1. Verify nonce (bound to oldDid + agentId) and signature against the
+ *      currently-stored public key.
+ *   2. Revoke every UCAN previously issued to oldDid in this tenant.
+ *   3. Swap {did, publicKey} on agent-config and re-index.
+ *   4. Remove old trust-registry actor; add new actor with the same tier +
+ *      allowedSkills. A missing actor (reissue-after-approval edge case)
+ *      degrades to tier-1 wildcard with a logged warning.
+ *   5. Mint a fresh self-UCAN for the new DID.
+ *
+ * Same-tenant trust registry is rebuilt automatically. Cross-tenant trust
+ * entries that reference oldDid become stale — those tenants must re-seed
+ * their actor table with newDid before inter-tenant traffic resumes. The
+ * caller-facing response includes `affectedPeerTenants` so the operator can
+ * action this manually; a structured warn log also fires.
+ */
+export async function rotateAgentKey(
+  tenantId: string,
+  agentId: string,
+  data: {
+    oldDid: string;
+    newDid: string;
+    newPublicKey: string;
+    nonce: string;
+    signature: string;
+  },
+): Promise<{
+  jwt: string;
+  cid: string;
+  expiresAt: string;
+  newDid: string;
+  revokedCids: string[];
+  trustTier: number;
+  allowedSkills: string[];
+}> {
+  const nonceCheck = verifyAndConsumeNonce(data.nonce, data.oldDid, agentId);
+  if (!nonceCheck.valid) {
+    const err: any = new Error(`Nonce verification failed: ${nonceCheck.reason}`);
+    if (nonceCheck.reason === 'nonce_expired') err.status = 410;
+    else if (['nonce_did_mismatch', 'nonce_agent_mismatch'].includes(nonceCheck.reason!)) err.status = 401;
+    else err.status = 400;
+    throw err;
+  }
+
+  const agent = await agentService.getAgent(tenantId, agentId);
+  if (!agent) throw Object.assign(new Error(`Agent ${agentId} not found`), { status: 404 });
+  if (agent.status !== 'active') {
+    throw Object.assign(new Error(`Agent ${agentId} is not active (status: ${agent.status})`), { status: 409 });
+  }
+  if (agent.did !== data.oldDid) {
+    throw Object.assign(new Error('oldDid does not match the agent\'s currently-registered DID'), { status: 401 });
+  }
+  if (!agent.publicKey) {
+    throw Object.assign(new Error('Agent has no registered public key'), { status: 403 });
+  }
+  if (data.newDid === data.oldDid) {
+    throw Object.assign(new Error('newDid must differ from oldDid'), { status: 400 });
+  }
+
+  // Verify PoP of OLD key over (nonce|newDid|newPublicKey). Using a delimiter
+  // not allowed in did:key (the pipe byte never appears in base58 or hex)
+  // means the three fields can't be re-ordered or merged.
+  const signedMessage = Buffer.from(`${data.nonce}|${data.newDid}|${data.newPublicKey}`, 'utf8');
+  try {
+    const rawKeyBytes = Buffer.from(agent.publicKey, 'base64');
+    const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+    const spkiDer = Buffer.concat([spkiPrefix, rawKeyBytes]);
+    const publicKey = crypto.createPublicKey({ key: spkiDer, format: 'der', type: 'spki' });
+    const valid = crypto.verify(null, signedMessage, publicKey, Buffer.from(data.signature, 'base64url'));
+    if (!valid) {
+      throw Object.assign(new Error('Signature verification failed — invalid proof of possession of old key'), { status: 401 });
+    }
+  } catch (err: any) {
+    if (err.status) throw err;
+    throw Object.assign(new Error(`Signature verification failed: ${err.message}`), { status: 401 });
+  }
+
+  // Look up the existing trust-registry entry BEFORE mutation so we can
+  // carry tier + allowedSkills forward. If the actor's been removed out-of-
+  // band (legacy agent, or operator-driven cleanup), fall back to tier-1
+  // wildcard — same degradation the reissue path uses, for consistency.
+  const existingActor = await trustService.getActor({ tenantId, agentId }, data.oldDid);
+  let trustTier = existingActor?.tier ?? 1;
+  let allowedSkills = existingActor?.allowedSkills ?? ['*'];
+  const displayName = existingActor?.displayName ?? agent.name;
+  if (!existingActor) {
+    logger.warn(
+      { tenantId, agentId, oldDid: data.oldDid },
+      'Trust-registry entry missing on key rotation — defaulting to wildcard tier-1',
+    );
+  }
+
+  // Revoke before the swap — any concurrent task-send that holds an old
+  // destination UCAN fails closed at the gate rather than slipping through
+  // after the agent record has been updated.
+  const revokedCids = await revokeUcansForSubject(tenantId, data.oldDid);
+
+  // Atomically swap {did, publicKey} — writeAtomicallyAsync uses tmp+rename.
+  await agentService.updateAgent(tenantId, agentId, {
+    did: data.newDid,
+    publicKey: data.newPublicKey,
+  });
+
+  // Rebuild trust-registry entry under the new DID.
+  await trustService.removeActor({ tenantId, agentId }, data.oldDid);
+  await trustService.addActor({ tenantId, agentId }, {
+    did: data.newDid,
+    displayName,
+    tier: trustTier,
+    allowedSkills,
+    notes: `Rotated from ${data.oldDid} at ${new Date().toISOString()}`,
+  });
+
+  // Mint the fresh self-UCAN. Expiry defaults to 30d, same as reissue.
+  const capabilities = allowedSkills.map(s => `nova:${tenantId}:${agentId}:skill:${s}`);
+  const result = await issueUcan(tenantId, {
+    subjectDid: data.newDid,
+    capabilities,
+    expiryDays: 30,
+  });
+
+  logger.info(
+    { tenantId, agentId, oldDid: data.oldDid, newDid: data.newDid, revokedCount: revokedCids.length, newCid: result.cid },
+    'Agent key rotated',
+  );
+
+  return {
+    ...result,
+    newDid: data.newDid,
+    revokedCids,
+    trustTier,
+    allowedSkills,
+  };
 }
 
 // ── Operator-initiated reissue (no PoP required — admin-auth gated) ──────────

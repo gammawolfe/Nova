@@ -18,7 +18,7 @@ import { systemRouter } from './routes/system';
 import { discoverRouter } from './routes/discover';
 import { invitesRouter } from './routes/invites';
 import { eventsRouter } from './routes/events';
-import { UcanRenewSchema, UcanRequestSchema } from '@nova/shared/src/admin-schemas';
+import { UcanRenewSchema, UcanRequestSchema, AgentRotateKeySchema } from '@nova/shared/src/admin-schemas';
 import { healthHandler, timedCheck } from '@nova/shared/src/health';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import * as ucanService from './services/ucan-service';
@@ -100,6 +100,34 @@ ucanRequestRouter.post('/', async (req, res) => {
   }
 });
 app.use('/admin/tenants/:tenantId/ucans/request', ucanRequestRouter);
+
+// Agent key rotation — proof-of-possession of OLD key; no admin auth.
+// Mounted before the /admin adminAuth gate (same trick as ucans/renew) —
+// the URL lives under /admin/... for namespace consistency but the auth
+// boundary is the PoP signature, not the bearer token.
+const rotateKeyRouter = Router({ mergeParams: true });
+rotateKeyRouter.post('/', async (req, res) => {
+  try {
+    const parseResult = AgentRotateKeySchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        error: 'ROTATE_INVALID',
+        details: parseResult.error.issues.map((i: any) => ({ field: i.path.join('.'), message: i.message })),
+      });
+    }
+    const { tenantId, agentId } = req.params as { tenantId: string; agentId: string };
+    const result = await ucanService.rotateAgentKey(tenantId, agentId, parseResult.data);
+    logger.info(
+      { tenantId, agentId, oldDid: parseResult.data.oldDid, newDid: result.newDid, revokedCount: result.revokedCids.length },
+      'Agent key rotated via proof-of-possession',
+    );
+    res.status(200).json(result);
+  } catch (err: any) {
+    const status = err.status ?? 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+app.use('/admin/tenants/:tenantId/agents/:agentId/rotate-key', rotateKeyRouter);
 
 // ── SSE lifecycle events (unauthenticated; browser EventSource has no header API; v1 trust model is localhost) ──
 app.use('/admin/events', eventsRouter);
