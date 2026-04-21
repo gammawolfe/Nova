@@ -8,7 +8,7 @@ import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
-import { verifyAndConsumeInvite } from '@nova/shared/src/invites';
+import { verifyInvite, consumeInvite } from '@nova/shared/src/invites';
 import { validateId } from '@nova/shared/src/validation';
 
 export const registerRouter = Router();
@@ -63,19 +63,23 @@ registerRouter.post('/', async (req: Request, res: Response) => {
 
   const { invite, agentId, name, description, publicKey, did, operatorUrl, skills, replyUrl } = parseResult.data;
 
-  let tenantId: string;
-  let agentIdHint: string | undefined;
+  // Step 1: verify invite (signature, exp, claims) — does NOT consume.
+  // The token stays live until step 5 so that any downstream validation failure
+  // (mismatch, missing tenant, duplicate agent) lets the caller retry with the
+  // same invite after fixing the underlying input.
+  let invitePayload;
   try {
-    const payload = await verifyAndConsumeInvite(invite);
-    tenantId = payload.tenantId;
-    agentIdHint = payload.agentIdHint;
+    invitePayload = await verifyInvite(invite);
   } catch (err: any) {
     return res.status(err.status ?? 400).json({
       error: 'INVITE_INVALID',
       message: err.message,
     });
   }
+  const tenantId = invitePayload.tenantId;
+  const agentIdHint = invitePayload.agentIdHint;
 
+  // Step 2: agentId must match the invite's hint if present.
   if (agentIdHint && agentIdHint !== agentId) {
     return res.status(400).json({
       error: 'AGENT_ID_MISMATCH',
@@ -83,6 +87,7 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     });
   }
 
+  // Step 3: tenant must still exist.
   const tenantConfigPath = path.join(DATA_ROOT, 'tenants', tenantId, 'tenant.json');
   try {
     await fsp.access(tenantConfigPath);
@@ -96,6 +101,9 @@ registerRouter.post('/', async (req: Request, res: Response) => {
   const ctx: TenantContext = { tenantId, agentId };
 
   try {
+    // Step 4: agent must not already exist. Optimistic check; the Redis NX in
+    // consumeInvite below is the authoritative arbiter for two concurrent
+    // registrations that race past this point with the same invite.
     const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
     try {
       await fsp.access(configPath);
@@ -105,6 +113,18 @@ registerRouter.post('/', async (req: Request, res: Response) => {
         statusUrl: `/register/status/${tenantId}/${agentId}`,
       });
     } catch { /* agent doesn't exist — proceed */ }
+
+    // Step 5: consume the invite atomically. All reversible validation is done;
+    // any failure after this point leaves the invite burned, which is acceptable
+    // because it means we're past the point of agent-caused input errors.
+    try {
+      await consumeInvite(invitePayload);
+    } catch (err: any) {
+      return res.status(err.status ?? 409).json({
+        error: 'INVITE_INVALID',
+        message: err.message,
+      });
+    }
 
     const agentDir = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId);
     await Promise.all(
