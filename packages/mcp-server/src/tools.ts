@@ -91,6 +91,30 @@ export function registerTools(_server: McpServer): void {
   // ── Onboarding ───────────────────────────────────────────────────────────
 
   server.registerTool(
+    'nova_inspect_invite',
+    {
+      title: 'Inspect a Nova invite JWT without consuming it',
+      description:
+        'Decodes the invite payload locally — no network call, no server-side consumption. Returns tenantId, agentIdHint, expiresAt, jti, and an `expired` flag. Use this before nova_register_agent to confirm the agentIdHint matches the agentId you plan to register.',
+      inputSchema: {
+        invite: z.string().min(1).describe('Invite JWT from the tenant operator'),
+      },
+    },
+    async ({ invite }) => {
+      let payload;
+      try { payload = decodeInvitePayload(invite, { allowExpired: true }); }
+      catch (e: any) { return err(`Invalid invite: ${e.message}`); }
+      return ok({
+        tenantId: payload.tenantId,
+        agentIdHint: payload.agentIdHint ?? null,
+        expiresAt: new Date(payload.exp * 1000).toISOString(),
+        jti: payload.jti,
+        expired: !!payload.expired,
+      });
+    },
+  );
+
+  server.registerTool(
     'nova_accept_invite',
     {
       title: 'Join a Nova tenant via invite token',

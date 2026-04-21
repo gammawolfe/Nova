@@ -26,12 +26,20 @@ export async function saveTenantConfig(cfg: TenantConfig): Promise<void> {
   await fsp.rename(tmp, TENANT_CONFIG_PATH);
 }
 
-export function decodeInvitePayload(token: string): { tenantId: string; agentIdHint?: string; exp: number; jti: string } {
+export function decodeInvitePayload(
+  token: string,
+  opts: { allowExpired?: boolean } = {},
+): { tenantId: string; agentIdHint?: string; exp: number; jti: string; expired?: boolean } {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('Malformed invite token');
-  const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'));
+  let payload: any;
+  try { payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')); }
+  catch { throw new Error('Invite payload malformed'); }
   if (payload.typ !== 'invite') throw new Error('Not an invite token');
-  if (!payload.tenantId || typeof payload.exp !== 'number') throw new Error('Invite missing claims');
-  if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Invite expired');
-  return payload;
+  if (!payload.tenantId || typeof payload.exp !== 'number' || !payload.jti) {
+    throw new Error('Invite missing claims');
+  }
+  const expired = payload.exp < Math.floor(Date.now() / 1000);
+  if (expired && !opts.allowExpired) throw new Error('Invite expired');
+  return expired ? { ...payload, expired: true } : payload;
 }
