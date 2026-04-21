@@ -123,7 +123,7 @@ export class NovaClient {
   async sendTask(
     targetAgentId: string,
     ucan: string,
-    payload: { id: string; schemaVersion: '1.0'; intent: string; params: Record<string, unknown>; replyTo: string; ttl: string; idempotencyKey: string },
+    payload: { id: string; schemaVersion: '1.0'; intent: string; params: Record<string, unknown>; replyTo?: string; ttl: string; idempotencyKey: string },
   ): Promise<{ status: 'submitted' | 'quarantined'; taskId: string; statusUrl?: string; streamUrl?: string; reason?: string }> {
     return json(
       'POST',
@@ -200,6 +200,93 @@ export class NovaClient {
     }
     const text = await res.body.text();
     return text ? JSON.parse(text) : { status: 'accepted' };
+  }
+
+  /**
+   * Long-poll the agent's broker reply inbox. Returns null on 204 (timeout).
+   * The returned reply is claimed into an in-flight state with a 5-minute
+   * visibility timeout — call ackReply before it expires or the reply will
+   * be redelivered on the next pull.
+   */
+  async pullReply(
+    agentId: string,
+    selfUcan: string,
+    waitMs: number,
+  ): Promise<{ taskId: string; result: unknown; visibleUntil: string } | null> {
+    const url = joinUrl(this.opts.novaUrl, `/agents/${encodeURIComponent(agentId)}/replies?wait=${waitMs}`);
+    const res = await request(url, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${selfUcan}` },
+    });
+    if (res.statusCode === 204) return null;
+    if (res.statusCode >= 400) {
+      const text = await res.body.text();
+      let parsed: any;
+      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      const err: any = new Error(
+        `pullReply failed: ${res.statusCode} ${typeof parsed === 'object' ? (parsed.error ?? parsed.message ?? text) : text}`,
+      );
+      err.status = res.statusCode;
+      throw err;
+    }
+    const text = await res.body.text();
+    return (text ? JSON.parse(text) : undefined) as { taskId: string; result: unknown; visibleUntil: string };
+  }
+
+  /** Ack a reply previously pulled. Treats 404/409 as normal outcomes. */
+  async ackReply(
+    agentId: string,
+    selfUcan: string,
+    taskId: string,
+  ): Promise<{ status: 'accepted' | 'already_acked' | 'reply_not_found' }> {
+    const url = joinUrl(this.opts.novaUrl, `/agents/${encodeURIComponent(agentId)}/replies/${encodeURIComponent(taskId)}/ack`);
+    const res = await request(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${selfUcan}` },
+    });
+    if (res.statusCode >= 400 && res.statusCode !== 404 && res.statusCode !== 409) {
+      const text = await res.body.text();
+      let parsed: any;
+      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      const err: any = new Error(
+        `ackReply failed: ${res.statusCode} ${typeof parsed === 'object' ? (parsed.error ?? parsed.message ?? text) : text}`,
+      );
+      err.status = res.statusCode;
+      throw err;
+    }
+    const text = await res.body.text();
+    return text ? JSON.parse(text) : { status: 'accepted' };
+  }
+
+  /**
+   * Direct lookup of a stored TaskResult by taskId. Returns null on 404.
+   * Works for any reply whose 24h TTL has not yet expired, whether or not
+   * the in-flight list entry has been pulled/acked.
+   */
+  async getStoredResult(
+    agentId: string,
+    selfUcan: string,
+    taskId: string,
+  ): Promise<unknown | null> {
+    const url = joinUrl(this.opts.novaUrl, `/agents/${encodeURIComponent(agentId)}/replies/${encodeURIComponent(taskId)}`);
+    const res = await request(url, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${selfUcan}` },
+    });
+    if (res.statusCode === 404) return null;
+    if (res.statusCode >= 400) {
+      const text = await res.body.text();
+      let parsed: any;
+      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      const err: any = new Error(
+        `getStoredResult failed: ${res.statusCode} ${typeof parsed === 'object' ? (parsed.error ?? parsed.message ?? text) : text}`,
+      );
+      err.status = res.statusCode;
+      throw err;
+    }
+    const text = await res.body.text();
+    const body = text ? JSON.parse(text) : undefined;
+    return body?.result ?? null;
   }
 
   // ── Admin (tenant/invite) — requires adminToken ──────────────────────────

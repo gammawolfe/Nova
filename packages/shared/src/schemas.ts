@@ -7,7 +7,9 @@ export const TaskRequestSchema = z.object({
   schemaVersion: z.literal('1.0'),
   intent: z.string(),
   params: z.record(z.unknown()), // Tightly validated later via per-skill schemas
-  replyTo: z.string().url(),
+  // Optional: when omitted, the sender is expected to be a Nova-registered agent
+  // so the result can be routed to its broker reply inbox at respond time.
+  replyTo: z.string().url().optional(),
   ttl: z.string().datetime(),
   idempotencyKey: z.string().uuid(),
 });
@@ -33,7 +35,12 @@ export const QueuedTaskSchema = z.object({
   agentId: z.string(),
   intent: z.string(),
   params: z.record(z.unknown()),
-  replyTo: z.string().url(),
+  replyTo: z.string().url().optional(),
+  // Sender resolution (populated at ingress when the sender DID matches a
+  // Nova-registered agent). Enables broker-mode reply routing when replyTo
+  // is absent. Optional so external / webhook-only senders still queue.
+  senderTenantId: z.string().optional(),
+  senderAgentId: z.string().optional(),
   senderDid: z.string(),
   tier: z.number().int().min(0).max(3),
   queuedAt: z.string().datetime(),
@@ -92,7 +99,13 @@ export const AuditEventSchema = z.object({
     'agent_rejected',
     'ucan_renewed',
     'ucan_renewal_failed',
-    'agent_discovered'
+    'agent_discovered',
+    'reply_broker_queued',
+    'reply_delivered',
+    'reply_acked',
+    'reply_reclaimed',
+    'reply_dead_lettered',
+    'reply_sender_inactive'
   ]),
   taskId: z.string().uuid().optional(),
   senderDid: z.string().optional(),

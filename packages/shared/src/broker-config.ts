@@ -27,3 +27,14 @@ export const BROKER_MAX_WAIT_MS = readInt('BROKER_MAX_WAIT_MS', 60 * 1000);
 
 /** How often the reclaim worker sweeps in-flight sets. Default 10s. */
 export const BROKER_RECLAIM_INTERVAL_MS = readInt('BROKER_RECLAIM_INTERVAL_MS', 10 * 1000);
+
+/**
+ * TTL for stored TaskResult entries keyed by taskId (direct lookup via
+ * GET /agents/:agentId/replies/:taskId). Default 24 hours — matches the max
+ * task ttlMinutes (1440) exposed by nova_send_task, so a reply persists long
+ * enough for any task that was legitimately in flight to be collected.
+ */
+export const BROKER_REPLY_RESULT_TTL_SECONDS = readInt('BROKER_REPLY_RESULT_TTL_SECONDS', 24 * 60 * 60);
+
+/** Maximum TaskResult payload size accepted by the respond endpoint. Default 1 MB. */
+export const BROKER_RESULT_MAX_BYTES = readInt('BROKER_RESULT_MAX_BYTES', 1024 * 1024);

@@ -3,120 +3,24 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import {
-  getAgentMeta,
   TASK_LIFECYCLE_CHANNEL,
   TaskLifecycleEvent,
+  getAgentMeta,
 } from '@nova/shared/src/agent-index';
 import { getSharedRedis } from '@nova/shared/src/redis';
-import { TenantContext } from '@nova/shared/src/tenant';
 import { TaskResult } from '@nova/shared/src/types';
-import { BROKER_MAX_WAIT_MS } from '@nova/shared/src/broker-config';
+import {
+  BROKER_MAX_WAIT_MS,
+  BROKER_RESULT_MAX_BYTES,
+} from '@nova/shared/src/broker-config';
 import * as inbox from '@nova/task-queue/src/inbox';
-import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
-
-// ── UCAN self-verification adapter ──────────────────────────────────────────
-//
-// Self-UCANs are JWTs issued BY the calling agent's own did:key.
-// We verify them with ucans.validate(), which:
-//   • Decodes the JWT header/payload
-//   • Extracts the Ed25519 public key from the did:key iss field
-//   • Cryptographically verifies the JWT signature against that public key
-//   • Checks the exp claim is in the future
-//
-// This replaces the previous no-op that only base64-decoded the payload and
-// performed no signature check, allowing any party who knows a target agent's
-// public DID (visible via /discover) to forge a self-UCAN.
-
-interface SelfUcanResult {
-  ok: true;
-  subjectDid: string;
-}
-interface SelfUcanFailure {
-  ok: false;
-  reason: string;
-}
-
-/**
- * Cryptographic self-UCAN verification:
- * 1. Call ucans.validate() — performs Ed25519 signature verification by
- *    extracting the public key from the did:key `iss` field, and checks expiry.
- * 2. Parse the verified payload to extract `iss` as the subject DID.
- * 3. Return { ok: true, subjectDid } on success or { ok: false, reason } on failure.
- */
-async function verifySelfUcan(jwt: string): Promise<SelfUcanResult | SelfUcanFailure> {
-  try {
-    const parts = jwt.split('.');
-    if (parts.length !== 3 || !parts[1]) {
-      return { ok: false, reason: 'malformed_jwt' };
-    }
-
-    // ucans.validate() performs full cryptographic signature verification:
-    // it extracts the Ed25519 public key embedded in the did:key `iss` value
-    // (multibase + multicodec encoded) and verifies the JWT signature against it.
-    // It also checks the exp claim and throws on any failure.
-    await ucansValidate(jwt);
-
-    const decoded = await ucansParse(jwt);
-    const issuerDid: string | undefined = decoded.payload.iss;
-    if (!issuerDid) {
-      return { ok: false, reason: 'ucan_no_issuer' };
-    }
-
-    return { ok: true, subjectDid: issuerDid };
-  } catch (err: any) {
-    const msg: string = (err?.message ?? '').toLowerCase();
-    if (msg.includes('expir')) {
-      return { ok: false, reason: 'expired' };
-    }
-    if (msg.includes('signature') || msg.includes('invalid') || msg.includes('verify')) {
-      return { ok: false, reason: 'signature_invalid' };
-    }
-    return { ok: false, reason: 'malformed' };
-  }
-}
+import * as replyInbox from '@nova/task-queue/src/reply-inbox';
+import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
+import { authSelfUcan } from '../auth/self-ucan';
 
 // ── Router ───────────────────────────────────────────────────────────────────
 
 export const inboxRouter = Router({ mergeParams: true });
-
-/**
- * Extract self-UCAN from Authorization header, verify it, and resolve the
- * authenticated agent. Returns TenantContext on success or sends a 4xx and
- * returns null.
- */
-async function authSelfUcan(
-  req: Request,
-  res: Response,
-  paramAgentId: string,
-): Promise<TenantContext | null> {
-  const auth = req.headers.authorization;
-  if (!auth?.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'UCAN_MISSING' });
-    return null;
-  }
-  const jwt = auth.slice(7).trim();
-
-  const verification = await verifySelfUcan(jwt);
-  if (!verification.ok) {
-    res.status(401).json({ error: 'UCAN_INVALID', reason: verification.reason });
-    return null;
-  }
-
-  const meta = await getAgentMeta(getSharedRedis(), paramAgentId);
-  if (!meta) {
-    res.status(404).json({ error: 'AGENT_NOT_FOUND' });
-    return null;
-  }
-  if (!meta.did) {
-    res.status(401).json({ error: 'AGENT_DID_MISSING', hint: 'Agent record has no DID; re-register the agent' });
-    return null;
-  }
-  if (meta.did !== verification.subjectDid) {
-    res.status(401).json({ error: 'UCAN_DID_MISMATCH' });
-    return null;
-  }
-  return { tenantId: meta.tenantId, agentId: meta.agentId };
-}
 
 // ── GET /agents/:agentId/inbox?wait=<ms> — long-poll pull ───────────────────
 
@@ -173,14 +77,6 @@ inboxRouter.post(
       const entry = await inbox.peekInflight(ctx, taskId);
       if (!entry) return void res.status(404).json({ status: 'task_not_found' });
 
-      const outcome = await inbox.respond(ctx, taskId);
-      if (outcome === 'task_not_found') {
-        return void res.status(404).json({ status: 'task_not_found' });
-      }
-      if (outcome === 'already_completed') {
-        return void res.status(409).json({ status: 'already_completed' });
-      }
-
       const now = new Date().toISOString();
       const taskResult: TaskResult =
         status === 'ok'
@@ -207,17 +103,98 @@ inboxRouter.post(
               schemaVersion: '1.0',
             };
 
-      try {
-        await fetch(entry.task.replyTo, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(taskResult),
-          signal: AbortSignal.timeout(10_000),
+      // Size cap — enforce before ZREM so an oversized result can be retried
+      // with a trimmed payload without losing the in-flight claim.
+      const serialized = JSON.stringify(taskResult);
+      const byteLength = Buffer.byteLength(serialized, 'utf8');
+      if (byteLength > BROKER_RESULT_MAX_BYTES) {
+        return void res.status(413).json({
+          error: 'RESULT_TOO_LARGE',
+          message: `TaskResult payload is ${byteLength} bytes; maximum is ${BROKER_RESULT_MAX_BYTES}`,
+          maxBytes: BROKER_RESULT_MAX_BYTES,
         });
-      } catch (deliveryErr: any) {
+      }
+
+      const outcome = await inbox.respond(ctx, taskId);
+      if (outcome === 'task_not_found') {
+        return void res.status(404).json({ status: 'task_not_found' });
+      }
+      if (outcome === 'already_completed') {
+        return void res.status(409).json({ status: 'already_completed' });
+      }
+
+      // Reply delivery branches on replyTo presence:
+      //   1. replyTo URL set       → POST to URL (existing webhook behavior)
+      //   2. senderAgentId known   → enqueue to sender's broker reply inbox
+      //   3. neither               → log + lifecycle only (ingress should have
+      //                              rejected this case, so it's a bug if hit)
+      if (entry.task.replyTo) {
+        try {
+          await fetch(entry.task.replyTo, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: serialized,
+            signal: AbortSignal.timeout(10_000),
+          });
+          await auditLog(ctx, { event: 'reply_delivered', taskId, metadata: { target: 'webhook' } });
+        } catch (deliveryErr: any) {
+          logger.warn(
+            { err: deliveryErr.message, taskId, replyTo: entry.task.replyTo },
+            'Broker respond: delivery to replyUrl failed',
+          );
+        }
+      } else if (entry.task.senderTenantId && entry.task.senderAgentId) {
+        const senderCtx = {
+          tenantId: entry.task.senderTenantId,
+          agentId: entry.task.senderAgentId,
+        };
+        const senderMeta = await getAgentMeta(getSharedRedis(), senderCtx.agentId);
+        if (!senderMeta || senderMeta.status !== 'active') {
+          // Sender deregistered or suspended between send and respond —
+          // result is undeliverable. Persist to DLQ for operator review.
+          await writeDeadLetter(senderCtx, {
+            taskId,
+            targetUrl: 'broker-reply',
+            taskResult,
+            failureReason: 'reply_sender_inactive',
+            httpStatus: 0,
+            attemptCount: 1,
+          });
+          await auditLog(ctx, {
+            event: 'reply_sender_inactive',
+            taskId,
+            metadata: {
+              senderTenantId: senderCtx.tenantId,
+              senderAgentId: senderCtx.agentId,
+              senderStatus: senderMeta?.status ?? 'missing',
+            },
+          });
+          logger.warn(
+            { taskId, senderAgentId: senderCtx.agentId, senderStatus: senderMeta?.status ?? 'missing' },
+            'Broker respond: sender inactive; result written to dead-letter',
+          );
+        } else {
+          try {
+            await replyInbox.enqueueReply(senderCtx, taskId, taskResult);
+            await auditLog(ctx, {
+              event: 'reply_broker_queued',
+              taskId,
+              metadata: {
+                senderTenantId: senderCtx.tenantId,
+                senderAgentId: senderCtx.agentId,
+              },
+            });
+          } catch (enqErr: any) {
+            logger.error(
+              { err: enqErr.message, taskId, senderAgentId: senderCtx.agentId },
+              'Broker respond: reply-inbox enqueue failed',
+            );
+          }
+        }
+      } else {
         logger.warn(
-          { err: deliveryErr.message, taskId, replyTo: entry.task.replyTo },
-          'Broker respond: delivery to replyUrl failed',
+          { taskId },
+          'Broker respond: neither replyTo nor senderAgentId present — ingress should have rejected this',
         );
       }
 
