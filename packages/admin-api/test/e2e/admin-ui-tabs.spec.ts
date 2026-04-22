@@ -191,8 +191,9 @@ test('Agents card galaxy pill navigates without triggering panel', async ({ page
   await login(page);
   await page.click('.nova-nav-item:has-text("Agents")');
 
-  // Click the pill inside the first card
-  await page.locator('.nova-agent-card').first().locator('.nova-pill').click();
+  // Click the galaxy pill (the anchor variant) inside the first card.
+  // Other cosmetic pills (broker/direct mode) also use .nova-pill, so scope to <a>.
+  await page.locator('.nova-agent-card').first().locator('a.nova-pill').click();
 
   // URL should be the galaxy route, NOT the agents route
   await expect(page).toHaveURL(/#\/galaxy\//);

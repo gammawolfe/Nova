@@ -31,6 +31,9 @@ window.novaApp = function () {
     allAgents: [],
     allAgentsLoading: false,
     allAgentsError: null,
+    brokerAgentSet: new Set(),
+    selectedAgentBroker: null,
+    selectedAgentBrokerError: null,
     rotationDeg: 0,
     activeLines: [],
     hoverGalaxy: null,
@@ -152,14 +155,57 @@ window.novaApp = function () {
         const galaxiesPromise = this.galaxies.length === 0
           ? this.loadGalaxies()
           : Promise.resolve();
-        const [res] = await Promise.all([api('GET', '/admin/agents'), galaxiesPromise]);
+        // Broker summary is best-effort — a failure shouldn't block the agent list.
+        const brokerPromise = api('GET', '/admin/broker/summary').catch(() => null);
+        const [res, , brokerRes] = await Promise.all([
+          api('GET', '/admin/agents'),
+          galaxiesPromise,
+          brokerPromise,
+        ]);
         this.allAgents = res?.agents || [];
+        this.brokerAgentSet = new Set(
+          (brokerRes?.entries || []).map(e => `${e.tenantId}:${e.agentId}`)
+        );
       } catch (e) {
         this.allAgentsError = e.message || 'Load failed';
         this.pushToast(this.allAgentsError, 'err');
       } finally {
         this.allAgentsLoading = false;
       }
+    },
+
+    isBrokerAgent(agent) {
+      if (!agent) return false;
+      return this.brokerAgentSet.has(`${agent.tenantId}:${agent.agentId}`);
+    },
+
+    async loadSelectedBrokerStatus() {
+      const a = this.selectedAgent;
+      if (!a) return;
+      this.selectedAgentBroker = null;
+      this.selectedAgentBrokerError = null;
+      try {
+        const status = await api(
+          'GET',
+          `/admin/tenants/${encodeURIComponent(a.tenantId)}/agents/${encodeURIComponent(a.agentId)}/broker-status`
+        );
+        // Guard against race: user may have closed/switched panels before the fetch resolved.
+        if (this.selectedAgent && this.selectedAgent.agentId === a.agentId) {
+          this.selectedAgentBroker = status;
+        }
+      } catch (e) {
+        if (this.selectedAgent && this.selectedAgent.agentId === a.agentId) {
+          this.selectedAgentBrokerError = e.message || 'Load failed';
+        }
+      }
+    },
+
+    formatAgeMs(ms) {
+      if (ms === null || ms === undefined) return '—';
+      if (ms < 1000) return `${ms}ms`;
+      if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+      if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+      return `${Math.round(ms / 3_600_000)}h`;
     },
 
     galaxySlug(tenantId) {
@@ -205,10 +251,13 @@ window.novaApp = function () {
       const match = this.allAgents.find(a => a.agentId === agentId);
       if (!match) return;
       this.selectedAgent = match;
+      this.loadSelectedBrokerStatus();
     },
 
     closeAgentDetail() {
       this.selectedAgent = null;
+      this.selectedAgentBroker = null;
+      this.selectedAgentBrokerError = null;
     },
 
     get livePlanets() {

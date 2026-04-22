@@ -18,6 +18,7 @@ import { systemRouter } from './routes/system';
 import { discoverRouter } from './routes/discover';
 import { invitesRouter } from './routes/invites';
 import { eventsRouter } from './routes/events';
+import { brokerStatusRouter, brokerSummaryRouter } from './routes/broker';
 import { AgentRotateKeySchema } from '@nova/shared/src/admin-schemas';
 import { healthHandler, timedCheck } from '@nova/shared/src/health';
 import { getSharedRedis } from '@nova/shared/src/redis';
@@ -116,7 +117,9 @@ app.use('/admin/tenants/:tenantId/ucans', ucanRouter);
 app.use('/admin/tenants/:tenantId/agents/:agentId/quarantine', quarantineRouter);
 app.use('/admin/tenants/:tenantId/agents/:agentId/dead-letter', deadLetterRouter);
 app.use('/admin/tenants/:tenantId/agents/:agentId/confirm-queue', confirmationRouter);
+app.use('/admin/tenants/:tenantId/agents/:agentId/broker-status', brokerStatusRouter);
 app.use('/admin/tenants/:tenantId/audit', auditRouter);
+app.use('/admin/broker', brokerSummaryRouter);
 app.use('/admin', systemRouter);
 
 // Error handler must be last
