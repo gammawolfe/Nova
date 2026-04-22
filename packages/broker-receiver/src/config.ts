@@ -14,7 +14,7 @@ import path from 'path';
 import { z } from 'zod';
 
 export const DEFAULT_NOVA_URL = 'http://localhost:3001';
-export const DEFAULT_POLL_WAIT_MS = 30_000;
+export const DEFAULT_POLL_FALLBACK_MS = 30_000;
 export const DEFAULT_MAX_CONCURRENT_TASKS = 1;
 export const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30;
 
@@ -25,12 +25,22 @@ export const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30;
 export const HANDLER_NAMES = ['echo', 'claude-api'] as const;
 export type HandlerName = (typeof HANDLER_NAMES)[number];
 
+// Reception strategy. `push` (default) subscribes to /inbox/stream for
+// instant wake-up and also ticks pollFallbackMs as a safety net against a
+// silently-broken subscription. `poll` skips the subscription entirely —
+// useful on networks that block long-lived SSE connections. Both modes
+// share the same claim primitive (BLPOP via /inbox) so the switch is
+// transport-only.
+export const INBOX_STRATEGIES = ['push', 'poll'] as const;
+export type InboxStrategy = (typeof INBOX_STRATEGIES)[number];
+
 export const ReceiverConfigSchema = z.object({
   agentId: z.string().regex(/^[a-z0-9_-]+$/).min(1).max(64),
   novaUrl: z.string().url().default(DEFAULT_NOVA_URL),
   handler: z.enum(HANDLER_NAMES).default('echo'),
   handlerConfig: z.record(z.unknown()).default({}),
-  pollWaitMs: z.number().int().min(1_000).max(60_000).default(DEFAULT_POLL_WAIT_MS),
+  inboxStrategy: z.enum(INBOX_STRATEGIES).default('push'),
+  pollFallbackMs: z.number().int().min(1_000).max(60_000).default(DEFAULT_POLL_FALLBACK_MS),
   maxConcurrentTasks: z.number().int().min(1).max(32).default(DEFAULT_MAX_CONCURRENT_TASKS),
   healthPort: z.number().int().min(0).max(65_535).default(0),
   shutdownGraceSeconds: z.number().int().min(1).max(300).default(DEFAULT_SHUTDOWN_GRACE_SECONDS),
@@ -38,6 +48,19 @@ export const ReceiverConfigSchema = z.object({
 });
 
 export type ReceiverConfig = z.infer<typeof ReceiverConfigSchema>;
+
+/**
+ * Backwards-compatibility shim for the p3.2 config key `pollWaitMs`. The
+ * SSE migration renames it to `pollFallbackMs` because the field now gates
+ * the safety-net tick, not the blocking poll window. Existing operator
+ * config files keep working: if `pollWaitMs` is present and
+ * `pollFallbackMs` is not, the old value is promoted.
+ */
+function aliasPollWait(input: Record<string, unknown>): Record<string, unknown> {
+  if ('pollFallbackMs' in input || !('pollWaitMs' in input)) return input;
+  const { pollWaitMs, ...rest } = input;
+  return { ...rest, pollFallbackMs: pollWaitMs };
+}
 
 export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.nova', 'broker-receiver.json');
 
@@ -64,11 +87,11 @@ export async function resolveConfig(inputs: ConfigInputs): Promise<ReceiverConfi
   const envConfig = extractEnvConfig(env);
   const cliConfig = stripUndefined(inputs.cli);
 
-  const merged: Record<string, unknown> = {
-    ...fileConfig,
-    ...envConfig,
-    ...cliConfig,
-  };
+  const merged: Record<string, unknown> = aliasPollWait({
+    ...aliasPollWait(fileConfig),
+    ...aliasPollWait(envConfig),
+    ...aliasPollWait(cliConfig),
+  });
 
   return ReceiverConfigSchema.parse(merged);
 }
@@ -92,6 +115,9 @@ function extractEnvConfig(env: NodeJS.ProcessEnv): Record<string, unknown> {
   if (env.NOVA_AGENT_ID) out.agentId = env.NOVA_AGENT_ID;
   if (env.NOVA_URL) out.novaUrl = env.NOVA_URL;
   if (env.BROKER_RECEIVER_HANDLER) out.handler = env.BROKER_RECEIVER_HANDLER;
+  if (env.BROKER_RECEIVER_INBOX_STRATEGY) out.inboxStrategy = env.BROKER_RECEIVER_INBOX_STRATEGY;
+  if (env.BROKER_RECEIVER_POLL_FALLBACK_MS) out.pollFallbackMs = parseInt(env.BROKER_RECEIVER_POLL_FALLBACK_MS, 10);
+  // Deprecated alias — see aliasPollWait.
   if (env.BROKER_RECEIVER_POLL_WAIT_MS) out.pollWaitMs = parseInt(env.BROKER_RECEIVER_POLL_WAIT_MS, 10);
   if (env.BROKER_RECEIVER_MAX_CONCURRENT) out.maxConcurrentTasks = parseInt(env.BROKER_RECEIVER_MAX_CONCURRENT, 10);
   if (env.BROKER_RECEIVER_HEALTH_PORT) out.healthPort = parseInt(env.BROKER_RECEIVER_HEALTH_PORT, 10);

@@ -7,7 +7,7 @@
 
 import http from 'http';
 import type { AddressInfo } from 'net';
-import type { PullLoop } from './pull-loop.js';
+import type { ClaimLoop } from './claim-loop.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { ReceiverConfig } from './config.js';
 
@@ -17,13 +17,13 @@ export interface HealthSnapshot {
   handler: string;
   uptimeMs: number;
   startedAt: string;
-  pullLoop: ReturnType<PullLoop['getStats']>;
+  claimLoop: ReturnType<ClaimLoop['getStats']>;
   dispatcher: ReturnType<Dispatcher['getStats']>;
 }
 
 export interface HealthServerOptions {
   config: ReceiverConfig;
-  pullLoop: PullLoop;
+  claimLoop: ClaimLoop;
   dispatcher: Dispatcher;
   startedAt: Date;
 }
@@ -34,11 +34,7 @@ export class HealthServer {
 
   constructor(private readonly opts: HealthServerOptions) {}
 
-  /**
-   * Start listening. Returns the port actually bound (useful when
-   * healthPort = 0 was intended but the caller opted in some other way;
-   * currently we only start at all when healthPort > 0).
-   */
+  /** Start listening. Returns 0 when disabled (healthPort <= 0). */
   async start(): Promise<number> {
     if (this.opts.config.healthPort <= 0) return 0;
 
@@ -64,11 +60,11 @@ export class HealthServer {
   }
 
   snapshot(): HealthSnapshot {
-    const pull = this.opts.pullLoop.getStats();
+    const claim = this.opts.claimLoop.getStats();
     const dispatch = this.opts.dispatcher.getStats();
     const status: HealthSnapshot['status'] =
-      !pull.running ? 'stopped'
-      : pull.consecutiveErrors >= 3 ? 'degraded'
+      !claim.running ? 'stopped'
+      : claim.consecutiveErrors >= 3 ? 'degraded'
       : 'ok';
     return {
       status,
@@ -76,7 +72,7 @@ export class HealthServer {
       handler: this.opts.config.handler,
       startedAt: this.opts.startedAt.toISOString(),
       uptimeMs: Date.now() - this.opts.startedAt.getTime(),
-      pullLoop: pull,
+      claimLoop: claim,
       dispatcher: dispatch,
     };
   }

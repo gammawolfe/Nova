@@ -5,7 +5,7 @@ import path from 'path';
 import {
   resolveConfig,
   DEFAULT_NOVA_URL,
-  DEFAULT_POLL_WAIT_MS,
+  DEFAULT_POLL_FALLBACK_MS,
   DEFAULT_MAX_CONCURRENT_TASKS,
 } from '../src/config';
 
@@ -32,7 +32,8 @@ describe('resolveConfig', () => {
     expect(cfg.agentId).toBe('test-agent');
     expect(cfg.novaUrl).toBe(DEFAULT_NOVA_URL);
     expect(cfg.handler).toBe('echo');
-    expect(cfg.pollWaitMs).toBe(DEFAULT_POLL_WAIT_MS);
+    expect(cfg.pollFallbackMs).toBe(DEFAULT_POLL_FALLBACK_MS);
+    expect(cfg.inboxStrategy).toBe('push');
     expect(cfg.maxConcurrentTasks).toBe(DEFAULT_MAX_CONCURRENT_TASKS);
     expect(cfg.healthPort).toBe(0);
     expect(cfg.logLevel).toBe('info');
@@ -54,17 +55,17 @@ describe('resolveConfig', () => {
     ).rejects.toThrow();
   });
 
-  it('pollWaitMs bounded to [1000, 60000]', async () => {
+  it('pollFallbackMs bounded to [1000, 60000]', async () => {
     await expect(
       resolveConfig({
-        cli: { agentId: 'a', pollWaitMs: 500 },
+        cli: { agentId: 'a', pollFallbackMs: 500 },
         env: {},
         configPath: '/nonexistent/broker-receiver.json',
       }),
     ).rejects.toThrow();
     await expect(
       resolveConfig({
-        cli: { agentId: 'a', pollWaitMs: 120_000 },
+        cli: { agentId: 'a', pollFallbackMs: 120_000 },
         env: {},
         configPath: '/nonexistent/broker-receiver.json',
       }),
@@ -84,16 +85,58 @@ describe('resolveConfig', () => {
   });
 
   it('cli overrides env overrides file', async () => {
-    await withTempConfig({ agentId: 'file', novaUrl: 'http://file:3001', pollWaitMs: 5_000 }, async (p) => {
-      const cfg = await resolveConfig({
-        cli: { pollWaitMs: 15_000 },
-        env: { NOVA_AGENT_ID: 'env-a', BROKER_RECEIVER_POLL_WAIT_MS: '10000' },
-        configPath: p,
-      });
-      expect(cfg.agentId).toBe('env-a');
-      expect(cfg.novaUrl).toBe('http://file:3001'); // only file sets it
-      expect(cfg.pollWaitMs).toBe(15_000); // cli wins
+    await withTempConfig(
+      { agentId: 'file', novaUrl: 'http://file:3001', pollFallbackMs: 5_000 },
+      async (p) => {
+        const cfg = await resolveConfig({
+          cli: { pollFallbackMs: 15_000 },
+          env: { NOVA_AGENT_ID: 'env-a', BROKER_RECEIVER_POLL_FALLBACK_MS: '10000' },
+          configPath: p,
+        });
+        expect(cfg.agentId).toBe('env-a');
+        expect(cfg.novaUrl).toBe('http://file:3001'); // only file sets it
+        expect(cfg.pollFallbackMs).toBe(15_000); // cli wins
+      },
+    );
+  });
+
+  it('promotes legacy pollWaitMs to pollFallbackMs', async () => {
+    await withTempConfig({ agentId: 'file', pollWaitMs: 7_500 }, async (p) => {
+      const cfg = await resolveConfig({ cli: {}, env: {}, configPath: p });
+      expect(cfg.pollFallbackMs).toBe(7_500);
     });
+  });
+
+  it('pollFallbackMs wins over legacy pollWaitMs when both present', async () => {
+    await withTempConfig(
+      { agentId: 'file', pollWaitMs: 7_500, pollFallbackMs: 12_000 },
+      async (p) => {
+        const cfg = await resolveConfig({ cli: {}, env: {}, configPath: p });
+        expect(cfg.pollFallbackMs).toBe(12_000);
+      },
+    );
+  });
+
+  it('inboxStrategy accepts push and poll, rejects others', async () => {
+    const push = await resolveConfig({
+      cli: { agentId: 'a', inboxStrategy: 'push' as const },
+      env: {},
+      configPath: '/nonexistent/broker-receiver.json',
+    });
+    expect(push.inboxStrategy).toBe('push');
+    const poll = await resolveConfig({
+      cli: { agentId: 'a', inboxStrategy: 'poll' as const },
+      env: {},
+      configPath: '/nonexistent/broker-receiver.json',
+    });
+    expect(poll.inboxStrategy).toBe('poll');
+    await expect(
+      resolveConfig({
+        cli: { agentId: 'a', inboxStrategy: 'hybrid' as any },
+        env: {},
+        configPath: '/nonexistent/broker-receiver.json',
+      }),
+    ).rejects.toThrow();
   });
 
   it('cli undefined does not wipe earlier tiers', async () => {
