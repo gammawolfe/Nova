@@ -32,8 +32,20 @@ export function taskResultKey(ctx: TenantContext, taskId: string): string {
   return `nova:task-result:${ctx.tenantId}:${ctx.agentId}:${taskId}`;
 }
 
+export function replyInboxNotifyChannel(ctx: TenantContext): string {
+  return `nova:reply-inbox-notify:${ctx.tenantId}:${ctx.agentId}`;
+}
+
+export function replyInboxSeqKey(ctx: TenantContext): string {
+  return `nova:reply-inbox-seq:${ctx.tenantId}:${ctx.agentId}`;
+}
+
 /** Set of "tenantId:agentId" pairs that have at least one pending reply. */
 export const BROKER_REPLY_AGENTS_SET = 'nova:broker-reply-agents';
+
+// Matches the inbox-seq + task-events TTL. The seq counter must not outlive
+// the reply data it numbers.
+const REPLY_INBOX_SEQ_TTL_SECONDS = 60 * 60 * 24;
 
 function memberKey(ctx: TenantContext): string {
   return `${ctx.tenantId}:${ctx.agentId}`;
@@ -45,6 +57,17 @@ export interface ReplyInflightEntry {
   taskId: string;
   result: TaskResult;
   reclaimCount: number;
+  // Monotonic per-(tenant,agent) sequence assigned at enqueue. Used as the
+  // SSE `id:` value so resuming subscribers can skip already-delivered
+  // notifications via Last-Event-ID. Absent on entries enqueued by
+  // pre-push builds; consumers tolerate `undefined`.
+  seq?: number;
+}
+
+export interface ReplyInboxNotification {
+  seq: number;
+  taskId: string;
+  enqueuedAt: string;
 }
 
 /**
@@ -61,11 +84,19 @@ export async function enqueueReply(
   taskId: string,
   result: TaskResult,
 ): Promise<void> {
-  const entry: ReplyInflightEntry = { taskId, result, reclaimCount: 0 };
+  const seq = await redis.incr(replyInboxSeqKey(senderCtx));
+  const entry: ReplyInflightEntry = { taskId, result, reclaimCount: 0, seq };
+  const notification: ReplyInboxNotification = {
+    seq,
+    taskId,
+    enqueuedAt: new Date().toISOString(),
+  };
   await redis.pipeline()
+    .expire(replyInboxSeqKey(senderCtx), REPLY_INBOX_SEQ_TTL_SECONDS)
     .lpush(replyInboxKey(senderCtx), JSON.stringify(entry))
     .setex(taskResultKey(senderCtx, taskId), BROKER_REPLY_RESULT_TTL_SECONDS, JSON.stringify(result))
     .sadd(BROKER_REPLY_AGENTS_SET, memberKey(senderCtx))
+    .publish(replyInboxNotifyChannel(senderCtx), JSON.stringify(notification))
     .exec();
 }
 
@@ -106,6 +137,25 @@ export async function pullReply(
     result: entry.result,
     visibleUntil: new Date(visibleUntilMs),
   };
+}
+
+/**
+ * Non-destructive snapshot of the reply inbox, newest-first (LPUSH head).
+ * Used by the peek endpoint and by the SSE stream's replay path. Does not
+ * claim replies — visibility state is unchanged.
+ */
+export async function listReplies(ctx: TenantContext): Promise<ReplyInflightEntry[]> {
+  const raws = await redis.lrange(replyInboxKey(ctx), 0, -1);
+  const entries: ReplyInflightEntry[] = [];
+  for (const raw of raws) {
+    try {
+      const entry: ReplyInflightEntry = JSON.parse(raw);
+      if (entry.taskId && entry.result) entries.push(entry);
+    } catch {
+      continue;
+    }
+  }
+  return entries;
 }
 
 /** Result of calling ackReply. */
@@ -233,5 +283,6 @@ export async function forgetBrokerReplyAgent(ctx: TenantContext): Promise<void> 
     .srem(BROKER_REPLY_AGENTS_SET, memberKey(ctx))
     .del(replyInboxKey(ctx))
     .del(replyInflightKey(ctx))
+    .del(replyInboxSeqKey(ctx))
     .exec();
 }
