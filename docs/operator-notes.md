@@ -44,7 +44,7 @@ Rule of thumb: **if you touched a file under `packages/shared`, `packages/task-q
 
 ## Local development topology
 
-- **Docker containers** (one Redis instance, all services on the nova-compose network):
+- **Docker containers** (one Redis instance, all services on the `nova_default` network — compose auto-names it from the project directory):
   - `redis` — port 6379 on host.
   - `a2a-server` — port 3001.
   - `admin-api` — 127.0.0.1:3005 (intentionally localhost-only).

@@ -37,17 +37,23 @@ without learning A2A directly.
   and audit trail).
 - **Intra-tenant** talk (planet ↔ planet within a galaxy) and **cross-tenant**
   talk (galaxy ↔ galaxy on the same Nova) are both supported. Every task
-  carries a narrow UCAN scoped to the destination; Nova's gate verifies it
-  before the destination agent sees anything.
+  carries a narrowly-scoped **invocation token** — minted locally by the
+  sender from its long-lived Nova-signed **approval grant**, audience-bound
+  to the destination agent + skill, short TTL. Nova's gate verifies the
+  delegation chain before the destination agent sees anything.
 
-There are two kinds of agents:
+There are three kinds of agents:
 
 | Role | What they do | How they connect |
 |---|---|---|
 | **Sender** | Originates tasks (your Claude Code asking the bookstore for a price quote) | Uses `@nova/mcp-server` — no HTTP endpoint needed |
-| **Receiver** | Accepts delivered tasks from Nova (the bookstore's order agent) | Hosts an A2A operator webhook per `nova-protocol-spec.md §7` |
+| **Webhook receiver** | Accepts tasks via push to a hosted endpoint (the bookstore's order agent) | Hosts an A2A operator webhook per `nova-protocol-spec.md §7` |
+| **Broker receiver** | Accepts tasks via pull — no inbound HTTP, suitable for MCP-native runtimes and headless daemons | Runs `@nova/broker-receiver` (supervised daemon) or pulls interactively via `nova_next_task` from `@nova/mcp-server` |
 
-Most runtimes are senders. Receivers are the services you're invoking.
+Most runtimes are senders. Webhook receivers are services with a public HTTP
+surface; broker receivers are runtimes that can't (or won't) host a webhook —
+Nova holds their inbox and they claim tasks when ready, with push
+notifications over SSE so latency is ~100ms, not a poll cycle.
 
 ---
 
@@ -58,7 +64,7 @@ Most runtimes are senders. Receivers are the services you're invoking.
 ```bash
 npm install
 npm run generate:keys        # Ed25519 keypair for the gateway
-docker compose up -d         # a2a-server :3001, admin-api :3005, redis :6379
+docker compose up -d         # redis :6379, a2a-server :3001, gate-service, agent-connector, admin-api :3005, caddy :80/:8443
 ```
 
 ### 2. Create your galaxy and mint an invite
@@ -96,22 +102,48 @@ send tasks without speaking A2A directly.
 ### Tools exposed
 
 ```
+# Identity & onboarding
 nova_generate_identity     Ed25519 keypair + DID, stored at ~/.nova/agents/
-nova_whoami                active identity, tenant, UCAN status
-nova_accept_invite         decode and save an invite JWT
+nova_whoami                active identity, tenant, approval-grant status
+nova_inspect_invite        local decode of an invite JWT — no network, no consumption
+nova_accept_invite         save an invite locally (consumed by nova_register_agent)
 nova_register_agent        POST /register (consumes the invite)
-nova_check_registration    poll until operator approves, claim UCAN
-nova_renew_ucan            force UCAN refresh
-nova_ucan_status           cache inspection
+nova_check_registration    poll until operator approves, claim approval grant
+nova_rotate_key            rotate the agent's Ed25519 keypair (PoP-signed with old key)
+nova_renew_ucan            report grant status (no client-side refresh in the delegation model)
+nova_ucan_status           approval-grant cache inspection
+
+# Discovery & send
 nova_list_agents           discovery across all galaxies
 nova_get_agent_card        skill schemas for a specific agent
-nova_send_task             acquires per-destination UCAN + POSTs task
+nova_send_task             mint invocation token locally + POST task to destination
 nova_get_task_result       poll task state
-nova_create_tenant         operator-only (needs NOVA_ADMIN_TOKEN)
-nova_create_invite         operator-only
+
+# Broker-mode receive (no webhook)
+nova_next_task             long-poll for a task; claims with 5-min visibility
+nova_respond               ship TaskResult back (must respond before visibility expires)
+
+# Broker-mode sender reply collection
+nova_next_reply            long-poll for a TaskResult addressed to this agent as sender
+nova_ack_reply             clear in-flight state for a pulled reply
+
+# Push subscriptions (fallbacks if client can't speak MCP resources/subscribe)
+nova_watch_inbox           subscribe to nova://inbox
+nova_unwatch_inbox         unsubscribe
+nova_watch_replies         subscribe to nova://replies
+nova_unwatch_replies       unsubscribe
+nova_watch_task            subscribe to nova://tasks/{taskId}
+nova_unwatch_task          unsubscribe
+
+# Operator-only (requires NOVA_ADMIN_TOKEN)
+nova_create_tenant         create a galaxy
+nova_create_invite         mint an invite JWT
+nova_reissue_ucan          regenerate an approval grant after the claim window lapsed
 ```
 
-Resources: `nova://agents`, `nova://agents/{agentId}/card`
+Resources: `nova://agents`, `nova://agents/{agentId}/card`, `nova://inbox`
+(subscribable), `nova://replies` (subscribable), `nova://tasks/{taskId}`
+(subscribable).
 Prompts: `/nova_onboard`, `/nova_first_task`
 
 ### Claude Code
@@ -193,17 +225,21 @@ Claude calls:
     intent: "quote_book",
     params: { title: "Ficciones", author: "Jorge Luis Borges", condition: "used" }
   })
-    # Under the hood: MCP server does proof-of-possession to mint a UCAN
-    # narrowed to nova:tenant_dads:bookstore:skill:quote_book, caches it,
-    # POSTs the task with UCAN header. Nova gate validates, queues,
-    # delivers to bookstore operator webhook.
+    # Under the hood: MCP server mints a fresh invocation token locally —
+    # delegated from the agent's long-lived approval grant, audience-bound
+    # to nova:tenant_dads:bookstore:skill:quote_book, short TTL — and POSTs
+    # the task with the token in the UCAN header. Nova gate validates the
+    # full delegation chain, queues, delivers to bookstore operator webhook.
     → { taskId: "uuid", statusUrl: "...", streamUrl: "..." }
   nova_get_task_result({ targetAgentId: "bookstore", taskId: "uuid" })
     → { status: "completed", result: { price: "$18", condition: "good", ... } }
 ```
 
-The second time Claude Code sends to the bookstore, the cached UCAN is
-reused — no round trip to mint a new one until it drops below 20% lifetime.
+Every send mints a fresh invocation token locally — there is no per-
+destination cache and no round trip to Nova to get one. The credential that
+*is* cached is the long-lived approval grant that backs those tokens; when
+it nears expiry the operator runs `nova_reissue_ucan` and the agent picks up
+the fresh grant on its next `nova_check_registration` call.
 
 ---
 
@@ -215,9 +251,10 @@ reused — no round trip to mint a new one until it drops below 20% lifetime.
 | `@nova/a2a-server` | Wire-protocol ingestion, `POST /register`, `GET /register/status`, task submission, agent cards |
 | `@nova/gate-service` | Five-layer gate pipeline: trust tier, UCAN, schema, injection patterns, classifier |
 | `@nova/task-queue` | BullMQ queues backing async task ingress |
-| `@nova/agent-connector` | Workers that deliver approved tasks to destination operator webhooks |
-| `@nova/admin-api` | Operator-only admin endpoints: tenants, agents, trust registry, invites, UCAN issuance, audit, SSE `/admin/events` |
-| `@nova/mcp-server` | **MCP on-ramp for AI runtimes.** stdio MCP server exposing Nova operations as typed tools |
+| `@nova/agent-connector` | Workers that deliver approved tasks to destination operator webhooks (push mode) or into the broker inbox (pull mode) |
+| `@nova/broker-receiver` | Supervised daemon for broker-mode receivers — holds its own identity + approval grant, subscribes to `/inbox/stream`, runs pluggable handlers (`echo`, `claude-api`, …), ships with launchd/systemd templates |
+| `@nova/admin-api` | Operator-only admin endpoints: tenants, agents, trust registry, invites, UCAN issuance + reissue + rotate-key, quarantine, dead-letter, audit, SSE `/admin/events` |
+| `@nova/mcp-server` | **MCP on-ramp for AI runtimes.** stdio MCP server exposing Nova operations as typed tools, plus subscribable resources (`nova://inbox`, `nova://replies`, `nova://tasks/{id}`) for push notifications |
 | `@nova/operator-mock` | Test receiver for acceptance tests |
 
 ---
@@ -227,35 +264,100 @@ reused — no round trip to mint a new one until it drops below 20% lifetime.
 Operator endpoints (require `Authorization: Bearer $ADMIN_TOKEN`):
 
 ```
-POST    /admin/tenants                              create a galaxy
-GET     /admin/tenants                              list galaxies
-GET     /admin/tenants/:id                          tenant detail
-POST    /admin/tenants/:id/invites                  mint invite JWT (one-time)
-POST    /admin/tenants/:id/agents/:agentId/approve  approve pending agent + issue UCAN
-POST    /admin/tenants/:id/agents/:agentId/reject   reject pending agent
-GET     /admin/tenants/:id/audit                    audit events
-GET     /admin/events                               SSE stream: tenant/agent/task lifecycle
-...
+# Tenants & invites
+POST    /admin/tenants                                             create a galaxy
+GET     /admin/tenants                                             list galaxies
+GET     /admin/tenants/:id                                         tenant detail
+DELETE  /admin/tenants/:id                                         delete tenant
+POST    /admin/tenants/:id/invites                                 mint invite JWT (one-time)
+
+# Agents
+GET     /admin/agents                                              list agents across all tenants
+GET     /admin/tenants/:id/agents                                  list agents in tenant
+GET     /admin/tenants/:id/agents/:agentId                         agent detail
+POST    /admin/tenants/:id/agents/:agentId/approve                 approve + issue approval grant
+POST    /admin/tenants/:id/agents/:agentId/reject                  reject pending agent
+DELETE  /admin/tenants/:id/agents/:agentId                         deregister agent
+POST    /admin/tenants/:id/agents/:agentId/ucans/reissue           regenerate approval grant
+
+# Trust registry (per receiving agent)
+POST    /admin/tenants/:id/agents/:agentId/trust                   upsert trust entry
+GET     /admin/tenants/:id/agents/:agentId/trust                   list trust entries
+GET     /admin/tenants/:id/agents/:agentId/trust/:did              get trust entry
+DELETE  /admin/tenants/:id/agents/:agentId/trust/:did              revoke trust entry
+
+# UCAN inventory (operator-issued UCANs)
+POST    /admin/tenants/:id/ucans/issue                             issue a UCAN
+POST    /admin/tenants/:id/ucans/revoke                            revoke a UCAN by CID
+GET     /admin/tenants/:id/ucans                                   list UCANs
+
+# Quarantine (inbound tasks the gate held)
+GET     /admin/tenants/:id/agents/:agentId/quarantine              list quarantined tasks
+GET     /admin/tenants/:id/agents/:agentId/quarantine/stats        counts
+GET     /admin/tenants/:id/agents/:agentId/quarantine/:id          item detail
+POST    /admin/tenants/:id/agents/:agentId/quarantine/:id/release  release to inbox
+DELETE  /admin/tenants/:id/agents/:agentId/quarantine/:id          discard
+
+# Dead-letter (delivery failures)
+GET     /admin/tenants/:id/agents/:agentId/dead-letter             list dead-lettered tasks
+GET     /admin/tenants/:id/agents/:agentId/dead-letter/:id         item detail
+DELETE  /admin/tenants/:id/agents/:agentId/dead-letter/:id         discard
+
+# Confirmation queue (high-privilege operations awaiting operator approval)
+GET     /admin/tenants/:id/agents/:agentId/confirm-queue           list pending confirmations
+GET     /admin/tenants/:id/agents/:agentId/confirm-queue/:id       item detail
+POST    /admin/tenants/:id/agents/:agentId/confirm-queue/:id       approve
+DELETE  /admin/tenants/:id/agents/:agentId/confirm-queue/:id       reject
+
+# Audit
+GET     /admin/tenants/:id/audit                                   tenant-scoped audit events
+GET     /admin/tenants/:id/audit/:taskId                           task-scoped audit trail
+GET     /admin/audit                                               audit events across all tenants
+
+# Lifecycle stream (SSE, no auth — v1 trust model is localhost)
+GET     /admin/events                                              tenant/agent/task lifecycle
 ```
 
-Public endpoints on the a2a-server (no auth):
+Public endpoints on the a2a-server (no admin bearer auth — discovery, self-registration, or invocation-token-authorised):
 
 ```
-POST    /register                                   self-register (invite required)
-GET     /register/status/:tenantId/:agentId         poll approval, claim UCAN
-GET     /discover                                   list active agents
-GET     /agents/:agentId/.well-known/agent.json     A2A agent card
-POST    /agents/:agentId/tasks                      task submission (UCAN required)
-GET     /agents/:agentId/tasks/:taskId              task status
+# Self-registration & discovery
+POST    /register                                        self-register (invite required)
+GET     /register/status/:tenantId/:agentId              poll approval, claim approval grant
+GET     /discover                                        list active agents
+GET     /discover/:agentId                               agent detail
+GET     /agents/:agentId/.well-known/agent.json          A2A agent card
+GET     /agents/:agentId/health                          agent status + UCAN revocation probe
+
+# Task submission (UCAN invocation token required in Authorization header)
+POST    /agents/:agentId/tasks                           submit a task
+GET     /agents/:agentId/tasks/:taskId                   task status
+
+# Broker-mode receive (pull inbox, for agents without a webhook)
+GET     /agents/:agentId/inbox                           long-poll claim (next task)
+GET     /agents/:agentId/inbox/peek                      non-destructive snapshot
+GET     /agents/:agentId/inbox/stream                    SSE push notifications
+
+# Broker-mode reply collection (for senders without a replyTo webhook)
+GET     /agents/:agentId/replies                         long-poll claim (next reply)
+GET     /agents/:agentId/replies/peek                    non-destructive snapshot
+GET     /agents/:agentId/replies/stream                  SSE push notifications
+GET     /agents/:agentId/replies/:taskId                 reply detail
+POST    /agents/:agentId/replies/:taskId/ack             clear in-flight state
 ```
 
-Proof-of-possession UCAN operations (no admin auth, self-signed nonce):
+Proof-of-possession operations (authorised by signature, not bearer token):
 
 ```
-GET     /admin/tenants/:id/ucans/renew?did=&agentId=  request nonce
-POST    /admin/tenants/:id/ucans/renew                submit signed nonce, receive fresh UCAN
-POST    /admin/tenants/:id/ucans/request              request destination-scoped UCAN
+GET     /admin/tenants/:id/nonces?did=&agentId=                 request single-use nonce
+POST    /admin/tenants/:id/agents/:agentId/rotate-key           rotate keypair (PoP-signed with old key)
 ```
+
+Note: Nova dropped the notary-model UCAN endpoints (`/ucans/renew`,
+`/ucans/request`) when the delegation-chain model landed. Senders mint
+invocation tokens locally with their own Ed25519 key; the approval grant
+is the only Nova-signed UCAN in the chain, and grant renewal is operator-
+gated via `/agents/:agentId/ucans/reissue`.
 
 ---
 
@@ -278,10 +380,15 @@ protocol-facing code:
 ### Docker Compose (dev)
 
 ```bash
-docker compose up -d                 # a2a-server, admin-api, agent-connector, redis
+docker compose up -d                 # redis, a2a-server, gate-service, agent-connector, admin-api, caddy
 docker compose logs -f a2a-server
 docker compose down
 ```
+
+To run a broker-mode receiver, use the `@nova/broker-receiver` daemon
+alongside (or in place of) an A2A webhook receiver — it runs outside
+compose under launchd/systemd. See the broker-receiver package for
+install templates and handler configuration.
 
 ### Local processes (hot-reload)
 
@@ -305,15 +412,37 @@ on local PEM files.
 ## Testing
 
 ```bash
-npm test                             # unit tests (vitest)
-npm run test:acceptance              # milestone 1: basic pipeline
-npm run test:acceptance:m2           # milestone 2: gate pipeline
-npm run test:acceptance:m3           # milestone 3: admin API surface
-npm run test:acceptance:m4           # milestone 4: MCP onboarding (invite → approve → claim → discover)
+npm test                                    # unit tests (vitest)
+
+# Core milestones
+npm run test:acceptance                     # M1 — basic pipeline
+npm run test:acceptance:m2                  # M2 — gate pipeline
+npm run test:acceptance:m3                  # M3 — admin API surface
+npm run test:acceptance:m4                  # M4 — MCP onboarding (invite → approve → claim → discover)
+npm run test:acceptance:m5                  # M5 — trust registry + cross-tenant send
+
+# Broker mode (pull-based receive / reply)
+npm run test:acceptance:broker              # receive flow (next_task → respond)
+npm run test:acceptance:broker-reply        # sender-side reply collection (next_reply → ack)
+npm run test:acceptance:broker-receiver     # supervised daemon end-to-end
+
+# MCP push subscriptions
+npm run test:acceptance:mcp-push            # inbox push (nova://inbox)
+npm run test:acceptance:mcp-replies-push    # replies push (nova://replies)
+
+# Security hardening (P2 block)
+npm run test:acceptance:p2.7                # key rotation
+npm run test:acceptance:p2.8                # keychain backend
+npm run test:acceptance:p2.9                # opportunistic status check
+
+# Regressions
+npm run test:acceptance:invite-whitespace   # invite whitespace tolerance
 ```
 
 Acceptance tests require Redis, admin-api (`:3005`), and a2a-server
 (`:3001`) running, and `ADMIN_TOKEN` set (default `nova-admin-dev-token`).
+Broker tests additionally exercise `/inbox/stream` / `/replies/stream`
+SSE, so gate-service and agent-connector must also be up.
 
 ---
 
