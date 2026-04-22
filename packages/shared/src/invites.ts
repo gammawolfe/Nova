@@ -100,9 +100,16 @@ export async function createInvite(
  * expired token. The returned payload is safe to use for downstream validation
  * (agentIdHint match, tenant existence, duplicate-agent checks) before the
  * caller decides to consume. See `consumeInvite`.
+ *
+ * Whitespace is stripped before parsing — JWTs pasted through terminals can
+ * arrive with embedded newlines from line-wrapping. Base64url decoding
+ * tolerates whitespace silently, but crypto.verify signs the raw preimage
+ * byte-for-byte, so embedded newlines would flip an otherwise-valid signature
+ * to failure. Stripping up front makes the two paths agree.
  */
 export async function verifyInvite(token: string): Promise<InvitePayload> {
-  const parts = token.split('.');
+  const normalized = token.replace(/\s+/g, '');
+  const parts = normalized.split('.');
   if (parts.length !== 3) {
     throw Object.assign(new Error('Malformed invite token'), { status: 400 });
   }
