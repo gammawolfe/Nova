@@ -30,7 +30,12 @@ export function decodeInvitePayload(
   token: string,
   opts: { allowExpired?: boolean } = {},
 ): { tenantId: string; agentIdHint?: string; exp: number; jti: string; expired?: boolean } {
-  const parts = token.split('.');
+  // Strip whitespace before parsing — terminal line-wrapping can introduce
+  // newlines into a pasted JWT. Must stay symmetric with verifyInvite in
+  // packages/shared/src/invites.ts so client-side decode and server-side
+  // signature verification accept the same input.
+  const normalized = token.replace(/\s+/g, '');
+  const parts = normalized.split('.');
   if (parts.length !== 3) throw new Error('Malformed invite token');
   let payload: any;
   try { payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')); }
