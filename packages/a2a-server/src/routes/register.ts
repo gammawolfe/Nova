@@ -112,14 +112,22 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     // Step 4: agent must not already exist. Optimistic check; the Redis NX in
     // consumeInvite below is the authoritative arbiter for two concurrent
     // registrations that race past this point with the same invite.
+    // A record in 'deregistered' state is treated as absent — the agentId is
+    // free for re-registration, which will overwrite the stale config.
     const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
+    let priorDeregistered = false;
     try {
-      await fsp.access(configPath);
-      return res.status(409).json({
-        error: 'AGENT_EXISTS',
-        message: `Agent '${agentId}' is already registered in tenant '${tenantId}'`,
-        statusUrl: `/register/status/${tenantId}/${agentId}`,
-      });
+      const raw = await fsp.readFile(configPath, 'utf8');
+      const prior = JSON.parse(raw);
+      if (prior.status === 'deregistered') {
+        priorDeregistered = true;
+      } else {
+        return res.status(409).json({
+          error: 'AGENT_EXISTS',
+          message: `Agent '${agentId}' is already registered in tenant '${tenantId}'`,
+          statusUrl: `/register/status/${tenantId}/${agentId}`,
+        });
+      }
     } catch { /* agent doesn't exist — proceed */ }
 
     // Step 5: consume the invite atomically. All reversible validation is done;
@@ -135,6 +143,12 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     }
 
     const agentDir = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId);
+    if (priorDeregistered) {
+      // Wipe the prior agent's on-disk state so a new identity doesn't inherit
+      // stale trust entries, dead-letter items, or confirm-queue tasks from the
+      // previous lifetime under this agentId.
+      await fsp.rm(agentDir, { recursive: true, force: true });
+    }
     await Promise.all(
       ['trust-registry', 'quarantine', 'dead-letter', 'confirm-queue'].map(sub =>
         fsp.mkdir(path.join(agentDir, sub), { recursive: true })
@@ -179,6 +193,49 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     logger.error({ err, tenantId, agentId }, 'Failed to register agent');
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Registration failed' });
   }
+});
+
+/**
+ * POST /register/verify-invite — signature + tenant-existence check, no consumption.
+ *
+ * Lets MCP clients validate an invite before writing it to local state, which
+ * prevents stale or mistyped tokens from corrupting the joined-tenant config.
+ * Returns the decoded payload on success; 4xx with the usual error codes
+ * (INVITE_INVALID, TENANT_NOT_FOUND) otherwise. Rate-limited the same as POST /.
+ */
+registerRouter.post('/verify-invite', async (req: Request, res: Response) => {
+  const senderIp = req.ip ?? '0.0.0.0';
+  if (!checkRateLimit(senderIp)) {
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({ error: 'RATE_LIMITED' });
+  }
+
+  const token = typeof req.body?.invite === 'string' ? req.body.invite : null;
+  if (!token) return res.status(400).json({ error: 'INVITE_INVALID', message: 'invite field required' });
+
+  let payload;
+  try {
+    payload = await verifyInvite(token);
+  } catch (err: any) {
+    return res.status(err.status ?? 400).json({ error: 'INVITE_INVALID', message: err.message });
+  }
+
+  const tenantConfigPath = path.join(DATA_ROOT, 'tenants', payload.tenantId, 'tenant.json');
+  try {
+    await fsp.access(tenantConfigPath);
+  } catch {
+    return res.status(404).json({
+      error: 'TENANT_NOT_FOUND',
+      message: `Tenant ${payload.tenantId} does not exist on this Nova`,
+    });
+  }
+
+  res.json({
+    tenantId: payload.tenantId,
+    agentIdHint: payload.agentIdHint,
+    exp: payload.exp,
+    jti: payload.jti,
+  });
 });
 
 /**
