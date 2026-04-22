@@ -14,7 +14,8 @@ Invite schema, lifetime rules, and one-time-use semantics: `packages/shared/src/
 
 ```bash
 ADMIN=my-secure-admin-token-12345
-TENANT=tenant_727c25261efa   # Wolfe Dev
+TENANT=<your-tenant-id>      # e.g. tenant_496bdb38306a — look up with:
+                             # curl -s http://127.0.0.1:3005/admin/tenants -H "Authorization: Bearer $ADMIN"
 
 curl -s -X POST "http://127.0.0.1:3005/admin/tenants/$TENANT/invites" \
   -H "Authorization: Bearer $ADMIN" \
@@ -85,7 +86,7 @@ Hermes should invoke the canonical `/nova_onboard` prompt — full script lives 
 
 Do **not** pass `operatorUrl` — its absence is what makes this a broker-mode registration (see `packages/a2a-server/src/routes/register.ts` line 64 and `packages/shared/src/broker-config.ts` for the receiver semantics).
 
-At the end of the ceremony, `nova_whoami` should show a cached self-UCAN scoped `nova:tenant_727c25261efa:hermes-agent:skill:*` with `can: invoke`.
+At the end of the ceremony, `nova_whoami` should show a cached `grant` object with `expiresAt` and `lifetimeRemaining` populated. This is the Nova-signed **approval grant** — a tenant-scoped root (`att: [{ with: "nova:<tenantId>:*", can: "invoke" }]`) delegated to the agent's DID. Per-destination narrowing happens at send time when `nova_send_task` mints a short-lived invocation token locally (chain-rooted at the grant). See `docs/superpowers/specs/2026-04-21-sender-signed-ucans.md` for the full token shape.
 
 ---
 
@@ -99,40 +100,53 @@ If the destination is itself a broker-mode agent (like `claude-code`), you may o
 
 ## 5. Receiving tasks (broker mode)
 
-This is the half of the workflow the default prompts don't cover. Design and rationale: `docs/superpowers/specs/2026-04-19-mcp-broker-receiver-design.md`. Reply-inbox internals (pulled-into-in-flight, visibility timeouts, DLQ reclaim): `docs/superpowers/specs/2026-04-21-broker-reply-inbox.md` and `packages/shared/src/broker-config.ts`.
+This is the half of the workflow the default prompts don't cover. Design and rationale: `docs/superpowers/specs/2026-04-19-mcp-broker-receiver-design.md`. Reply-inbox internals (pulled-into-in-flight, visibility timeouts, DLQ reclaim): `docs/superpowers/specs/2026-04-21-broker-reply-inbox.md` and `packages/shared/src/broker-config.ts`. Push-subscription design (SSE, MCP resources): `docs/superpowers/specs/2026-04-22-mcp-push-subscriptions.md`.
+
+Two ways to run the claim loops — pick one:
+
+- **In-process (this doc, §5.1–5.3).** Hermes drives the loops itself via the MCP tools. Best when Hermes is a long-running runtime that can host a subscription + handler.
+- **Supervised daemon (`@nova/broker-receiver`).** A separate process holds the identity + approval grant, subscribes to `/inbox/stream`, and runs pluggable handlers. Good when Hermes is ephemeral or you'd rather keep receive plumbing out of the model loop. See `docs/superpowers/specs/2026-04-21-broker-receiver-daemon.md` and `packages/broker-receiver/README.md` for launchd/systemd templates. The two modes are mutually exclusive per `agentId`.
 
 ### 5.1 Inbound task loop (Hermes as recipient)
 
-Keep a long-poll running whenever Hermes is up:
+Prefer push; fall back to long-poll only if your MCP client can't subscribe.
+
+**Push (recommended).** `nova_watch_inbox` subscribes to `nova://inbox`; Nova streams notifications over SSE (`/agents/:agentId/inbox/stream`) with ~100 ms latency. On each notification, call `nova_next_task({ waitMs: 0 })` to claim.
+
+1. `nova_watch_inbox()` once on startup. (Tool def: `packages/mcp-server/src/tools.ts` line 813.)
+2. On each notification: `nova_next_task({ waitMs: 0 })` → `{ task, visibleUntil }` or `null`.
+3. Handle the task.
+4. `nova_respond({ taskId, result })` **before** `visibleUntil` (5 min default) — idempotent; a second call returns `{ status: "already_completed" }`.
+5. On shutdown: `nova_unwatch_inbox()`.
+
+**Long-poll (fallback).** Same claim/respond contract, just drive it yourself:
 
 1. `nova_next_task({ waitMs: 30000 })` — returns `{ task, visibleUntil }` or `null` on timeout.
-   - Tool definition: `packages/mcp-server/src/tools.ts` line 600.
-   - HTTP route it proxies: `packages/a2a-server/src/routes/inbox.ts` → `GET /agents/:agentId/inbox`.
-2. Handle the task (call the skill's handler in Hermes).
-3. `nova_respond({ taskId, result })` **before** `visibleUntil` (5 min default) or the task is reclaimed and redelivered.
-   - Tool: `packages/mcp-server/src/tools.ts` line 707.
-   - Idempotent: a second `nova_respond` with the same `taskId` returns `{ status: "already_completed" }`.
-4. Loop back to step 1.
+2–4 as above, then loop.
 
-Default visibility timeout, reclaim cadence, and DLQ ceiling: `packages/shared/src/broker-config.ts` (`BROKER_VISIBILITY_TIMEOUT_MS`, `BROKER_RECLAIM_CEILING`, `BROKER_MAX_WAIT_MS`).
+Tools: `nova_next_task` at `packages/mcp-server/src/tools.ts` line 589, `nova_respond` at line 687. HTTP route both paths share: `packages/a2a-server/src/routes/inbox.ts` → `GET /agents/:agentId/inbox`. Default visibility timeout, reclaim cadence, and DLQ ceiling: `packages/shared/src/broker-config.ts` (`BROKER_VISIBILITY_TIMEOUT_MS`, `BROKER_RECLAIM_CEILING`, `BROKER_MAX_WAIT_MS`).
 
 ### 5.2 Reply-inbox loop (Hermes as sender, collecting replies without a webhook)
 
-When Hermes sends a task and omits `replyTo`, the result lands in its reply inbox.
+When Hermes sends a task and omits `replyTo`, the result lands in its reply inbox. Same push-first pattern:
 
-1. `nova_next_reply({ waitMs: 30000 })` — `{ taskId, result, visibleUntil } | null`.
-2. Act on the result.
-3. `nova_ack_reply({ taskId })` — idempotent; second call returns `already_acked`.
+**Push.** `nova_watch_replies()` subscribes to `nova://replies`. On each notification, call `nova_next_reply({ waitMs: 0 })`, then `nova_ack_reply({ taskId })`.
+
+**Long-poll fallback.** `nova_next_reply({ waitMs: 30000 })` → `{ taskId, result, visibleUntil } | null`; then `nova_ack_reply({ taskId })` (idempotent; second call returns `already_acked`).
 
 The stored `TaskResult` stays queryable via `nova_get_task_result` for 24 h after ack (configurable — `BROKER_REPLY_RESULT_TTL_SECONDS`).
+
+### 5.3 Single-task watches (optional)
+
+If Hermes wants to react to a specific outbound task's lifecycle without the reply inbox, `nova_watch_task({ taskId })` subscribes to `nova://tasks/{taskId}` — status transitions stream over `/tasks/:taskId/stream` (see `packages/a2a-server/src/stream.ts`). Unsubscribe with `nova_unwatch_task({ taskId })`.
 
 ---
 
 ## 6. Lifecycle / maintenance
 
-- **UCAN renewal.** Self-UCAN expires ~30 days after claim. Hermes should call `nova_renew_ucan` when `nova_ucan_status` reports < 20 % lifetime remaining. Renewal uses a proof-of-possession nonce; route contract in `packages/admin-api/src/routes` (see `/admin/tenants/:id/ucans/renew`).
-- **Key rotation.** See `scripts/rotate-keys.ts` and `scripts/acceptance-test-p2.7-rotation.ts` for the supported rotation ceremony.
-- **Revocation.** Operator triggers via the admin UI / admin API; Hermes sees the next UCAN refresh fail with a clear error code. Trust-registry revocation paths: `packages/admin-api/src/routes/trust.ts`.
+- **Approval-grant renewal.** The grant expires ~30 days after approval. Under the sender-signed-UCAN model (`docs/superpowers/specs/2026-04-21-sender-signed-ucans.md`), there is no client-side renewal — per-request invocation tokens are minted locally on every `nova_send_task`, and only the long-lived grant is Nova-signed. `nova_ucan_status` reports the grant's expiry and lifetime remaining; when it drops low, ask the operator to run `nova_reissue_ucan` (requires `NOVA_ADMIN_TOKEN`). Hermes then re-claims via `nova_check_registration`. `nova_renew_ucan` still exists but is now a status-report tool — it cannot refresh anything on its own.
+- **Key rotation.** `nova_rotate_key` handles the canonical flow: generate a fresh Ed25519 keypair, prove possession of the old key (nonce signed over `nonce|newDid|newPublicKey`), swap the registered pubkey+DID on Nova. All grants issued to the old DID in this tenant are revoked; a fresh approval grant is minted for the new DID. The old identity file is preserved at `{agentId}.json.rotated-{ISO}.bak` for audit. Cross-tenant trust that referenced the old DID must be re-seeded by the counterparty operator. Also see `scripts/rotate-keys.ts` and `scripts/acceptance-test-p2.7-rotation.ts`.
+- **Revocation.** Operator triggers via the admin UI / admin API; the grant's CID is added to the revocation set and every subsequent invocation token fails chain verification at the gate. Trust-registry revocation paths: `packages/admin-api/src/routes/trust.ts`.
 
 ---
 

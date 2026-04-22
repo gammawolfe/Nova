@@ -267,3 +267,80 @@ documented-as-manual since the original broker-receiver spec.
 3. **R3 as needed.** When a specific handler request lands (someone wants
    webhook-forward for their existing monitoring stack, or shell-exec for
    a local automation), take it then.
+
+---
+
+## Operator UX & packaging (Multica comparison)
+
+Context: 2026-04-22 comparison against Multica (github.com/multica-ai/multica)
+surfaced packaging and operator-UX ideas worth borrowing. None touch Nova's
+security model — they're strictly about making Nova easier to install, run,
+and operate. Candidates only; discuss before committing. Each item below is
+scoped to ship as its own PR.
+
+### Candidates — not committed
+
+- [ ] **C1. First-class operator CLI (`nova`).** Replace the curl-to-admin-api
+  examples in the README with a real CLI. Commands: `nova setup`, `nova tenant
+  create|list`, `nova invite mint`, `nova agent list|approve|reject`, `nova
+  audit tail`, `nova events` (SSE stream from `/admin/events`). Thin wrapper
+  over the admin-api HTTP surface the mcp-server already uses. Lives in a new
+  `packages/cli/` workspace. ~400-600 LOC.
+
+- [ ] **C2. Homebrew tap + install script.** `brew install nova/tap/nova`
+  plus a `curl | bash` fallback and a PowerShell variant for Windows. Ships
+  the CLI from C1 and any host-daemon from C3. Requires prebuilt binaries via
+  a release workflow (goreleaser-equivalent for a Node CLI — `pkg` or `bun
+  build --compile`). Blocked on C1.
+
+- [ ] **C3. Multi-planet host daemon.** A host running N agents today runs N
+  mcp-server processes, each with its own on-disk key, UCAN cache, and SSE
+  subscription. A single local daemon supervising all planets on the host
+  would share: key backend, UCAN cache + lock, subscriptions, a loopback
+  `/health`. Distinct from the broker-receiver daemon (which runs *one*
+  identity persistently); this groups *many* identities under one supervisor.
+  Needs a design spec first: identity scoping, per-planet revocation, how it
+  coexists with broker-receiver on the same host. ~300 LOC + spec.
+
+- [ ] **C4. "Host" as a first-class audit object.** Even with C3 in place,
+  operators benefit from a view of *"these 4 planets all live on my laptop"*
+  for audit and batch revocation. Add a `hostId` field to registered agents
+  (client-generated, stable across restarts), surfaced in the admin UI and
+  audit stream. Trust stays per-agent; this is an ergonomics layer on top.
+  ~150 LOC. Depends on C3.
+
+- [ ] **C5. Dedicated self-host story.** Split today's `docker-compose.yml`
+  into `docker-compose.dev.yml` (source-mounted, hot-reload) and
+  `docker-compose.selfhost.yml` (prebuilt GHCR images, no source mounts).
+  Publish images on tagged releases via a GHA workflow. Write `SELF_HOSTING.md`
+  alongside `docs/operator-notes.md` — operator-notes is for people running
+  Nova day-to-day, SELF_HOSTING is for first-time installs.
+
+- [ ] **C6. `make dev` bootstrap.** Single command that: creates `.env` from
+  `.env.example`, runs `npm install`, runs `npm run generate:keys`, starts
+  Redis via `docker compose up -d`, and runs admin-api + a2a-server +
+  agent-connector under `concurrently`. Replaces the 4-step Quick Start. If
+  C1 ships first, reuse `nova setup` inside the Makefile target. ~50 LOC
+  Makefile + a small `scripts/dev-up.sh`.
+
+### Deliberately not copied from Multica (named so we don't re-debate)
+
+- **Issues / boards / chat UI.** Orchestration is a layer above Nova, not
+  inside it. If someone wants a board, they build a product on top of the
+  admin API.
+- **WebSocket streaming.** SSE was the right call — see nova-overview.md.
+- **Postgres + pgvector.** BullMQ + Redis fits Nova's workload; pgvector
+  solves a problem Nova doesn't have.
+- **Free-text task ingress.** Directly violates the closed-intent +
+  structured-ingress principle. This is the architectural line.
+
+### Suggested sequencing
+
+1. **C5 first.** Pure docs + compose-file reorg; unblocks anyone running Nova
+   outside a repo checkout. No code dependencies.
+2. **C1 second.** Operator CLI is the biggest daily-UX win and has no new
+   dependencies. Replaces most curl examples in the README.
+3. **C6 after C1.** Bootstrap can reuse `nova setup` once it exists.
+4. **C2 after C1.** Homebrew needs a shippable binary.
+5. **C3 + C4 later.** Design spec required; revisit when someone's actually
+   running >2 planets on one host.
