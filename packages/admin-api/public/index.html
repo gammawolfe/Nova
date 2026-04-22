@@ -215,10 +215,14 @@
                   </div>
                 </div>
 
-                <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px">
+                <div class="nova-row" style="gap:14px;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;align-items:center">
                   <span class="nova-capability-indicator" :class="a.capabilities?.streaming && 'is-on'">streaming</span>
                   <span class="nova-capability-indicator" :class="a.capabilities?.pushNotifications && 'is-on'">push</span>
                   <span class="nova-capability-indicator" :class="a.capabilities?.stateTransitionHistory && 'is-on'">history</span>
+                  <span class="nova-pill"
+                        :class="isBrokerAgent(a) ? 'nova-pill-active' : ''"
+                        :style="!isBrokerAgent(a) ? 'color:var(--text-muted);border-color:var(--border)' : ''"
+                        x-text="isBrokerAgent(a) ? 'broker' : 'direct'"></span>
                 </div>
               </div>
             </template>
@@ -288,32 +292,75 @@
           <div class="nova-row" style="gap:12px;margin-bottom:20px;flex-wrap:wrap">
             <select class="nova-input" style="width:auto;min-width:200px" x-model="auditFilters.event" @change="loadAuditEvents()">
               <option value="">All event types</option>
-              <option value="task_started">task_started</option>
-              <option value="task_completed">task_completed</option>
-              <option value="task_expired">task_expired</option>
-              <option value="message_received">message_received</option>
-              <option value="message_parse_failed">message_parse_failed</option>
-              <option value="gate_503">gate_503</option>
-              <option value="ucan_verified">ucan_verified</option>
-              <option value="ucan_failed">ucan_failed</option>
-              <option value="actor_resolved">actor_resolved</option>
-              <option value="actor_unknown">actor_unknown</option>
-              <option value="schema_valid">schema_valid</option>
-              <option value="schema_invalid">schema_invalid</option>
-              <option value="injection_clear">injection_clear</option>
-              <option value="injection_pattern_match">injection_pattern_match</option>
-              <option value="injection_detected">injection_detected</option>
-              <option value="injection_suspected">injection_suspected</option>
-              <option value="injection_pattern_clear">injection_pattern_clear</option>
-              <option value="classifier_unavailable">classifier_unavailable</option>
-              <option value="confirm_requested">confirm_requested</option>
-              <option value="confirm_approved">confirm_approved</option>
-              <option value="confirm_denied">confirm_denied</option>
-              <option value="confirm_timeout">confirm_timeout</option>
-              <option value="delivery_success">delivery_success</option>
-              <option value="delivery_transient_failure">delivery_transient_failure</option>
-              <option value="delivery_permanent_failure">delivery_permanent_failure</option>
-              <option value="dead_letter_written">dead_letter_written</option>
+              <optgroup label="Task lifecycle">
+                <option value="task_queued">task_queued</option>
+                <option value="task_classification_started">task_classification_started</option>
+                <option value="task_classification_complete">task_classification_complete</option>
+                <option value="task_quarantined">task_quarantined</option>
+                <option value="task_dropped">task_dropped</option>
+                <option value="task_started">task_started</option>
+                <option value="task_broker_queued">task_broker_queued</option>
+                <option value="task_completed">task_completed</option>
+                <option value="task_failed">task_failed</option>
+                <option value="task_error">task_error</option>
+                <option value="task_expired">task_expired</option>
+              </optgroup>
+              <optgroup label="Messaging &amp; gating">
+                <option value="message_received">message_received</option>
+                <option value="message_parse_failed">message_parse_failed</option>
+                <option value="gate_503">gate_503</option>
+              </optgroup>
+              <optgroup label="UCAN &amp; actor">
+                <option value="ucan_verified">ucan_verified</option>
+                <option value="ucan_failed">ucan_failed</option>
+                <option value="ucan_renewed">ucan_renewed</option>
+                <option value="ucan_renewal_failed">ucan_renewal_failed</option>
+                <option value="key_rotation_detected">key_rotation_detected</option>
+                <option value="actor_resolved">actor_resolved</option>
+                <option value="actor_unknown">actor_unknown</option>
+              </optgroup>
+              <optgroup label="Schema &amp; injection">
+                <option value="schema_valid">schema_valid</option>
+                <option value="schema_invalid">schema_invalid</option>
+                <option value="agent_output_schema_violation">agent_output_schema_violation</option>
+                <option value="injection_clear">injection_clear</option>
+                <option value="injection_pattern_match">injection_pattern_match</option>
+                <option value="injection_detected">injection_detected</option>
+                <option value="injection_suspected">injection_suspected</option>
+                <option value="injection_pattern_clear">injection_pattern_clear</option>
+                <option value="classifier_unavailable">classifier_unavailable</option>
+              </optgroup>
+              <optgroup label="Confirmation">
+                <option value="confirm_requested">confirm_requested</option>
+                <option value="confirm_approved">confirm_approved</option>
+                <option value="confirm_denied">confirm_denied</option>
+                <option value="confirm_timeout">confirm_timeout</option>
+              </optgroup>
+              <optgroup label="Delivery &amp; dead letter">
+                <option value="delivery_success">delivery_success</option>
+                <option value="delivery_transient_failure">delivery_transient_failure</option>
+                <option value="delivery_permanent_failure">delivery_permanent_failure</option>
+                <option value="delivery_exhausted">delivery_exhausted</option>
+                <option value="dead_letter_written">dead_letter_written</option>
+              </optgroup>
+              <optgroup label="Broker replies">
+                <option value="reply_broker_queued">reply_broker_queued</option>
+                <option value="reply_delivered">reply_delivered</option>
+                <option value="reply_acked">reply_acked</option>
+                <option value="reply_reclaimed">reply_reclaimed</option>
+                <option value="reply_dead_lettered">reply_dead_lettered</option>
+                <option value="reply_sender_inactive">reply_sender_inactive</option>
+              </optgroup>
+              <optgroup label="Agent lifecycle">
+                <option value="agent_registered">agent_registered</option>
+                <option value="agent_approved">agent_approved</option>
+                <option value="agent_rejected">agent_rejected</option>
+                <option value="agent_discovered">agent_discovered</option>
+              </optgroup>
+              <optgroup label="System">
+                <option value="quarantine_full">quarantine_full</option>
+                <option value="redis_unavailable">redis_unavailable</option>
+              </optgroup>
             </select>
 
             <select class="nova-input" style="width:auto;min-width:180px" x-model="auditFilters.tenantId">
@@ -571,6 +618,44 @@
             <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.pushNotifications && 'is-on'">push</span>
             <span class="nova-capability-indicator" :class="selectedAgent?.capabilities?.stateTransitionHistory && 'is-on'">history</span>
           </div>
+        </div>
+
+        <!-- Broker inbox status -->
+        <div style="margin-bottom:16px">
+          <div class="nova-label" style="margin-bottom:8px">mode</div>
+          <div x-show="!selectedAgentBroker && !selectedAgentBrokerError" class="nova-subtitle" style="margin:0;font-size:12px">Loading…</div>
+          <div x-show="selectedAgentBrokerError" class="nova-subtitle" style="margin:0;font-size:12px;color:var(--status-error)" x-text="selectedAgentBrokerError"></div>
+          <template x-if="selectedAgentBroker">
+            <div>
+              <span class="nova-pill"
+                    :class="selectedAgentBroker.mode === 'broker' ? 'nova-pill-active' : ''"
+                    :style="selectedAgentBroker.mode !== 'broker' ? 'color:var(--text-muted);border-color:var(--border)' : ''"
+                    x-text="selectedAgentBroker.mode"></span>
+              <template x-if="selectedAgentBroker.mode === 'broker'">
+                <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                  <div style="padding:10px;border:1px solid var(--border);border-radius:8px">
+                    <div class="nova-label" style="margin-bottom:6px">task inbox</div>
+                    <div style="font-size:11px;color:var(--text-secondary);line-height:1.7">
+                      <div>depth: <span class="nova-mono" x-text="selectedAgentBroker.inbox.depth"></span></div>
+                      <div>inflight: <span class="nova-mono" x-text="selectedAgentBroker.inbox.inflightCount"></span></div>
+                      <div>oldest: <span class="nova-mono" x-text="formatAgeMs(selectedAgentBroker.inbox.oldestInflightAgeMs)"></span></div>
+                    </div>
+                  </div>
+                  <div style="padding:10px;border:1px solid var(--border);border-radius:8px">
+                    <div class="nova-label" style="margin-bottom:6px">reply inbox</div>
+                    <div style="font-size:11px;color:var(--text-secondary);line-height:1.7">
+                      <div>depth: <span class="nova-mono" x-text="selectedAgentBroker.replyInbox.depth"></span></div>
+                      <div>inflight: <span class="nova-mono" x-text="selectedAgentBroker.replyInbox.inflightCount"></span></div>
+                      <div>oldest: <span class="nova-mono" x-text="formatAgeMs(selectedAgentBroker.replyInbox.oldestInflightAgeMs)"></span></div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div style="margin-top:8px">
+                <button class="nova-input" style="width:auto;padding:6px 12px;font-size:11px" @click="loadSelectedBrokerStatus()">refresh</button>
+              </div>
+            </div>
+          </template>
         </div>
       </aside>
 
