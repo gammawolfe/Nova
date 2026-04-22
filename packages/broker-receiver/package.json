@@ -1,0 +1,32 @@
+{
+  "name": "@nova/broker-receiver",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "bin": {
+    "broker-receiver": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js run",
+    "dev": "tsx src/cli.ts run",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@nova/mcp-server": "*",
+    "@nova/shared": "*",
+    "undici": "^6.19.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./src/*": "./dist/*.js"
+  }
+}

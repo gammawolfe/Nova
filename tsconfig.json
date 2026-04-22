@@ -8,6 +8,7 @@
     { "path": "packages/agent-connector" },
     { "path": "packages/admin-api" },
     { "path": "packages/operator-mock" },
-    { "path": "packages/mcp-server" }
+    { "path": "packages/mcp-server" },
+    { "path": "packages/broker-receiver" }
   ]
 }
