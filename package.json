@@ -21,6 +21,8 @@
     "test:acceptance:broker": "tsx scripts/acceptance-test-broker.ts",
     "test:acceptance:broker-reply": "tsx scripts/acceptance-test-broker-reply.ts",
     "test:acceptance:mcp-push": "tsx scripts/acceptance-test-mcp-push.ts",
+    "test:acceptance:broker-receiver": "tsx scripts/acceptance-test-broker-receiver.ts",
+    "broker-receiver:dev": "tsx packages/broker-receiver/src/cli.ts",
     "test:acceptance:p2.9": "tsx scripts/acceptance-test-p2.9-status-check.ts",
     "test:acceptance:p2.7": "tsx scripts/acceptance-test-p2.7-rotation.ts",
     "test:acceptance:p2.8": "tsx scripts/acceptance-test-p2.8-keychain.ts",
