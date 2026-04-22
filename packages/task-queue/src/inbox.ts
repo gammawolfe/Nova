@@ -20,8 +20,20 @@ export function inflightKey(ctx: TenantContext): string {
   return `nova:inflight:${ctx.tenantId}:${ctx.agentId}`;
 }
 
+export function inboxNotifyChannel(ctx: TenantContext): string {
+  return `nova:inbox-notify:${ctx.tenantId}:${ctx.agentId}`;
+}
+
+export function inboxSeqKey(ctx: TenantContext): string {
+  return `nova:inbox-seq:${ctx.tenantId}:${ctx.agentId}`;
+}
+
 /** Set of "tenantId:agentId" pairs that have at least one broker-mode agent. */
 export const BROKER_AGENTS_SET = 'nova:broker-agents';
+
+// Matches task-events TTL in task-queue/src/index.ts. The seq counter must not
+// outlive the inbox data it numbers.
+const INBOX_SEQ_TTL_SECONDS = 60 * 60 * 24;
 
 function memberKey(ctx: TenantContext): string {
   return `${ctx.tenantId}:${ctx.agentId}`;
@@ -33,17 +45,42 @@ export interface InflightEntry {
   taskId: string;
   task: QueuedTask;
   reclaimCount: number;
+  // Monotonic per-(tenant,agent) sequence assigned at enqueue. Used as the
+  // SSE `id:` value so resuming subscribers can skip already-delivered
+  // notifications via Last-Event-ID. Absent on entries enqueued by
+  // pre-push-subscriptions builds; consumers must tolerate `undefined`.
+  seq?: number;
+}
+
+export interface InboxNotification {
+  seq: number;
+  taskId: string;
+  intent: string;
+  enqueuedAt: string;
 }
 
 /**
  * Push a task onto the agent's inbox and register the agent as a broker
- * participant (used by the reclaim worker's iteration).
+ * participant (used by the reclaim worker's iteration). Also publishes a
+ * best-effort notification on the per-agent notify channel so push
+ * subscribers can react without long-polling. The inbox list remains the
+ * durable store — a missed notification is recoverable via LRANGE on
+ * reconnect (see packages/a2a-server/src/routes/inbox-stream.ts).
  */
 export async function enqueue(ctx: TenantContext, task: QueuedTask): Promise<void> {
-  const entry: InflightEntry = { taskId: task.taskId, task, reclaimCount: 0 };
+  const seq = await redis.incr(inboxSeqKey(ctx));
+  const entry: InflightEntry = { taskId: task.taskId, task, reclaimCount: 0, seq };
+  const notification: InboxNotification = {
+    seq,
+    taskId: task.taskId,
+    intent: task.intent,
+    enqueuedAt: new Date().toISOString(),
+  };
   await redis.pipeline()
+    .expire(inboxSeqKey(ctx), INBOX_SEQ_TTL_SECONDS)
     .lpush(inboxKey(ctx), JSON.stringify(entry))
     .sadd(BROKER_AGENTS_SET, memberKey(ctx))
+    .publish(inboxNotifyChannel(ctx), JSON.stringify(notification))
     .exec();
 }
 
@@ -90,6 +127,29 @@ export async function pull(
   await redis.zadd(inflightKey(ctx), visibleUntilMs, JSON.stringify(inflight));
 
   return { task: entry.task, visibleUntil: new Date(visibleUntilMs) };
+}
+
+/**
+ * Non-destructive snapshot of the inbox, newest-first (LPUSH head). Used by
+ * the peek HTTP endpoint and by the SSE stream's replay path. Does not claim
+ * tasks — visibility state is unchanged.
+ *
+ * Returned entries include the `seq` written at enqueue time (absent on
+ * entries written by older builds).
+ */
+export async function list(ctx: TenantContext): Promise<InflightEntry[]> {
+  const raws = await redis.lrange(inboxKey(ctx), 0, -1);
+  const entries: InflightEntry[] = [];
+  for (const raw of raws) {
+    try {
+      const entry: InflightEntry = JSON.parse(raw);
+      if (entry.taskId && entry.task) entries.push(entry);
+    } catch {
+      // malformed entry — skip; pull() logs and drops the same way
+      continue;
+    }
+  }
+  return entries;
 }
 
 /** Result of calling respond. */
@@ -227,5 +287,6 @@ export async function forgetBrokerAgent(ctx: TenantContext): Promise<void> {
     .srem(BROKER_AGENTS_SET, memberKey(ctx))
     .del(inboxKey(ctx))
     .del(inflightKey(ctx))
+    .del(inboxSeqKey(ctx))
     .exec();
 }
