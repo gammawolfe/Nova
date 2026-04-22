@@ -61,7 +61,7 @@ async function getHealth(
   return response;
 }
 
-export function registerTools(_server: McpServer): void {
+export function registerTools(_server: McpServer, subscriptions?: import('./subscriptions.js').SubscriptionManager): void {
   // Cast to any: the MCP SDK's zod-compat generics blow TypeScript's inference depth
   // when combined with nested z.object/z.array/z.record. Runtime zod validation still runs
   // against whatever schemas we pass, so type-safety is preserved at the boundary.
@@ -798,4 +798,83 @@ export function registerTools(_server: McpServer): void {
       return ok(res);
     },
   );
+
+  // ── Push subscriptions ───────────────────────────────────────────────────
+  //
+  // Fallback surface for MCP clients that don't implement resources/subscribe.
+  // Semantically identical — each watch tool opens a backing SSE stream and
+  // emits notifications/resources/updated on new events. Clients that do
+  // implement resources/subscribe should prefer that path and ignore these.
+
+  if (subscriptions) {
+    const subs = subscriptions;
+
+    server.registerTool(
+      'nova_watch_inbox',
+      {
+        title: 'Subscribe to inbox notifications',
+        description:
+          'Opens a push stream for this agent\'s inbox. On each new task, an MCP notifications/resources/updated is emitted for nova://inbox. Notification is a hint — claim still happens via nova_next_task. Idempotent: calling twice keeps the single underlying stream.',
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          await subs.subscribe('nova://inbox');
+          return ok({ status: 'subscribed', uri: 'nova://inbox' });
+        } catch (e: any) {
+          return err(`Subscribe failed: ${e.message}`);
+        }
+      },
+    );
+
+    server.registerTool(
+      'nova_unwatch_inbox',
+      {
+        title: 'Stop inbox notifications',
+        description: 'Closes the backing stream for nova://inbox. Idempotent.',
+        inputSchema: {},
+      },
+      async () => {
+        await subs.unsubscribe('nova://inbox');
+        return ok({ status: 'unsubscribed', uri: 'nova://inbox' });
+      },
+    );
+
+    server.registerTool(
+      'nova_watch_task',
+      {
+        title: 'Subscribe to task-state notifications',
+        description:
+          'Opens a push stream for a specific task. On every state change, an MCP notifications/resources/updated is emitted for nova://tasks/{taskId}. Stream closes when the task reaches a terminal state (completed / failed / canceled).',
+        inputSchema: {
+          taskId: z.string().min(1).describe('Task ID returned from nova_send_task.'),
+        },
+      },
+      async ({ taskId }: { taskId: string }) => {
+        const uri = `nova://tasks/${taskId}`;
+        try {
+          await subs.subscribe(uri);
+          return ok({ status: 'subscribed', uri });
+        } catch (e: any) {
+          return err(`Subscribe failed: ${e.message}`);
+        }
+      },
+    );
+
+    server.registerTool(
+      'nova_unwatch_task',
+      {
+        title: 'Stop task-state notifications',
+        description: 'Closes the backing stream for nova://tasks/{taskId}. Idempotent.',
+        inputSchema: {
+          taskId: z.string().min(1),
+        },
+      },
+      async ({ taskId }: { taskId: string }) => {
+        const uri = `nova://tasks/${taskId}`;
+        await subs.unsubscribe(uri);
+        return ok({ status: 'unsubscribed', uri });
+      },
+    );
+  }
 }
