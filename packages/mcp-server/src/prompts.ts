@@ -17,6 +17,8 @@ export function registerPrompts(_server: McpServer): void {
           text: [
             'Help me onboard this runtime onto the Nova network. Use the mcp server tools in this order:',
             '',
+            'Before you start: nova-mcp is a stdio child process spawned by your MCP host, not a service you need to start yourself. The long-running Nova service is the a2a-server at NOVA_URL (default http://localhost:3001). If tool calls fail with connection/unreachable errors, the problem is in your MCP client config (missing "nova" entry, wrong binary path, or missing NOVA_URL / NOVA_AGENT_ID env), not with the Nova deployment. See the top-level server instructions for the exact config shape.',
+            '',
             '1. Call nova_whoami to see current state. Confirm NOVA_AGENT_ID is set — every subsequent step uses it to resolve the active identity, tenant config, and credentials.',
             '2. If no identity exists for NOVA_AGENT_ID, call nova_generate_identity with a lowercase agent ID matching NOVA_AGENT_ID.',
             '3. Ask me for the invite token (provided by the tenant operator out-of-band), then call nova_accept_invite with it. nova_accept_invite verifies the token signature and tenant existence against the server before writing local state, so stale or mistyped invites are rejected up front with a clear error rather than silently corrupting tenant.json.',
