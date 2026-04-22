@@ -76,6 +76,35 @@ export function registerResources(_server: McpServer): void {
   );
 
   server.registerResource(
+    'nova-replies',
+    'nova://replies',
+    {
+      title: 'Pending reply-inbox items (push-subscribable)',
+      description:
+        'Non-destructive snapshot of this agent\'s broker-reply inbox — replies to tasks it has issued that were delivered via broker mode (no webhook). Subscribe to receive push notifications on new arrivals. Reading returns current pending items; claiming still requires nova_next_reply.',
+      mimeType: 'application/json',
+    },
+    async (uri: URL) => {
+      const rt = await loadAgentRuntime();
+      if (!rt) throw new Error('No active agent runtime. Set NOVA_AGENT_ID.');
+      const identity = await loadIdentity(rt.agentId);
+      if (!identity) throw new Error(`Identity missing for ${rt.agentId}`);
+      const selfUcan = mintSelfAuthToken({
+        senderDid: identity.did,
+        senderPrivateKeyPem: identity.privateKeyPem,
+      });
+      const url = `${rt.novaUrl.replace(/\/$/, '')}/agents/${encodeURIComponent(rt.agentId)}/replies/peek`;
+      const res = await request(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${selfUcan}` },
+      });
+      const text = await res.body.text();
+      if (res.statusCode >= 400) throw new Error(`replies peek ${res.statusCode}: ${text}`);
+      return { contents: [{ uri: uri.href, mimeType: 'application/json', text }] };
+    },
+  );
+
+  server.registerResource(
     'nova-task',
     new ResourceTemplate('nova://tasks/{taskId}', { list: undefined }),
     {

@@ -21,6 +21,7 @@
     "test:acceptance:broker": "tsx scripts/acceptance-test-broker.ts",
     "test:acceptance:broker-reply": "tsx scripts/acceptance-test-broker-reply.ts",
     "test:acceptance:mcp-push": "tsx scripts/acceptance-test-mcp-push.ts",
+    "test:acceptance:mcp-replies-push": "tsx scripts/acceptance-test-mcp-replies-push.ts",
     "test:acceptance:broker-receiver": "tsx scripts/acceptance-test-broker-receiver.ts",
     "broker-receiver:dev": "tsx packages/broker-receiver/src/cli.ts",
     "test:acceptance:invite-whitespace": "tsx scripts/acceptance-test-invite-whitespace.ts",

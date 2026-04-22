@@ -841,6 +841,37 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
     );
 
     server.registerTool(
+      'nova_watch_replies',
+      {
+        title: 'Subscribe to reply-inbox notifications',
+        description:
+          'Opens a push stream for this agent\'s broker-reply inbox. On each new reply, an MCP notifications/resources/updated is emitted for nova://replies. Notification is a hint — claim still happens via nova_next_reply. Idempotent.',
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          await subs.subscribe('nova://replies');
+          return ok({ status: 'subscribed', uri: 'nova://replies' });
+        } catch (e: any) {
+          return err(`Subscribe failed: ${e.message}`);
+        }
+      },
+    );
+
+    server.registerTool(
+      'nova_unwatch_replies',
+      {
+        title: 'Stop reply-inbox notifications',
+        description: 'Closes the backing stream for nova://replies. Idempotent.',
+        inputSchema: {},
+      },
+      async () => {
+        await subs.unsubscribe('nova://replies');
+        return ok({ status: 'unsubscribed', uri: 'nova://replies' });
+      },
+    );
+
+    server.registerTool(
       'nova_watch_task',
       {
         title: 'Subscribe to task-state notifications',

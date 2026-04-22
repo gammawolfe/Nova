@@ -16,6 +16,7 @@ import { loadIdentity } from './identity.js';
 import { mintSelfAuthToken } from './ucan-mint.js';
 
 export const INBOX_URI = 'nova://inbox';
+export const REPLIES_URI = 'nova://replies';
 export const TASK_URI_PREFIX = 'nova://tasks/';
 
 interface Subscription {
@@ -30,13 +31,17 @@ interface Subscription {
  * Returns null for URIs this module does not manage.
  */
 function resolveBackingUrl(uri: string, novaUrl: string, agentId: string): string | null {
+  const base = novaUrl.replace(/\/$/, '');
   if (uri === INBOX_URI) {
-    return `${novaUrl.replace(/\/$/, '')}/agents/${encodeURIComponent(agentId)}/inbox/stream`;
+    return `${base}/agents/${encodeURIComponent(agentId)}/inbox/stream`;
+  }
+  if (uri === REPLIES_URI) {
+    return `${base}/agents/${encodeURIComponent(agentId)}/replies/stream`;
   }
   if (uri.startsWith(TASK_URI_PREFIX)) {
     const taskId = uri.slice(TASK_URI_PREFIX.length);
     if (!taskId) return null;
-    return `${novaUrl.replace(/\/$/, '')}/agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}/stream`;
+    return `${base}/agents/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}/stream`;
   }
   return null;
 }
