@@ -344,3 +344,216 @@ scoped to ship as its own PR.
 4. **C2 after C1.** Homebrew needs a shippable binary.
 5. **C3 + C4 later.** Design spec required; revisit when someone's actually
    running >2 planets on one host.
+
+---
+
+## a2a-server production hardening
+
+Context: 2026-04-23 review of `packages/a2a-server/` surfaced a set of
+production-readiness gaps — no graceful shutdown, missing Express hardening
+(body limits, helmet, trust proxy, global error middleware), in-memory rate
+limiter in the self-register path, SSE subscriber-connection amplification
+under load, disk reads on every agent-card fetch, unauthenticated grant
+pickup, and several smaller quality issues. Each item below is scoped to
+ship as its own PR. Cross-package coordination is called out per item.
+
+### P0 — Resilience under real load
+
+- [ ] **H1. Graceful shutdown.** Mirror the admin-api pattern at
+  `packages/admin-api/src/index.ts:135-145`: keep the `server.listen`
+  handle, install SIGTERM/SIGINT → `server.close` → `closeSharedRedis` →
+  exit. Subtlety vs. admin-api: a2a-server opens one Redis subscriber per
+  SSE stream via `redis.duplicate()` in `stream.ts:90`, `inbox.ts:330`,
+  `replies.ts:144`. Maintain a live-sub registry so drain closes each one
+  cleanly. No cross-package changes. Unblocks zero-downtime rolling
+  deploys.
+
+- [ ] **H2. Express hardening pass.** One PR, four changes in
+  `a2a-server/src/index.ts`: (a) `app.use(express.json({ limit: '64kb' }))`
+  on the default mount and a larger dedicated limit on
+  `/agents/:agentId/inbox/:taskId/respond` sized to
+  `BROKER_RESULT_MAX_BYTES`; (b) `app.set('trust proxy', …)` so `req.ip`
+  is the real client address when Caddy fronts the service (today every
+  rate-limit bucket collapses to the proxy's IP); (c) `helmet()` on the
+  public well-known endpoint; (d) global error middleware that maps
+  `ZodError` + `NovaError` the same way admin-api does at
+  `admin-api/src/index.ts:129`. No cross-package changes; extract the
+  error-middleware body into `@nova/shared` only if admin-api wants to
+  adopt the same helper.
+
+- [ ] **H3. Grant-pickup atomicity (`GETDEL`).** Swap the non-atomic
+  `redis.get` + `redis.del` at `a2a-server/src/routes/register.ts:282-286`
+  for `GETDEL` (Redis 6.2+). One-line internal change; same contract with
+  admin-api's approve flow at `admin-api/src/routes/agents.ts:100-108`.
+  Closes the read-then-delete race where two concurrent pollers both see
+  the grant.
+
+- [ ] **H4. Redis-backed rate limit on `/register`.** Replace the
+  in-memory `rateStore` + `setInterval` sweep in `register.ts:16-35`
+  with a Redis `INCR` + `EXPIRE NX` pattern matching the ingress limiter
+  at `index.ts:170-178`. Fixes horizontal-scale bypass and unbounded-
+  map growth between sweeps. No cross-package changes.
+
+### P1 — Performance / hot-path fixes
+
+- [ ] **H5. Agent-card cache with lifecycle-channel bust.** Today
+  `.well-known/agent.json` does `fsp.readFile` + `AgentCardSchema.safeParse`
+  on every hit (`index.ts:97-142`). Add a process-local map keyed by
+  `tenantId/agentId` with lazy population, and subscribe to
+  `AGENT_LIFECYCLE_CHANNEL` (already published by
+  `admin-api/src/services/agent-service.ts:39` and
+  `a2a-server/src/routes/register.ts:181`, already consumed by
+  agent-connector + admin-api/events) to invalidate entries. No producer-
+  side changes — a2a-server becomes a third subscriber.
+
+- [ ] **H6. `tenantRouter` Redis-lookup cache.** Every agent-scoped
+  request currently does `GET nova:agent-index:<agentId>` (`tenant-
+  router.ts:31`). Add a short-TTL LRU (2-5s) with the same `AGENT_
+  LIFECYCLE_CHANNEL` invalidation hook from H5. Share the cache
+  infrastructure between H5 and H6 — one subscriber, two cache maps.
+
+- [ ] **H7. SSE subscriber fanout.** `stream.ts`, `inbox.ts`, `replies.ts`
+  each call `redis.duplicate()` per open stream — at 10k streams that's
+  10k extra Redis connections per replica. Ship in two parts: (a) extract
+  a shared SSE helper into `@nova/shared/src/sse-stream.ts` covering
+  `writeSSE`, heartbeat, cleanup, and the subscribe-first-then-snapshot-
+  then-dedup pattern that inbox.ts + replies.ts already share; migrate
+  a2a-server's three SSE routes to it. (b) Replace per-stream
+  `duplicate()` with a single shared subscriber that demuxes to in-
+  process listeners. Admin-api's `routes/events.ts:36-72` is a separate
+  SSE implementation — opt-in migration when convenient, not a blocker.
+  Cap concurrent streams per agent and globally as part of the helper.
+
+- [ ] **H8. Webhook-reply DLQ branch.** `inbox.ts:134-148` delivers to
+  `replyTo` fire-and-forget — failures are logged and lost. The broker-
+  mode branch at `inbox.ts:158` already uses `writeDeadLetter` from
+  `@nova/task-queue/src/dead-letter`. Call it in the webhook-failure
+  path too with a distinct `failureReason: 'webhook_delivery_failed'`
+  so the two modes have symmetric durability. Downstream DLQ consumers
+  see one more source of entries, which is desirable.
+
+- [ ] **H9. `/discover` pagination (additive).** `index.ts:51-76`
+  loads all active agents and filters in memory. Add optional
+  `cursor`/`limit` query params and push the status/skill filter into
+  Redis set indexes where possible. Keep the unparameterized call
+  returning the full set so existing callers
+  (`mcp-server/src/nova-client.ts:60+`, admin-api discover router) don't
+  break; mcp-server migrates lazily.
+
+### P2 — Smaller correctness / cleanup
+
+- [ ] **H10. SSE `NaN` id guard.** `stream.ts:45` does
+  `parseInt(… ?? '0', 10)` without a `|| 0` fallback, so a malformed
+  `Last-Event-ID` produces `NaN` in subsequent `id:` fields. `inbox.ts:294`
+  and `replies.ts:112` already use `|| 0`; normalize `stream.ts` the
+  same way. Pull into H7's shared helper.
+
+- [ ] **H11. UCAN error-reason typing.** `auth/self-ucan.ts:54-61` does
+  substring matching on `err.message` (`'expir'`, `'signature'`). If
+  `@ucans/ucans` changes phrasing, every failure silently becomes
+  `'malformed'`, losing the "expired" / "revoked" distinction that
+  `authSelfUcan` returns to clients. Use typed errors or structured
+  codes from the library if exposed; otherwise pin behaviour with a
+  test and add a version floor.
+
+- [ ] **H12. Agent capabilities default alignment.** Three write sites
+  disagree: `a2a-server/src/index.ts:112-116` defaults
+  `pushNotifications: true`, `a2a-server/src/routes/register.ts:168`
+  writes `false`, and `admin-api/src/services/agent-service.ts:79`
+  also writes the agent-config. Pick one source of truth (admin-api
+  service is the right home), have register.ts call it, delete the
+  `index.ts` fallback. Cross-package: shared, admin-api, a2a-server.
+
+- [ ] **H13. `INVITE_ALREADY_CONSUMED` distinct error code.** When two
+  registrations race the same invite, the loser's `consumeInvite` NX
+  fails and the caller sees `INVITE_INVALID` with no hint. Add a
+  distinct `INVITE_ALREADY_CONSUMED` variant surfaced from
+  `@nova/shared/src/invites.ts:110-167` and mapped by
+  `a2a-server/src/routes/register.ts`. Additive — admin-api callers
+  that don't pattern-match on the old message stay working.
+
+- [ ] **H14. `createApp()` refactor.** `index.ts` calls `start()` at
+  import time, making in-process testing and embedding awkward.
+  Split into `createApp()` + `main()`; only the CLI entry calls
+  `main()`. Internal-only; unblocks integration tests that want to
+  spin up a2a-server in-process.
+
+- [ ] **H15. Standardize Redis singleton usage.** `index.ts` imports
+  both `redis` from `@nova/task-queue` (line 8) and `getSharedRedis()`
+  from `@nova/shared` (line 23). They're the same connection today,
+  but the duality invites future dual-pool bugs. Pick `getSharedRedis()`
+  everywhere and sweep a2a-server, admin-api, broker-receiver, agent-
+  connector, gate-service in one commit.
+
+- [ ] **H16. Metrics coverage.** `metrics.ts` only exports
+  `activeSseStreams`. Add: ingress request counter + latency histogram,
+  rate-limit rejection counter labeled `sender|global`, gate-rejection
+  counter labeled by `errorCode`, SSE reconnect counter, Redis latency
+  histogram. Register on the existing `a2aRegistry`. No cross-package
+  changes; dashboards + alerts can follow.
+
+### P3 — Coordinated cross-package changes (plan before coding)
+
+- [ ] **H17. Grant-pickup auth hardening.** Today
+  `GET /register/status/:tenantId/:agentId` is unauthenticated and
+  returns the grant JWT on first fetch after approval. Anyone who
+  guesses `tenantId+agentId` while the claim is live can race the
+  legitimate caller. Fix: bind the grant to a claim-secret returned
+  from `POST /register` and required on the status fetch. Touches
+  three packages — `admin-api` (grant-write format), `a2a-server`
+  (register.ts response + status verification), `mcp-server` (onboard
+  client stores and presents the secret). Needs a design note before
+  code covering: migration for in-flight grants at deploy time,
+  whether the secret is rotated on reissue, and whether
+  `nova_reissue_ucan` is included. Ship behind a flag, burn down the
+  flag once all planets are on the new client.
+
+### Out of scope for this block (named so we don't re-debate)
+
+- **Runtime-attestation for the a2a-server process itself.** Out of
+  scope for hardening; see the P2 block in the MCP Onboarding section
+  for the equivalent debate on client-side attestation.
+- **Per-skill rate limiting.** The current global + per-sender shape
+  is sufficient. Skill-level quotas are a policy layer above the
+  transport.
+- **HTTP/2 or HTTP/3 transport.** Node's HTTP/1.1 + keep-alive handles
+  Nova's throughput. Revisit when latency or concurrency actually
+  becomes the bottleneck.
+
+### Suggested sequencing
+
+1. **H1 → H2 → H3 → H4.** All pure-internal or one-line; ship in order
+   in the first week. After H1 lands, rolling deploys stop dropping
+   live SSE streams; after H2, the service has the same hardening
+   surface as admin-api; after H3 + H4, the self-register path is
+   safe to scale horizontally.
+2. **H5 + H6 together.** One lifecycle-channel subscriber, two caches.
+   Paired naturally.
+3. **H7.** Larger refactor — do after H5/H6 so the shared infra can
+   absorb the SSE helper cleanly.
+4. **H8, H9, H10-H16** as fillers; none block each other.
+5. **H17 last.** Coordinated multi-package change; needs a design
+   note first. Not urgent — the current gap requires an attacker to
+   guess `tenantId+agentId` within the grant-claim TTL window.
+
+### Deliberately not copied from Multica (named so we don't re-debate)
+
+- **Issues / boards / chat UI.** Orchestration is a layer above Nova, not
+  inside it. If someone wants a board, they build a product on top of the
+  admin API.
+- **WebSocket streaming.** SSE was the right call — see nova-overview.md.
+- **Postgres + pgvector.** BullMQ + Redis fits Nova's workload; pgvector
+  solves a problem Nova doesn't have.
+- **Free-text task ingress.** Directly violates the closed-intent +
+  structured-ingress principle. This is the architectural line.
+
+### Suggested sequencing
+
+1. **C5 first.** Pure docs + compose-file reorg; unblocks anyone running Nova
+   outside a repo checkout. No code dependencies.
+2. **C1 second.** Operator CLI is the biggest daily-UX win and has no new
+   dependencies. Replaces most curl examples in the README.
+3. **C6 after C1.** Bootstrap can reuse `nova setup` once it exists.
+4. **C2 after C1.** Homebrew needs a shippable binary.
+5. **C3 + C4 later.** Design spec required; revisit when someone's actually
+   running >2 planets on one host.
