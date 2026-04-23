@@ -31,7 +31,7 @@ async function main(): Promise<void> {
         '  "nova": { "command": "node", "args": ["<path-to>/packages/mcp-server/dist/index.js"], "env": { "NOVA_URL": "http://localhost:3001", "NOVA_AGENT_ID": "<your-agent-id>" } }',
         'Required env: NOVA_URL (the a2a-server base URL), NOVA_AGENT_ID (lowercase identifier for this agent — distinct per runtime). Optional: NOVA_ADMIN_URL, NOVA_ADMIN_TOKEN for operator-scoped tools, NOVA_HOME to override the ~/.nova state directory.',
         '',
-        'If a tool returns a Nova error code (INVITE_INVALID, AGENT_EXISTS, TENANT_NOT_FOUND, UCAN_CLAIM_EXPIRED, GRANT_REVOKED, etc.), that is a Nova-side response and the message tells you what to do. Do NOT conclude the MCP itself is down — the MCP is clearly up if it returned a structured error.',
+        'If a tool returns a Nova error code (INVITE_INVALID, AGENT_EXISTS, TENANT_NOT_FOUND, GRANT_CLAIM_EXPIRED, GRANT_REVOKED, etc.), that is a Nova-side response and the message tells you what to do. Do NOT conclude the MCP itself is down — the MCP is clearly up if it returned a structured error.',
         '',
         'To onboard a new agent, invoke the nova_onboard prompt. To send tasks, nova_first_task. To receive tasks with push, nova_serve.',
       ].join('\n'),

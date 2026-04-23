@@ -243,7 +243,7 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
     'nova_check_registration',
     {
       title: 'Poll registration status and claim UCAN on approval',
-      description: 'Polls GET /register/status. When agent is active, retrieves the one-time UCAN claim, stores it locally, and returns the trust tier. If status is active but no UCAN is available AND no UCAN is cached locally, returns the UCAN_CLAIM_EXPIRED error — the claim window has lapsed and an operator must run nova_reissue_ucan.',
+      description: 'Polls GET /register/status. When agent is active, retrieves the one-time approval grant, stores it locally, and returns the trust tier. If status is active but no grant is available AND no grant is cached locally, returns the GRANT_CLAIM_EXPIRED error — the claim window has lapsed and an operator must run nova_reissue_ucan.',
       inputSchema: {
         agentId: z.string().optional().describe('Defaults to NOVA_AGENT_ID env var.'),
       },
@@ -762,7 +762,7 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
     'nova_reissue_ucan',
     {
       title: '[Operator] Reissue a self-UCAN for an approved agent',
-      description: 'Requires NOVA_ADMIN_TOKEN. Use when an already-approved agent missed its one-time UCAN claim window (returns UCAN_CLAIM_EXPIRED from nova_check_registration) or lost the cached credential. Idempotent: overwrites any pending claim with a fresh UCAN. The agent should call nova_check_registration afterwards to pick it up. Capabilities are recovered from the trust-registry entry seeded at approval — tier + allowedSkills are preserved.',
+      description: 'Requires NOVA_ADMIN_TOKEN. Use when an already-approved agent missed its one-time grant claim window (returns GRANT_CLAIM_EXPIRED from nova_check_registration) or lost the cached credential. Idempotent: overwrites any pending claim with a fresh grant. The agent should call nova_check_registration afterwards to pick it up. Capabilities are recovered from the trust-registry entry seeded at approval — tier + allowedSkills are preserved.',
       inputSchema: {
         tenantId: z.string().min(1).describe('Tenant the agent belongs to'),
         agentId: z.string().min(1).max(64).describe('Agent to reissue for — must already be in status=active'),
