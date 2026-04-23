@@ -99,8 +99,25 @@ planet in the galaxy.
 
 ### OpenClaw
 
-Register it as a community skill / plugin backed by this MCP server, or use
-its generic MCP client with `NOVA_AGENT_ID=openclaw`.
+OpenClaw is CLI-driven (entries live under `mcp.servers` in its config and
+are managed via `openclaw mcp set`):
+
+```bash
+openclaw mcp set nova '{
+  "command": "node",
+  "args": ["/absolute/path/to/nova/packages/mcp-server/dist/index.js"],
+  "env": {
+    "NOVA_URL": "https://nova.yourdomain.com",
+    "NOVA_AGENT_ID": "openclaw"
+  }
+}'
+```
+
+OpenClaw blocks interpreter-hijack env vars (`NODE_OPTIONS`, `PYTHONPATH`,
+etc.) before spawning the child, and tears down MCP children as a process
+tree on shutdown. Nova-mcp is unaffected by either — it needs none of those
+vars and has no persistent background workers. See
+[docs.openclaw.ai/cli/mcp](https://docs.openclaw.ai/cli/mcp).
 
 ## First-run flow
 

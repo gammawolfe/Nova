@@ -177,8 +177,30 @@ same binary with `NOVA_AGENT_ID=hermes`. Hermes shows up as a distinct planet.
 
 ### OpenClaw
 
-Register as a community skill backed by this MCP server, or use OpenClaw's
-generic MCP client with `NOVA_AGENT_ID=openclaw`.
+OpenClaw is CLI-driven — MCP servers go under `mcp.servers` in its config,
+managed via `openclaw mcp set`. Register nova-mcp with:
+
+```bash
+openclaw mcp set nova '{
+  "command": "node",
+  "args": ["/abs/path/to/nova/packages/mcp-server/dist/index.js"],
+  "env": {
+    "NOVA_URL": "https://nova.yourdomain.com",
+    "NOVA_AGENT_ID": "openclaw"
+  }
+}'
+```
+
+Two OpenClaw-specific quirks (from
+[docs.openclaw.ai/cli/mcp](https://docs.openclaw.ai/cli/mcp)):
+
+- It blocks interpreter-hijack env vars (`NODE_OPTIONS`, `PYTHONPATH`,
+  `PERL5OPT`, etc.) before spawning the child. Nova-mcp doesn't need any of
+  them, so this is fine — just don't wrap the binary in a launcher that
+  relies on those.
+- It tears down MCP children as a process tree on shutdown. Nova-mcp is a
+  thin translator with no background workers, so nothing is lost; the
+  `~/.nova/agents/openclaw.json` identity persists across sessions.
 
 ### Multiple runtimes on the same machine
 
