@@ -42,7 +42,7 @@ import { mintInvocationToken } from '../packages/shared/src/ucan-mint';
 
 const A2A_URL = process.env.NOVA_URL ?? 'http://localhost:3001';
 const ADMIN_URL = process.env.NOVA_ADMIN_URL ?? 'http://127.0.0.1:3005';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? process.env.NOVA_ADMIN_TOKEN ?? 'my-secure-admin-token-12345';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? process.env.NOVA_ADMIN_TOKEN ?? 'dev-admin-token-replace-before-prod-use';
 const RECEIVER_AGENT_ID = process.env.RECEIVER_AGENT_ID ?? `test-receiver-${Date.now()}`;
 const SENDER_AGENT_ID = process.env.SENDER_AGENT_ID ?? 'claude-code';
 const TENANT_ID = process.env.TENANT_ID ?? 'tenant_496bdb38306a';

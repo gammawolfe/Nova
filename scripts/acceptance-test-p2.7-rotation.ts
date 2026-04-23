@@ -15,7 +15,7 @@
  * Prerequisites:
  *   - Redis running on localhost:6379
  *   - Admin API on localhost:3005, A2A server on localhost:3001
- *   - ADMIN_TOKEN env var (default: nova-admin-dev-token)
+ *   - ADMIN_TOKEN env var (default matches .env.example)
  */
 
 import crypto from 'crypto';
@@ -25,7 +25,7 @@ import bs58 from 'bs58';
 
 const ADMIN_URL = process.env['ADMIN_URL'] || 'http://127.0.0.1:3005';
 const A2A_URL = process.env['A2A_URL'] || 'http://localhost:3001';
-const ADMIN_TOKEN = process.env['ADMIN_TOKEN'] || 'nova-admin-dev-token';
+const ADMIN_TOKEN = process.env['ADMIN_TOKEN'] || 'dev-admin-token-replace-before-prod-use';
 const DATA_ROOT = process.env['NOVA_DATA_ROOT'] || path.resolve(__dirname, '..', 'data');
 
 const ED25519_MULTICODEC_PREFIX = Uint8Array.of(0xed, 0x01);

@@ -6,7 +6,8 @@ import { execSync } from 'child_process';
 
 const PORT = Number(process.env.E2E_PORT ?? 3015);
 const BASE_URL = `http://localhost:${PORT}`;
-const ADMIN_TOKEN = 'e2e-token-fixed';
+// Must be at least 32 chars to satisfy admin-api/src/config.ts validation.
+const ADMIN_TOKEN = 'e2e-admin-token-do-not-use-outside-tests';
 
 const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nova-e2e-'));
 const keyRoot = path.join(dataRoot, 'keys');

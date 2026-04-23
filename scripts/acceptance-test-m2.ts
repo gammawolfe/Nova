@@ -7,7 +7,7 @@
  *   - Gate service running on localhost:3002 (internal, tested via A2A)
  *   - Admin API running on localhost:3005 (for quarantine/dead-letter checks)
  *   - Seed tenant with agent_aria and a Tier 2 trusted actor
- *   - ADMIN_TOKEN env var set (default: nova-admin-dev-token)
+ *   - ADMIN_TOKEN env var set (default matches .env.example)
  *
  * Tests the full 5-layer gate pipeline:
  *   1. UCAN pre-extraction
@@ -19,7 +19,7 @@
 
 const A2A_URL = process.env.A2A_URL || 'http://localhost:3001';
 const ADMIN_URL = process.env.ADMIN_URL || 'http://127.0.0.1:3005';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'nova-admin-dev-token';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'dev-admin-token-replace-before-prod-use';
 const AGENT_ID = 'agent_aria';
 const TRUSTED_DID = process.env.TRUSTED_DID || 'did:example:trusted-tier2';
 const VALID_UCAN = process.env.VALID_UCAN || 'eyJhbGciOiJSUzI1NiJ9.mockpayload.mocksignature';

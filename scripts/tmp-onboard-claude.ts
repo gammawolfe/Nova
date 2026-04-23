@@ -12,7 +12,7 @@ import bs58 from 'bs58';
 
 const ADMIN_URL = 'http://127.0.0.1:3005';
 const A2A_URL = 'http://localhost:3001';
-const ADMIN_TOKEN = 'my-secure-admin-token-12345';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token-replace-before-prod-use';
 const AGENT_ID = 'claude-code';
 const AGENT_NAME = 'Claude Code';
 const AGENT_DESC = 'Anthropic Claude Code CLI acting as a Nova sender agent for Wolfe Dev.';
