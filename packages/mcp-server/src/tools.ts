@@ -164,6 +164,15 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       let payload;
       try { payload = decodeInvitePayload(invite); }
       catch (e: any) { return err(`Invalid invite: ${e.message}`); }
+      // Verify signature and tenant existence server-side before overwriting
+      // local state. Prevents stale or mistyped tokens from clobbering a
+      // previously-valid tenant.json with unusable claims.
+      const client = bootstrapClient(resolvedUrl);
+      try {
+        await client.verifyInvite(invite);
+      } catch (e: any) {
+        return err(`Invite verification failed against ${resolvedUrl}: ${e.message}`);
+      }
       await saveTenantConfig({
         novaUrl: resolvedUrl,
         tenantId: payload.tenantId,

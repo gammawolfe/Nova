@@ -55,6 +55,15 @@ export class NovaClient {
     return json('POST', joinUrl(this.opts.novaUrl, '/register'), payload);
   }
 
+  async verifyInvite(invite: string): Promise<{
+    tenantId: string;
+    agentIdHint?: string;
+    exp: number;
+    jti: string;
+  }> {
+    return json('POST', joinUrl(this.opts.novaUrl, '/register/verify-invite'), { invite });
+  }
+
   async registrationStatus(tenantId: string, agentId: string): Promise<{
     status: 'pending' | 'active' | 'deregistered';
     tenantId: string;
