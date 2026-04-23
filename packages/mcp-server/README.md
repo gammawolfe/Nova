@@ -8,20 +8,43 @@ UCANs, and send tasks through Nova — all without speaking A2A directly.
 ## What it is
 
 Nova speaks A2A internally. This package lets an MCP client do everything a
-Nova-registered agent needs to do, by exposing each step as a typed MCP tool:
+Nova-registered agent needs to do — both sending and receiving — by exposing
+each step as a typed MCP tool.
 
+**Onboarding & identity**
 - `nova_generate_identity` — Ed25519 keypair + DID, stored locally
-- `nova_accept_invite` — decode and save a signed invite JWT for a tenant
+- `nova_accept_invite` / `nova_inspect_invite` — decode and save a signed invite JWT for a tenant
 - `nova_register_agent` — self-register with `/register`, consumes the invite
 - `nova_check_registration` — poll for operator approval and claim the UCAN
-- `nova_list_agents` / `nova_get_agent_card` — discovery
-- `nova_send_task` — acquires per-destination UCAN and POSTs a task
-- `nova_get_task_result` — status polling
-- `nova_renew_ucan` / `nova_ucan_status` — UCAN lifecycle
-- `nova_create_tenant` / `nova_create_invite` — operator-only, requires `NOVA_ADMIN_TOKEN`
+- `nova_whoami` — report the active identity, tenant, and UCAN cache state
+- `nova_rotate_key` — rotate the agent's signing key with proof-of-possession
 
-Resources: `nova://agents`, `nova://agents/{agentId}/card`.
-Prompts: `/nova_onboard`, `/nova_first_task`.
+**Discovery & send**
+- `nova_list_agents` / `nova_get_agent_card` — directory and capability lookup
+- `nova_send_task` — acquires per-destination UCAN and POSTs a task
+- `nova_get_task_result` — collect a stored broker reply or fall back to task-state lookup
+- `nova_renew_ucan` / `nova_ucan_status` — UCAN lifecycle
+
+**Receive & respond** (pull claim path, required to close every loop)
+- `nova_next_task` — long-poll the inbox; returned task is claimed under a 5-min visibility timeout
+- `nova_respond` — ship the `TaskResult` back within the visibility window; idempotent
+- `nova_next_reply` / `nova_ack_reply` — sender-side equivalent for broker-delivered replies
+
+**Push subscriptions** (hints — you still claim via `nova_next_task` / `nova_next_reply`)
+- `nova_watch_inbox` / `nova_unwatch_inbox` — push stream for `nova://inbox`
+- `nova_watch_replies` / `nova_unwatch_replies` — push stream for `nova://replies`
+- `nova_watch_task` / `nova_unwatch_task` — per-task state stream at `nova://tasks/{taskId}`; auto-closes on terminal state
+- MCP clients that implement `resources/subscribe` natively get the same behavior on the resource URIs below without needing these fallback tools.
+
+**Operator tools** (require `NOVA_ADMIN_TOKEN`)
+- `nova_create_tenant`, `nova_create_invite`, `nova_reissue_ucan`
+
+**Resources**
+- `nova://agents`, `nova://agents/{agentId}/card` — directory reads
+- `nova://inbox`, `nova://replies` — non-destructive peek; push-subscribable
+- `nova://tasks/{taskId}` — live task state; push-subscribable, auto-closes on terminal state
+
+**Prompts**: `/nova_onboard`, `/nova_first_task`, `/nova_serve`.
 
 ## Local state
 
@@ -104,13 +127,31 @@ during registration:
 { "id": "__sender_only", "name": "Sender only", "description": "This agent only sends tasks through Nova; it does not receive deliveries." }
 ```
 
-No `operatorUrl` or `replyUrl` needed.
+No `operatorUrl` or `replyUrl` needed. Sender-only agents still benefit from
+subscribing to `nova://replies` before sending so task results push back
+without polling.
 
 ## Receiving tasks
 
-The MCP server is send-only in v1. An agent that needs to *receive* tasks
-delivered by Nova (bookstore agents, API-exposed agents, etc.) must also
-host an A2A operator endpoint — see `nova-protocol-spec.md §7`.
+MCP-hosted agents can now serve tasks end-to-end without standing up a
+separate A2A operator endpoint. The `/nova_serve` prompt walks through the
+full loop:
+
+1. Register with at least one real skill (anything other than `__sender_only`).
+2. `nova_watch_inbox` (or subscribe natively to `nova://inbox`) — Nova emits
+   `notifications/resources/updated` when a task lands. The notification is
+   a hint; the task object is not in the payload.
+3. On notify, call `nova_next_task` to claim the task under a 5-minute
+   visibility timeout.
+4. Do the work, then `nova_respond` with `status: "ok"` (and `result`) or
+   `status: "error"` (and `error`) before the timeout elapses. Missing the
+   window causes Nova to redeliver on the next pull.
+
+The shared SSE client auto-reconnects on transient drops; a `nova_next_task`
+call after reconnect picks up anything queued during the gap.
+
+For agents that *do* need an externally reachable A2A operator endpoint
+(long-lived services, non-MCP hosts), see `nova-protocol-spec.md §7`.
 
 ## Environment variables
 
