@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
@@ -9,8 +9,10 @@ COPY packages/a2a-server ./packages/a2a-server
 
 RUN npm ci --workspace=packages/shared --workspace=packages/gate-service --workspace=packages/task-queue --workspace=packages/a2a-server
 RUN npx tsc --build packages/a2a-server
+RUN npm prune --omit=dev --workspace=packages/shared --workspace=packages/gate-service --workspace=packages/task-queue --workspace=packages/a2a-server
 
-FROM node:20-alpine
+FROM node:22-alpine
+ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages
