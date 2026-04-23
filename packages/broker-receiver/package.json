@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.88.0",
-    "@nova/mcp-server": "*",
     "@nova/shared": "*",
     "undici": "^6.19.0",
     "zod": "^3.22.0"

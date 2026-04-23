@@ -1,4 +1,4 @@
-// packages/mcp-server/src/key-backend.ts
+// packages/shared/src/key-backend.ts
 //
 // Pluggable backend for agent private-key storage. Selected via the
 // NOVA_KEY_BACKEND env var:

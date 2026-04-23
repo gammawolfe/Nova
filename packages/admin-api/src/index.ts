@@ -1,3 +1,6 @@
+// Fail fast on missing/weak ADMIN_TOKEN — throws before the server binds.
+import './config';
+
 import express from 'express';
 import { Router } from 'express';
 import path from 'path';

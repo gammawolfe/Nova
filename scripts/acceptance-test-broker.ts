@@ -20,7 +20,7 @@ import { randomUUID } from 'crypto';
 
 const ADMIN_URL = process.env.NOVA_ADMIN_URL ?? 'http://localhost:3005';
 const A2A_URL = process.env.NOVA_URL ?? 'http://localhost:3001';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'my-secure-admin-token-12345';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token-replace-before-prod-use';
 
 async function api<T>(method: string, url: string, body?: unknown, token?: string): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };

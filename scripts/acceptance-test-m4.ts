@@ -8,13 +8,13 @@
  *   - Redis running on localhost:6379
  *   - Admin API running on localhost:3005
  *   - A2A server running on localhost:3001
- *   - ADMIN_TOKEN env var set (default: nova-admin-dev-token)
+ *   - ADMIN_TOKEN env var set (default matches .env.example)
  */
 import crypto from 'crypto';
 
 const ADMIN_URL = process.env.ADMIN_URL || 'http://127.0.0.1:3005';
 const A2A_URL = process.env.A2A_URL || 'http://localhost:3001';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'nova-admin-dev-token';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'dev-admin-token-replace-before-prod-use';
 
 function assert(cond: boolean, message: string): asserts cond {
   if (!cond) { console.error(`[FAIL] ${message}`); process.exit(1); }

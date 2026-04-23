@@ -1,4 +1,4 @@
-// packages/mcp-server/src/ucan-mint.ts
+// packages/shared/src/ucan-mint.ts
 //
 // Mint an invocation token on the sender side. Produces a UCAN JWT:
 //
@@ -15,7 +15,7 @@
 // chain's audience/subsumption properties — all in packages/gate-service.
 
 import crypto from 'crypto';
-import { buildUcanJwt, parseUcanJwt, UcanPayload, UcanCapability } from '@nova/shared/src/ucan';
+import { buildUcanJwt, parseUcanJwt, UcanPayload, UcanCapability } from './ucan.js';
 
 export interface MintOpts {
   senderDid: string;

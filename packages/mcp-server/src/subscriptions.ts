@@ -12,8 +12,8 @@
 import { streamSseEvents, SseEvent, SseStreamHandle } from '@nova/shared/src/sse-client';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { loadAgentRuntime } from './context.js';
-import { loadIdentity } from './identity.js';
-import { mintSelfAuthToken } from './ucan-mint.js';
+import { loadIdentity } from '@nova/shared/src/identity.js';
+import { mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
 
 export const INBOX_URI = 'nova://inbox';
 export const REPLIES_URI = 'nova://replies';

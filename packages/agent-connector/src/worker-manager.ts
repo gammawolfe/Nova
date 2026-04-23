@@ -4,11 +4,9 @@ import { queueName, TenantContext } from '@nova/shared/src/tenant';
 import { getSharedRedis, REDIS_URL } from '@nova/shared/src/redis';
 import { logger } from '@nova/shared/src/logger';
 import {
-  AGENT_REGISTRY_SET,
   AGENT_LIFECYCLE_CHANNEL,
   AgentLifecycleEvent,
-  agentIndexKey,
-  agentMetaKey,
+  listActiveAgentMeta,
 } from '@nova/shared/src/agent-index';
 
 type TaskProcessor = (job: Job, ctx: TenantContext) => Promise<void>;
@@ -20,6 +18,8 @@ const workerMap = new Map<string, Worker[]>();
 const ACTIVE_TIERS = [1, 2, 3];
 
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5', 10);
+
+let lifecycleSub: IORedis | null = null;
 
 function workerKey(ctx: TenantContext): string {
   return `${ctx.tenantId}:${ctx.agentId}`;
@@ -69,42 +69,46 @@ async function stopWorkersForAgent(ctx: TenantContext): Promise<void> {
 export async function initWorkerManager(processTask: TaskProcessor): Promise<void> {
   const redis = getSharedRedis();
 
-  // Discover existing agents from the registry
-  const agentIds = await redis.smembers(AGENT_REGISTRY_SET);
-  let started = 0;
-
-  for (const agentId of agentIds) {
-    const meta = await redis.hgetall(agentMetaKey(agentId));
-    if (!meta['status'] || meta['status'] !== 'active') continue;
-
-    const tenantId = meta['tenantId'] || await redis.get(agentIndexKey(agentId));
-    if (!tenantId) continue;
-
-    startWorkersForAgent({ tenantId, agentId }, processTask);
-    started++;
+  // Primary path: pipelined fetch of all active agents from the registry Set.
+  const agents = await listActiveAgentMeta(redis);
+  for (const agent of agents) {
+    if (!agent.tenantId) continue;
+    startWorkersForAgent({ tenantId: agent.tenantId, agentId: agent.agentId }, processTask);
   }
+  let started = agents.length;
 
-  // Fallback: if registry is empty but the legacy agent-index keys exist,
-  // start a worker for any agent we can find via SCAN
+  // Legacy fallback: registry Set empty but agent-index keys linger from pre-migration state.
+  // SCAN (not KEYS) + pipelined GET to avoid blocking Redis.
   if (started === 0) {
-    const keys = await redis.keys('nova:agent-index:*');
-    for (const key of keys) {
-      const agentId = key.replace('nova:agent-index:', '');
-      const tenantId = await redis.get(key);
-      if (!tenantId) continue;
-      startWorkersForAgent({ tenantId, agentId }, processTask);
-      started++;
+    const indexKeys: string[] = [];
+    let cursor = '0';
+    do {
+      const [next, batch] = await redis.scan(cursor, 'MATCH', 'nova:agent-index:*', 'COUNT', 100);
+      indexKeys.push(...batch);
+      cursor = next;
+    } while (cursor !== '0');
+
+    if (indexKeys.length > 0) {
+      const pipe = redis.pipeline();
+      for (const key of indexKeys) pipe.get(key);
+      const results = await pipe.exec();
+      results?.forEach(([err, tenantId], i) => {
+        if (err || !tenantId) return;
+        const agentId = indexKeys[i]!.slice('nova:agent-index:'.length);
+        startWorkersForAgent({ tenantId: tenantId as string, agentId }, processTask);
+        started++;
+      });
     }
   }
 
   logger.info({ agentCount: started }, 'Worker manager initialized with existing agents');
 
-  // Subscribe to lifecycle channel for dynamic worker management
-  // Pub/Sub requires a dedicated connection
-  const sub = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
-  await sub.subscribe(AGENT_LIFECYCLE_CHANNEL);
+  // Subscribe to lifecycle channel for dynamic worker management.
+  // Pub/Sub requires a dedicated connection; tracked in module scope so shutdown can close it.
+  lifecycleSub = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+  await lifecycleSub.subscribe(AGENT_LIFECYCLE_CHANNEL);
 
-  sub.on('message', (_channel: string, message: string) => {
+  lifecycleSub.on('message', (_channel: string, message: string) => {
     try {
       const event: AgentLifecycleEvent = JSON.parse(message);
       handleLifecycleEvent(event, processTask);
@@ -113,7 +117,7 @@ export async function initWorkerManager(processTask: TaskProcessor): Promise<voi
     }
   });
 
-  sub.on('error', (err) => {
+  lifecycleSub.on('error', (err) => {
     logger.error({ err: err.message }, 'Lifecycle subscriber error');
   });
 }
@@ -134,6 +138,10 @@ function handleLifecycleEvent(event: AgentLifecycleEvent, processTask: TaskProce
  * Gracefully shut down all active workers.
  */
 export async function shutdownAllWorkers(): Promise<void> {
+  if (lifecycleSub) {
+    await lifecycleSub.quit().catch(() => { /* already closed */ });
+    lifecycleSub = null;
+  }
   const all = Array.from(workerMap.values()).flat();
   await Promise.all(all.map(w => w.close()));
   workerMap.clear();

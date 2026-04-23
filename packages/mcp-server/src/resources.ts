@@ -2,8 +2,8 @@ import { request } from 'undici';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { loadAgentRuntime, bootstrapClient } from './context.js';
-import { loadIdentity } from './identity.js';
-import { mintSelfAuthToken } from './ucan-mint.js';
+import { loadIdentity } from '@nova/shared/src/identity.js';
+import { mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
 
 export function registerResources(_server: McpServer): void {
   const server: any = _server;

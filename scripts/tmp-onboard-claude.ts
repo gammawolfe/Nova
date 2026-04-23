@@ -12,7 +12,7 @@ import bs58 from 'bs58';
 
 const ADMIN_URL = 'http://127.0.0.1:3005';
 const A2A_URL = 'http://localhost:3001';
-const ADMIN_TOKEN = 'my-secure-admin-token-12345';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? 'dev-admin-token-replace-before-prod-use';
 const AGENT_ID = 'claude-code';
 const AGENT_NAME = 'Claude Code';
 const AGENT_DESC = 'Anthropic Claude Code CLI acting as a Nova sender agent for Wolfe Dev.';
@@ -62,7 +62,7 @@ async function main() {
   if (inviteRes.status !== 201) throw new Error(`invite mint failed: ${inviteRes.status} ${JSON.stringify(inviteRes.body)}`);
   const invite = inviteRes.body.token;
 
-  // 3. Generate identity (matches @nova/mcp-server/src/identity.ts:generateIdentity)
+  // 3. Generate identity (matches @nova/shared/src/identity.ts:generateIdentity)
   console.log('3. Generating Ed25519 identity');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const jwk = publicKey.export({ format: 'jwk' }) as { x: string };
