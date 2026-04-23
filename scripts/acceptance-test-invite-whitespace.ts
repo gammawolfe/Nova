@@ -20,7 +20,7 @@
  */
 
 import { createInvite, verifyInvite } from '../packages/shared/src/invites';
-import { decodeInvitePayload } from '../packages/mcp-server/src/tenant-config';
+import { decodeInvitePayload } from '../packages/shared/src/tenant-config';
 
 let passed = 0;
 let failed = 0;

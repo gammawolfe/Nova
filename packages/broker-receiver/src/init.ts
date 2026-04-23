@@ -20,9 +20,9 @@
 
 import fsp from 'fs/promises';
 import { request } from 'undici';
-import { generateIdentity, saveIdentity, loadIdentity } from '@nova/mcp-server/src/identity';
-import { decodeInvitePayload, saveTenantConfig } from '@nova/mcp-server/src/tenant-config';
-import { loadCache, saveCache, withCacheLock } from '@nova/mcp-server/src/ucan-store';
+import { generateIdentity, saveIdentity, loadIdentity } from '@nova/shared/src/identity.js';
+import { decodeInvitePayload, saveTenantConfig } from '@nova/shared/src/tenant-config.js';
+import { loadCache, saveCache, withCacheLock } from '@nova/shared/src/ucan-store.js';
 import { DEFAULT_CONFIG_PATH } from './config.js';
 
 export interface InitOptions {

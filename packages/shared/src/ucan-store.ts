@@ -1,4 +1,4 @@
-// packages/mcp-server/src/ucan-store.ts
+// packages/shared/src/ucan-store.ts
 //
 // Sender-side credential store for the delegation-chain UCAN model.
 //

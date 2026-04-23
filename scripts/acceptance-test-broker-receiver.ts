@@ -36,9 +36,9 @@ import path from 'path';
 import fsp from 'fs/promises';
 import os from 'os';
 import { request } from 'undici';
-import { loadIdentity } from '../packages/mcp-server/src/identity';
-import { loadCache } from '../packages/mcp-server/src/ucan-store';
-import { mintInvocationToken } from '../packages/mcp-server/src/ucan-mint';
+import { loadIdentity } from '../packages/shared/src/identity';
+import { loadCache } from '../packages/shared/src/ucan-store';
+import { mintInvocationToken } from '../packages/shared/src/ucan-mint';
 
 const A2A_URL = process.env.NOVA_URL ?? 'http://localhost:3001';
 const ADMIN_URL = process.env.NOVA_ADMIN_URL ?? 'http://127.0.0.1:3005';

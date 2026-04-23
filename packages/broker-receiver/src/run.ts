@@ -4,8 +4,8 @@
 // identity → builds client/dispatcher/claim-loop/health → starts, then
 // the caller installs signal handlers for graceful shutdown.
 
-import { loadIdentity } from '@nova/mcp-server/src/identity';
-import { mintSelfAuthToken } from '@nova/mcp-server/src/ucan-mint';
+import { loadIdentity } from '@nova/shared/src/identity.js';
+import { mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
 import type { ReceiverConfig } from './config.js';
 import { NovaBrokerClient } from './nova-client.js';
 import { Dispatcher } from './dispatcher.js';

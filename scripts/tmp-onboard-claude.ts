@@ -62,7 +62,7 @@ async function main() {
   if (inviteRes.status !== 201) throw new Error(`invite mint failed: ${inviteRes.status} ${JSON.stringify(inviteRes.body)}`);
   const invite = inviteRes.body.token;
 
-  // 3. Generate identity (matches @nova/mcp-server/src/identity.ts:generateIdentity)
+  // 3. Generate identity (matches @nova/shared/src/identity.ts:generateIdentity)
   console.log('3. Generating Ed25519 identity');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const jwk = publicKey.export({ format: 'jwk' }) as { x: string };
