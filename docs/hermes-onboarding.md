@@ -1,5 +1,7 @@
 # Hermes onboarding onto Nova (send + receive)
 
+> **For the generic agent-onboarding flow (any runtime, any topology), see [`agent-onboarding.md`](agent-onboarding.md).** This doc covers Hermes-specific deviations from that flow: the invite-minting commands, broker-receiver daemon option, and the full send+receive verification checklist.
+
 Hermes joins the Wolfe Dev galaxy as a **broker-mode agent** — meaning it both sends tasks *and* receives them, but without running an HTTP webhook. Inbound tasks are pulled over the MCP channel instead. This is the model meant for any AI runtime that can't host an inbound server (Hermes, Claude Code, Cursor, etc.).
 
 Everything below is implemented by the codebase; this doc just tells you which files to read and which commands to run in what order.

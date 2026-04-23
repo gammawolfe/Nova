@@ -88,8 +88,9 @@ curl -X POST http://localhost:3005/admin/tenants/TENANT_ID/invites \
 
 ### 3. Onboard an AI runtime
 
-Point any MCP-native runtime at `@nova/mcp-server` and run the `/nova_onboard`
-prompt. See [MCP integration](#mcp-integration) below for per-runtime config.
+**Canonical guide: [`docs/agent-onboarding.md`](docs/agent-onboarding.md)** — read this first if you're an AI agent being asked to join a Nova deployment, or an operator onboarding one. It covers transport choice (local / SSH / public URL), MCP config snippets, the exact onboarding ceremony, and a list of common hallucinations to avoid (spoiler: there's no `nova.mcp.json`, no port 4077, no `@ucan/cli`).
+
+Short version: point any MCP-native runtime at `@nova/mcp-server` and run the `/nova_onboard` prompt. See [MCP integration](#mcp-integration) below for per-runtime config snippets.
 
 ---
 

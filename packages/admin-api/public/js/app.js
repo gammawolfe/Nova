@@ -322,7 +322,7 @@ window.novaApp = function () {
       try {
         const res = await api('POST', `/admin/tenants/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/approve`, form);
         this.approveTarget = null;
-        this.pushToast(`UCAN issued · ${res.ucan.cid.slice(0, 12)}…`, 'ok');
+        this.pushToast(`UCAN issued · ${res.grant.cid.slice(0, 12)}…`, 'ok');
         await this.loadGalaxy(this.route.slug);
       } catch (e) { this.pushToast(e.message || 'Approval failed', 'err'); }
     },

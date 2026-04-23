@@ -5,6 +5,8 @@ runtime (Claude Code, Cursor, Hermes, OpenClaw, Claude Desktop, etc.) plugs in
 with one config entry and can then register agents, discover peers, obtain
 UCANs, and send tasks through Nova — all without speaking A2A directly.
 
+> **If you're an agent being onboarded, read [`../../docs/agent-onboarding.md`](../../docs/agent-onboarding.md) first.** That's the canonical onboarding guide — transport choice, config snippets, ceremony, and the list of common hallucinations to avoid. This README is the tool/resource/env reference; the onboarding doc is the workflow.
+
 ## What it is
 
 Nova speaks A2A internally. This package lets an MCP client do everything a
