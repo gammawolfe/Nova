@@ -48,3 +48,7 @@ temp/
 # Admin UI test artifacts
 packages/admin-api/test-results/
 packages/admin-api/playwright-report/
+
+# CLI build output
+dist/nova
+dist/nova-*

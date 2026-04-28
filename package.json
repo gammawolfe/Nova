@@ -32,7 +32,15 @@
     "backup": "bash scripts/backup.sh",
     "did:exchange": "tsx scripts/did-exchange.ts",
     "revoke:ucan": "tsx scripts/revoke-ucan.ts",
-    "lint": "eslint packages/*/src/**/*.ts"
+    "lint": "eslint packages/*/src/**/*.ts",
+    "cli": "tsx packages/cli/src/index.ts",
+    "cli:dev": "tsx packages/cli/src/index.ts",
+    "cli:build": "bun build packages/cli/src/index.ts --compile --outfile dist/nova",
+    "cli:build:macos-arm": "bun build packages/cli/src/index.ts --compile --target=bun-darwin-arm64 --outfile dist/nova-macos-arm64",
+    "cli:build:macos-x64": "bun build packages/cli/src/index.ts --compile --target=bun-darwin-x64 --outfile dist/nova-macos-x64",
+    "cli:build:linux": "bun build packages/cli/src/index.ts --compile --target=bun-linux-x64 --outfile dist/nova-linux-x64",
+    "cli:build:windows": "bun build packages/cli/src/index.ts --compile --target=bun-windows-x64 --outfile dist/nova-windows-x64.exe",
+    "cli:build:all": "npm run cli:build:macos-arm && npm run cli:build:macos-x64 && npm run cli:build:linux && npm run cli:build:windows"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
