@@ -1,9 +1,9 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { ActorRecord } from '@nova/shared/src/types';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { ActorRecord } from '@nova/shared';
 
 function didHash(did: string): string {
   return crypto.createHash('sha256').update(did).digest('hex');

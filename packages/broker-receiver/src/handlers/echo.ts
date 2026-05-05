@@ -7,7 +7,7 @@
 // daemon's machinery or in the handler itself.
 
 import type { Handler, HandlerFactory, HandlerResult } from './index.js';
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 
 export const echoHandlerFactory: HandlerFactory = () => {
   const handler: Handler = {

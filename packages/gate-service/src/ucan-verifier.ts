@@ -1,14 +1,14 @@
 import fsp from 'fs/promises';
 import { validate as ucansValidate } from '@ucans/ucans';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { logger } from '@nova/shared/src/logger';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { logger } from '@nova/shared';
 import {
   computeCid,
   parseUcanJwt,
   capsSubsumeAll,
   UcanCapability,
   UcanPayload,
-} from '@nova/shared/src/ucan';
+} from '@nova/shared';
 
 export interface UCANVerificationResult {
   valid: boolean;

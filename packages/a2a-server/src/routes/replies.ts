@@ -18,9 +18,9 @@
 
 import IORedis from 'ioredis';
 import { Router, Request, Response, NextFunction } from 'express';
-import { logger } from '@nova/shared/src/logger';
-import { auditLog } from '@nova/shared/src/audit';
-import { BROKER_MAX_WAIT_MS } from '@nova/shared/src/broker-config';
+import { logger } from '@nova/shared';
+import { auditLog } from '@nova/shared';
+import { BROKER_MAX_WAIT_MS } from '@nova/shared';
 import { redis } from '@nova/task-queue/src/index';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { authSelfUcan } from '../auth/self-ucan';

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as agentService from '../services/agent-service';
-import { DiscoverQuerySchema } from '@nova/shared/src/admin-schemas';
-import { ParsedAgentMeta } from '@nova/shared/src/agent-index';
+import { DiscoverQuerySchema } from '@nova/shared';
+import { ParsedAgentMeta } from '@nova/shared';
 
 export const discoverRouter = Router();
 

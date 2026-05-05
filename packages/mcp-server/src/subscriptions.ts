@@ -4,16 +4,16 @@
 // resource URI and translates each server-sent event into an MCP
 // notifications/resources/updated on the parent McpServer.
 //
-// The SSE parser + reconnect loop live in @nova/shared/src/sse-client so
+// The SSE parser + reconnect loop live in @nova/shared so
 // the broker-receiver daemon can reuse the same primitive without the MCP
 // concerns this module adds (resource URI → backing URL resolution,
 // server.sendResourceUpdated integration, per-URI lifecycle).
 
-import { streamSseEvents, SseEvent, SseStreamHandle } from '@nova/shared/src/sse-client';
+import { streamSseEvents, SseEvent, SseStreamHandle } from '@nova/shared';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { loadAgentRuntime } from './context.js';
-import { loadIdentity } from '@nova/shared/src/identity.js';
-import { mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
+import { loadIdentity } from '@nova/shared';
+import { mintSelfAuthToken } from '@nova/shared';
 
 export const INBOX_URI = 'nova://inbox';
 export const REPLIES_URI = 'nova://replies';

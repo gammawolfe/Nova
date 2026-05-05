@@ -1,10 +1,10 @@
 import express from 'express';
 import fsp from 'fs/promises';
-import { logger } from '@nova/shared/src/logger';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { timedCheck, healthHandler } from '@nova/shared/src/health';
-import { metricsHandler } from '@nova/shared/src/metrics';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { logger } from '@nova/shared';
+import { DATA_ROOT } from '@nova/shared';
+import { timedCheck, healthHandler } from '@nova/shared';
+import { metricsHandler } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 import { gateRegistry } from './metrics';
 
 const app = express();

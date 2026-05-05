@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared/src/admin-schemas';
+import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared';
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
-import { logger } from '@nova/shared/src/logger';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { logger } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 import { ctx } from '../middleware/ctx';
 
 // 24h window for the agent to poll GET /register/status after approval.

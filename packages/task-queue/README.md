@@ -75,7 +75,7 @@ list(ctx)                   // non-destructive peek (used by HTTP /peek and SSE 
 respond(ctx, taskId, ...)   // remove from inflight, returns accepted|already_completed|task_not_found
 ```
 
-Visibility-timeout semantics: `pull` claims a task under `BROKER_VISIBILITY_TIMEOUT_MS` (5 min in `@nova/shared/src/broker-config`); if `respond` doesn't land in time, a reclaim worker returns it to the inbox with `reclaimCount++`. Past `BROKER_RECLAIM_CEILING` attempts, the entry is written to dead-letter.
+Visibility-timeout semantics: `pull` claims a task under `BROKER_VISIBILITY_TIMEOUT_MS` (5 min, exported from `@nova/shared`); if `respond` doesn't land in time, a reclaim worker returns it to the inbox with `reclaimCount++`. Past `BROKER_RECLAIM_CEILING` attempts, the entry is written to dead-letter.
 
 Known caveat (documented at the `pull` call site): BLPOP + ZADD can't be made atomic with Redis Lua because BLPOP blocks. A process crash between the two commands loses the task from the inbox without in-flight tracking. Surface orphans via follow-up sweeps if this ever matters in practice.
 
@@ -112,4 +112,4 @@ Buckets: `100, 500, 1000, 5000, 15000, 30000, 60000` ms.
 
 ## Key-naming conventions
 
-All keys route through `redisKey(ctx, kind, ...)` and `queueName(ctx, tier)` from `@nova/shared/src/tenant`. Never hand-roll a key outside those helpers — tenant isolation depends on the helpers prefixing every key with the tenant id.
+All keys route through `redisKey(ctx, kind, ...)` and `queueName(ctx, tier)` from `@nova/shared`. Never hand-roll a key outside those helpers — tenant isolation depends on the helpers prefixing every key with the tenant id.

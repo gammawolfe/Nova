@@ -1,13 +1,13 @@
 // packages/task-queue/src/inbox.ts
 import fsp from 'fs/promises';
 import { redis } from './index';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { QueuedTask } from '@nova/shared/src/types';
-import { logger } from '@nova/shared/src/logger';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { QueuedTask } from '@nova/shared';
+import { logger } from '@nova/shared';
 import {
   BROKER_VISIBILITY_TIMEOUT_MS,
   BROKER_RECLAIM_CEILING,
-} from '@nova/shared/src/broker-config';
+} from '@nova/shared';
 import { writeDeadLetter } from './dead-letter';
 
 // ── Key helpers ─────────────────────────────────────────────────────────────

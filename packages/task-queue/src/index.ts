@@ -1,8 +1,8 @@
 import { Queue } from 'bullmq';
-import { logger } from '@nova/shared/src/logger';
-import { redisKey, queueName, TenantContext } from '@nova/shared/src/tenant';
-import { QueuedTask, TaskState, TaskResult } from '@nova/shared/src/types';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { logger } from '@nova/shared';
+import { redisKey, queueName, TenantContext } from '@nova/shared';
+import { QueuedTask, TaskState, TaskResult } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 
 export const redis = getSharedRedis();
 

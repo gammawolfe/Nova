@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { TenantContext } from '@nova/shared/src/tenant';
-import { logger } from '@nova/shared/src/logger';
+import { TenantContext } from '@nova/shared';
+import { logger } from '@nova/shared';
 import { redis } from '@nova/task-queue/src/index';
 
 // Extend Express Request tightly so the compiler knows ctx is always present downstream

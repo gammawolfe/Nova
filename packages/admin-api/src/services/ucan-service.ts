@@ -1,14 +1,14 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { loadNovaPrivateKey, loadNovaDid } from '@nova/shared/src/invites';
+import { DATA_ROOT } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { loadNovaPrivateKey, loadNovaDid } from '@nova/shared';
 import { verifyAndConsumeNonce } from './nonce-service';
 import * as agentService from './agent-service';
 import * as trustService from './trust-service';
-import { logger } from '@nova/shared/src/logger';
-import { buildUcanJwt, computeCid, type UcanCapability, type UcanPayload } from '@nova/shared/src/ucan';
+import { logger } from '@nova/shared';
+import { buildUcanJwt, computeCid, type UcanCapability, type UcanPayload } from '@nova/shared';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sender-signed delegation-chain UCAN model.

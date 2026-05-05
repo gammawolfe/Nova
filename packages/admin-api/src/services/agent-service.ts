@@ -1,10 +1,10 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
-import { ID_RE, validateId } from '@nova/shared/src/validation';
-import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta, AGENT_LIFECYCLE_CHANNEL, AgentLifecycleEvent } from '@nova/shared/src/agent-index';
+import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { getSharedRedis, closeSharedRedis } from '@nova/shared';
+import { ID_RE, validateId } from '@nova/shared';
+import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta, AGENT_LIFECYCLE_CHANNEL, AgentLifecycleEvent } from '@nova/shared';
 
 export { closeSharedRedis as closeRedis };
 export type { ParsedAgentMeta };

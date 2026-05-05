@@ -14,9 +14,9 @@
 
 import { Request, Response } from 'express';
 import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
-import { getAgentMeta } from '@nova/shared/src/agent-index';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { TenantContext } from '@nova/shared/src/tenant';
+import { getAgentMeta } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { TenantContext } from '@nova/shared';
 
 interface SelfUcanResult {
   ok: true;

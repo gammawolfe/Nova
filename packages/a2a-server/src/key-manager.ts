@@ -1,7 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
 import * as ucans from '@ucans/ucans';
-import { logger } from '@nova/shared/src/logger';
+import { logger } from '@nova/shared';
 
 export class KeyManager {
   private static instance: KeyManager;

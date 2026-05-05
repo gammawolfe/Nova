@@ -1,5 +1,5 @@
 import { Request } from 'express';
-import { TenantContext } from '@nova/shared/src/tenant';
+import { TenantContext } from '@nova/shared';
 
 /** Extract TenantContext from route params — shared across admin-api routes. */
 export function ctx(req: Request): TenantContext {

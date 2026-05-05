@@ -2,14 +2,14 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { logger } from '@nova/shared/src/logger';
-import { SelfRegisterSchema } from '@nova/shared/src/admin-schemas';
-import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
-import { verifyInvite, consumeInvite } from '@nova/shared/src/invites';
-import { validateId } from '@nova/shared/src/validation';
+import { logger } from '@nova/shared';
+import { SelfRegisterSchema } from '@nova/shared';
+import { DATA_ROOT, TenantContext } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared';
+import { verifyInvite, consumeInvite } from '@nova/shared';
+import { validateId } from '@nova/shared';
 
 export const registerRouter = Router();
 

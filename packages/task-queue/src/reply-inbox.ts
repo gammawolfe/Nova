@@ -8,14 +8,14 @@
 // direct-lookup key stores the TaskResult by taskId for nova_get_task_result.
 
 import { redis } from './index';
-import { TenantContext } from '@nova/shared/src/tenant';
-import { TaskResult } from '@nova/shared/src/types';
-import { logger } from '@nova/shared/src/logger';
+import { TenantContext } from '@nova/shared';
+import { TaskResult } from '@nova/shared';
+import { logger } from '@nova/shared';
 import {
   BROKER_VISIBILITY_TIMEOUT_MS,
   BROKER_RECLAIM_CEILING,
   BROKER_REPLY_RESULT_TTL_SECONDS,
-} from '@nova/shared/src/broker-config';
+} from '@nova/shared';
 import { writeDeadLetter } from './dead-letter';
 
 // ── Key helpers ─────────────────────────────────────────────────────────────

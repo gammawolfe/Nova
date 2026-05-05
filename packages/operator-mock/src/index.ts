@@ -10,7 +10,7 @@
 
 import express from 'express';
 import crypto from 'crypto';
-import { logger } from '@nova/shared/src/logger';
+import { logger } from '@nova/shared';
 
 const app = express();
 const PORT = parseInt(process.env.OPERATOR_PORT || '4000', 10);

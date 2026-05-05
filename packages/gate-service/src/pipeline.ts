@@ -1,11 +1,11 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath, KEY_ROOT } from '@nova/shared/src/tenant';
-import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
-import { TrustTier, ActorRecord } from '@nova/shared/src/types';
-import { auditLog } from '@nova/shared/src/audit';
-import { logger } from '@nova/shared/src/logger';
+import { TenantContext, tenantDataPath, KEY_ROOT } from '@nova/shared';
+import { GateErrorCode, NovaError } from '@nova/shared';
+import { TrustTier, ActorRecord } from '@nova/shared';
+import { auditLog } from '@nova/shared';
+import { logger } from '@nova/shared';
 import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
@@ -413,8 +413,7 @@ async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): P
   // on top of protocol-level identity. Forged `iss` DIDs that don't match a
   // registered agent still fall through to tier 0 (unknown actor).
   try {
-    const { getSharedRedis } = await import('@nova/shared/src/redis');
-    const { getAgentByDid } = await import('@nova/shared/src/agent-index');
+    const { getSharedRedis, getAgentByDid } = await import('@nova/shared');
     const agent = await getAgentByDid(getSharedRedis(), did);
     if (agent && agent.status === 'active') {
       return {

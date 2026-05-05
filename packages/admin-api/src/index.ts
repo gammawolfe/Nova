@@ -4,7 +4,7 @@ import './config';
 import express from 'express';
 import { Router } from 'express';
 import path from 'path';
-import { logger } from '@nova/shared/src/logger';
+import { logger } from '@nova/shared';
 import { adminAuth } from './middleware/auth';
 import { errorHandler } from './middleware/error-handler';
 import { tenantsRouter } from './routes/tenants';
@@ -22,9 +22,9 @@ import { discoverRouter } from './routes/discover';
 import { invitesRouter } from './routes/invites';
 import { eventsRouter } from './routes/events';
 import { brokerStatusRouter, brokerSummaryRouter } from './routes/broker';
-import { AgentRotateKeySchema } from '@nova/shared/src/admin-schemas';
-import { healthHandler, timedCheck } from '@nova/shared/src/health';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { AgentRotateKeySchema } from '@nova/shared';
+import { healthHandler, timedCheck } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 import * as ucanService from './services/ucan-service';
 import * as nonceService from './services/nonce-service';
 
@@ -135,7 +135,7 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
 async function shutdown(signal: string) {
   logger.info({ signal }, 'Admin API shutting down');
   server.close(async () => {
-    const { closeSharedRedis } = await import('@nova/shared/src/redis');
+    const { closeSharedRedis } = await import('@nova/shared');
     await closeSharedRedis();
     process.exit(0);
   });

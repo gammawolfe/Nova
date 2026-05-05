@@ -1,12 +1,12 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { Tenant, TenantQuotas } from '@nova/shared/src/tenant';
-import { ID_RE, validateId } from '@nova/shared/src/validation';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { TENANT_LIFECYCLE_CHANNEL, TenantLifecycleEvent } from '@nova/shared/src/agent-index';
+import { DATA_ROOT } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { Tenant, TenantQuotas } from '@nova/shared';
+import { ID_RE, validateId } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { TENANT_LIFECYCLE_CHANNEL, TenantLifecycleEvent } from '@nova/shared';
 
 const tenantsDir = path.join(DATA_ROOT, 'tenants');
 

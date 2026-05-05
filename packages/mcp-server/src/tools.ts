@@ -7,8 +7,8 @@ import {
   loadIdentity,
   listAgentIds,
   sign,
-} from '@nova/shared/src/identity.js';
-import { loadTenantConfig, saveTenantConfig, decodeInvitePayload } from '@nova/shared/src/tenant-config.js';
+} from '@nova/shared';
+import { loadTenantConfig, saveTenantConfig, decodeInvitePayload } from '@nova/shared';
 import { loadAgentRuntime, bootstrapClient } from './context.js';
 import {
   loadCache as loadUcanCache,
@@ -16,9 +16,9 @@ import {
   withCacheLock,
   remainingFraction,
   getGrantIfFresh,
-} from '@nova/shared/src/ucan-store.js';
-import { mintInvocationToken, mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
-import { agentIdentityPath } from '@nova/shared/src/paths.js';
+} from '@nova/shared';
+import { mintInvocationToken, mintSelfAuthToken } from '@nova/shared';
+import { agentIdentityPath } from '@nova/shared';
 import fsp from 'fs/promises';
 import type { NovaClient } from './nova-client.js';
 

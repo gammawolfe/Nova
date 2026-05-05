@@ -19,7 +19,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import fsp from 'fs/promises';
 import { z } from 'zod';
 import type { Handler, HandlerFactory, HandlerContext, HandlerResult } from './index.js';
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TOKENS = 4096;

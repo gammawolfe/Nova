@@ -1,8 +1,8 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { QuarantineEntry } from '@nova/shared/src/types';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { QuarantineEntry } from '@nova/shared';
 
 function quarantineDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'quarantine');

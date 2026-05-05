@@ -1,7 +1,7 @@
 import { ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
-import { NovaError } from '@nova/shared/src/errors';
-import { logger } from '@nova/shared/src/logger';
+import { NovaError } from '@nova/shared';
+import { logger } from '@nova/shared';
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {

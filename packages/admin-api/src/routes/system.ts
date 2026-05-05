@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import fsp from 'fs/promises';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { timedCheck, healthHandler, HealthCheck } from '@nova/shared/src/health';
-import { createMetricsRegistry, metricsHandler } from '@nova/shared/src/metrics';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { DATA_ROOT } from '@nova/shared';
+import { timedCheck, healthHandler, HealthCheck } from '@nova/shared';
+import { createMetricsRegistry, metricsHandler } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 
 export const systemRouter = Router();
 export const adminRegistry = createMetricsRegistry('admin-api');

@@ -2,9 +2,9 @@ import { createReadStream } from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import readline from 'readline';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { AuditEvent } from '@nova/shared/src/types';
-import { ID_RE } from '@nova/shared/src/validation';
+import { DATA_ROOT } from '@nova/shared';
+import { AuditEvent } from '@nova/shared';
+import { ID_RE } from '@nova/shared';
 
 function auditDir(tenantId: string): string {
   return path.join(DATA_ROOT, 'audit', tenantId);

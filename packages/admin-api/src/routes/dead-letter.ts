@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { PaginationSchema } from '@nova/shared/src/admin-schemas';
+import { PaginationSchema } from '@nova/shared';
 import * as dlService from '../services/dead-letter-service';
 import { ctx } from '../middleware/ctx';
 

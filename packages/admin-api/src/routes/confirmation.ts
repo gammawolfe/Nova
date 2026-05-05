@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { ConfirmApproveSchema } from '@nova/shared/src/admin-schemas';
+import { ConfirmApproveSchema } from '@nova/shared';
 import * as confirmService from '../services/confirmation-service';
 import { ctx } from '../middleware/ctx';
 

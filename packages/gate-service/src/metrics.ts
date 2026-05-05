@@ -1,5 +1,5 @@
 import { Counter, Histogram, Gauge } from 'prom-client';
-import { createMetricsRegistry } from '@nova/shared/src/metrics';
+import { createMetricsRegistry } from '@nova/shared';
 
 export const gateRegistry = createMetricsRegistry('gate-service');
 

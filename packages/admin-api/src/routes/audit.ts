@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AuditQuerySchema } from '@nova/shared/src/admin-schemas';
+import { AuditQuerySchema } from '@nova/shared';
 import * as auditService from '../services/audit-service';
 
 export const auditRouter = Router({ mergeParams: true });

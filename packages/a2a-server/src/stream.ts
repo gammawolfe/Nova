@@ -1,8 +1,8 @@
 import IORedis from 'ioredis';
 import { Router, Request, Response } from 'express';
-import { logger } from '@nova/shared/src/logger';
-import { redisKey } from '@nova/shared/src/tenant';
-import { TERMINAL_STATUSES } from '@nova/shared/src/types';
+import { logger } from '@nova/shared';
+import { redisKey } from '@nova/shared';
+import { TERMINAL_STATUSES } from '@nova/shared';
 import { redis, getTaskState } from '@nova/task-queue/src/index';
 import { activeSseStreams } from './metrics';
 

@@ -1,5 +1,5 @@
 import { Gauge, Histogram } from 'prom-client';
-import { createMetricsRegistry } from '@nova/shared/src/metrics';
+import { createMetricsRegistry } from '@nova/shared';
 
 export const queueRegistry = createMetricsRegistry('task-queue');
 

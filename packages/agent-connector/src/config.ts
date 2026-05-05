@@ -1,5 +1,5 @@
 import fsp from 'fs/promises';
-import { tenantDataPath, TenantContext } from '@nova/shared/src/tenant';
+import { tenantDataPath, TenantContext } from '@nova/shared';
 
 const CONFIG_TTL_MS = 30_000; // 30 seconds
 const configCache = new Map<string, { config: Record<string, unknown>; expiresAt: number }>();

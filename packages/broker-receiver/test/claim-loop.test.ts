@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ClaimLoop } from '../src/claim-loop';
 import { TransportError, HttpError } from '../src/nova-client';
 import type { Logger } from '../src/handlers/index';
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 
 const nullLogger: Logger = {
   debug: () => {},

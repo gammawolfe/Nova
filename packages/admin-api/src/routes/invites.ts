@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { InviteCreateSchema } from '@nova/shared/src/admin-schemas';
-import { createInvite } from '@nova/shared/src/invites';
+import { InviteCreateSchema } from '@nova/shared';
+import { createInvite } from '@nova/shared';
 import * as tenantService from '../services/tenant-service';
-import { logger } from '@nova/shared/src/logger';
+import { logger } from '@nova/shared';
 
 export const invitesRouter = Router({ mergeParams: true });
 

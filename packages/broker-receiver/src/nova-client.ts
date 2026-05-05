@@ -11,7 +11,7 @@
 // owns retry policy.
 
 import { request } from 'undici';
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 
 export interface NovaClientOptions {
   novaUrl: string;

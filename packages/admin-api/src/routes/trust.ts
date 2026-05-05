@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { TrustActorAddSchema, TrustActorUpdateTierSchema } from '@nova/shared/src/admin-schemas';
+import { TrustActorAddSchema, TrustActorUpdateTierSchema } from '@nova/shared';
 import * as trustService from '../services/trust-service';
 import { ctx } from '../middleware/ctx';
 

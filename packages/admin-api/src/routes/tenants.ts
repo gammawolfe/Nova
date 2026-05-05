@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { TenantCreateSchema, TenantUpdateSchema } from '@nova/shared/src/admin-schemas';
+import { TenantCreateSchema, TenantUpdateSchema } from '@nova/shared';
 import * as tenantService from '../services/tenant-service';
 
 export const tenantsRouter = Router();

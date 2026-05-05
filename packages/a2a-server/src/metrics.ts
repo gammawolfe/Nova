@@ -1,5 +1,5 @@
 import { Gauge } from 'prom-client';
-import { createMetricsRegistry } from '@nova/shared/src/metrics';
+import { createMetricsRegistry } from '@nova/shared';
 
 export const a2aRegistry = createMetricsRegistry('a2a-server');
 

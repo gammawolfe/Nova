@@ -25,7 +25,7 @@
 // The public surface (start/stop/getStats) is kept compatible with the
 // prior PullLoop so run.ts only needs a minor wiring update.
 
-import { streamSseEvents, SseStreamHandle } from '@nova/shared/src/sse-client';
+import { streamSseEvents, SseStreamHandle } from '@nova/shared';
 import type { Dispatcher } from './dispatcher.js';
 import type { NovaBrokerClient } from './nova-client.js';
 import { TransportError, HttpError } from './nova-client.js';

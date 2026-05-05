@@ -16,15 +16,16 @@ vi.mock('@nova/task-queue/src/reply-inbox', async () => ({
     `nova:reply-inbox-inflight:${ctx.tenantId}:${ctx.agentId}`,
 }));
 
-vi.mock('@nova/shared/src/broker-config', () => ({
-  BROKER_VISIBILITY_TIMEOUT_MS: 5 * 60 * 1000,
-}));
-
-vi.mock('@nova/shared/src/redis', () => ({
-  getSharedRedis: vi.fn(() => {
-    throw new Error('tests must pass redis explicitly');
-  }),
-}));
+vi.mock('@nova/shared', async (importActual) => {
+  const actual = await importActual<typeof import('@nova/shared')>();
+  return {
+    ...actual,
+    BROKER_VISIBILITY_TIMEOUT_MS: 5 * 60 * 1000,
+    getSharedRedis: vi.fn(() => {
+      throw new Error('tests must pass redis explicitly');
+    }),
+  };
+});
 
 vi.mock('../../src/services/agent-service', () => ({
   listAllActiveAgents: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock('../../src/services/agent-service', () => ({
 import * as brokerService from '../../src/services/broker-service';
 import { isBrokerAgent } from '@nova/task-queue/src/inbox';
 import { listAllActiveAgents } from '../../src/services/agent-service';
-import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared/src/broker-config';
+import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared';
 
 /** Minimal ioredis stub wired to in-memory maps. */
 function makeRedis(state: {

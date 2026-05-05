@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { UcanIssueSchema, UcanRevokeSchema } from '@nova/shared/src/admin-schemas';
+import { UcanIssueSchema, UcanRevokeSchema } from '@nova/shared';
 import * as ucanService from '../services/ucan-service';
 
 export const ucanRouter = Router({ mergeParams: true });

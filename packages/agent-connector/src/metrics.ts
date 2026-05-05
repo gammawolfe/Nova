@@ -1,5 +1,5 @@
 import { Counter } from 'prom-client';
-import { createMetricsRegistry } from '@nova/shared/src/metrics';
+import { createMetricsRegistry } from '@nova/shared';
 
 export const connectorRegistry = createMetricsRegistry('agent-connector');
 

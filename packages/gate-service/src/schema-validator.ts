@@ -1,7 +1,7 @@
 import fsp from 'fs/promises';
-import { tenantDataPath } from '@nova/shared/src/tenant';
-import { TenantContext } from '@nova/shared/src/tenant';
-import { TaskRequestSchema } from '@nova/shared/src/schemas';
+import { tenantDataPath } from '@nova/shared';
+import { TenantContext } from '@nova/shared';
+import { TaskRequestSchema } from '@nova/shared';
 
 export interface ValidationResult {
   valid: boolean;

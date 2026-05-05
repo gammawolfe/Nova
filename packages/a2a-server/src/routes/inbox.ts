@@ -1,19 +1,19 @@
 // packages/a2a-server/src/routes/inbox.ts
 import IORedis from 'ioredis';
 import { Router, Request, Response, NextFunction } from 'express';
-import { logger } from '@nova/shared/src/logger';
-import { auditLog } from '@nova/shared/src/audit';
+import { logger } from '@nova/shared';
+import { auditLog } from '@nova/shared';
 import {
   TASK_LIFECYCLE_CHANNEL,
   TaskLifecycleEvent,
   getAgentMeta,
-} from '@nova/shared/src/agent-index';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { TaskResult } from '@nova/shared/src/types';
+} from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { TaskResult } from '@nova/shared';
 import {
   BROKER_MAX_WAIT_MS,
   BROKER_RESULT_MAX_BYTES,
-} from '@nova/shared/src/broker-config';
+} from '@nova/shared';
 import { redis } from '@nova/task-queue/src/index';
 import * as inbox from '@nova/task-queue/src/inbox';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';

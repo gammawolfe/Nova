@@ -1,13 +1,13 @@
 import IORedis from 'ioredis';
 import { Worker, Job } from 'bullmq';
-import { queueName, TenantContext } from '@nova/shared/src/tenant';
-import { getSharedRedis, REDIS_URL } from '@nova/shared/src/redis';
-import { logger } from '@nova/shared/src/logger';
+import { queueName, TenantContext } from '@nova/shared';
+import { getSharedRedis, REDIS_URL } from '@nova/shared';
+import { logger } from '@nova/shared';
 import {
   AGENT_LIFECYCLE_CHANNEL,
   AgentLifecycleEvent,
   listActiveAgentMeta,
-} from '@nova/shared/src/agent-index';
+} from '@nova/shared';
 
 type TaskProcessor = (job: Job, ctx: TenantContext) => Promise<void>;
 

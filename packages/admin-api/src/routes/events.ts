@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
 import IORedis from 'ioredis';
-import { REDIS_URL } from '@nova/shared/src/redis';
+import { REDIS_URL } from '@nova/shared';
 import {
   AGENT_LIFECYCLE_CHANNEL,
   TENANT_LIFECYCLE_CHANNEL,
   TASK_LIFECYCLE_CHANNEL,
-} from '@nova/shared/src/agent-index';
-import { logger } from '@nova/shared/src/logger';
+} from '@nova/shared';
+import { logger } from '@nova/shared';
 
 export const eventsRouter = Router();
 

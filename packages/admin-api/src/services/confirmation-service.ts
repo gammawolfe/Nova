@@ -1,8 +1,8 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
-import { ConfirmRequest } from '@nova/shared/src/confirmation';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { writeAtomicallyAsync } from '@nova/shared';
+import { ConfirmRequest } from '@nova/shared';
 
 function confirmDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'confirm-queue');

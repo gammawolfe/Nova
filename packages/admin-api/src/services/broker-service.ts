@@ -1,7 +1,7 @@
 import type IORedis from 'ioredis';
-import { TenantContext } from '@nova/shared/src/tenant';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared/src/broker-config';
+import { TenantContext } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared';
 import {
   inboxKey,
   inflightKey,

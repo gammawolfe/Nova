@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { logger } from '@nova/shared/src/logger';
+import { logger } from '@nova/shared';
 
 interface NonceRecord {
   nonce: string;

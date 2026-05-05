@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Dispatcher } from '../src/dispatcher';
 import type { Handler, HandlerResult, Logger } from '../src/handlers/index';
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 
 function mkTask(taskId: string, intent = 'chat'): QueuedTask {
   return {

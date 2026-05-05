@@ -1,7 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
-import { DeadLetterEntry } from '@nova/shared/src/types';
+import { TenantContext, tenantDataPath } from '@nova/shared';
+import { DeadLetterEntry } from '@nova/shared';
 
 function dlDir(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'dead-letter');

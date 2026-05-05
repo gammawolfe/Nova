@@ -7,15 +7,15 @@
 
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
-import { redisKey } from '@nova/shared/src/tenant';
-import { TenantContext } from '@nova/shared/src/tenant';
-import { logger } from '@nova/shared/src/logger';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { redisKey } from '@nova/shared';
+import { TenantContext } from '@nova/shared';
+import { logger } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
 
 // Re-export shared types for backwards compatibility
-export { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
+export { extractStrings, StringField, PatternMatchResult } from '@nova/shared';
 
-import { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
+import { extractStrings, StringField, PatternMatchResult } from '@nova/shared';
 import { classifierCacheHits, classifierCacheMisses } from './metrics';
 
 // ─── Stage A: Pattern Matching ───────────────────────────────────────────────

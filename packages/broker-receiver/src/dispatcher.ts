@@ -9,7 +9,7 @@
 // blocking for concurrency == 1 (the default and the recommended
 // configuration for v1).
 
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 import type { Handler, HandlerContext, Logger } from './handlers/index.js';
 import type { NovaBrokerClient } from './nova-client.js';
 

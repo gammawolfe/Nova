@@ -1,6 +1,6 @@
 import { NovaClient } from './nova-client.js';
-import { loadTenantConfig } from '@nova/shared/src/tenant-config.js';
-import { loadIdentity } from '@nova/shared/src/identity.js';
+import { loadTenantConfig } from '@nova/shared';
+import { loadIdentity } from '@nova/shared';
 
 export interface AgentRuntime {
   agentId: string;

@@ -16,10 +16,10 @@
 import { Router, Request, Response } from 'express';
 import fsp from 'fs/promises';
 import path from 'path';
-import { DATA_ROOT } from '@nova/shared/src/tenant';
-import { getSharedRedis } from '@nova/shared/src/redis';
-import { getAgentMeta } from '@nova/shared/src/agent-index';
-import { logger } from '@nova/shared/src/logger';
+import { DATA_ROOT } from '@nova/shared';
+import { getSharedRedis } from '@nova/shared';
+import { getAgentMeta } from '@nova/shared';
+import { logger } from '@nova/shared';
 
 export const healthRouter = Router({ mergeParams: true });
 

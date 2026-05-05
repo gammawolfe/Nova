@@ -1,6 +1,6 @@
-import { logger } from '@nova/shared/src/logger';
-import { QueuedTask, TaskResult } from '@nova/shared/src/types';
-import { TaskResultSchema } from '@nova/shared/src/schemas';
+import { logger } from '@nova/shared';
+import { QueuedTask, TaskResult } from '@nova/shared';
+import { TaskResultSchema } from '@nova/shared';
 
 export interface DeliveryResult {
   success: boolean;

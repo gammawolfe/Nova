@@ -11,7 +11,7 @@
 // it still work but risk being double-dispatched if Nova's reclaim worker
 // picks up the task before respond lands.
 
-import type { QueuedTask } from '@nova/shared/src/types';
+import type { QueuedTask } from '@nova/shared';
 import type { ReceiverConfig } from '../config.js';
 
 export interface HandlerResultOk {
