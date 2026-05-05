@@ -5,7 +5,7 @@ import path from 'path';
 import { logger } from '@nova/shared';
 import { auditLog } from '@nova/shared';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
-import { enqueueWithIdempotency, setTaskState, getTaskState, redis } from '@nova/task-queue/src/index';
+import { enqueueWithIdempotency, setTaskState, getTaskState, redis } from '@nova/task-queue';
 import { QueuedTask, TaskState } from '@nova/shared';
 import { AgentCardSchema } from '@nova/shared';
 import { tenantDataPath, redisKey, DATA_ROOT, KEY_ROOT } from '@nova/shared';

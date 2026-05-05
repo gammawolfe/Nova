@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { PaginationSchema } from '@nova/shared';
-import { enqueueWithIdempotency } from '@nova/task-queue/src/index';
+import { enqueueWithIdempotency } from '@nova/task-queue';
 import { QueuedTaskSchema } from '@nova/shared';
 import * as quarantineService from '../services/quarantine-service';
 import { ctx } from '../middleware/ctx';

@@ -180,3 +180,10 @@ export async function updateTaskStatus(
 }
 
 export * from './inbox';
+export * from './reply-inbox';
+export * from './dead-letter';
+export * from './metrics';
+
+export * as inbox from './inbox';
+export * as replyInbox from './reply-inbox';
+export * as deadLetter from './dead-letter';

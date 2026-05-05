@@ -3,7 +3,7 @@ import { Router, Request, Response } from 'express';
 import { logger } from '@nova/shared';
 import { redisKey } from '@nova/shared';
 import { TERMINAL_STATUSES } from '@nova/shared';
-import { redis, getTaskState } from '@nova/task-queue/src/index';
+import { redis, getTaskState } from '@nova/task-queue';
 import { activeSseStreams } from './metrics';
 
 export const streamRouter = Router({ mergeParams: true });

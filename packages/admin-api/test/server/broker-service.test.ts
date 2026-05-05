@@ -1,15 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type IORedis from 'ioredis';
 
-vi.mock('@nova/task-queue/src/inbox', async () => ({
+vi.mock('@nova/task-queue', () => ({
   inboxKey: (ctx: { tenantId: string; agentId: string }) =>
     `nova:inbox:${ctx.tenantId}:${ctx.agentId}`,
   inflightKey: (ctx: { tenantId: string; agentId: string }) =>
     `nova:inflight:${ctx.tenantId}:${ctx.agentId}`,
   isBrokerAgent: vi.fn(async () => true),
-}));
-
-vi.mock('@nova/task-queue/src/reply-inbox', async () => ({
   replyInboxKey: (ctx: { tenantId: string; agentId: string }) =>
     `nova:reply-inbox:${ctx.tenantId}:${ctx.agentId}`,
   replyInflightKey: (ctx: { tenantId: string; agentId: string }) =>
@@ -32,7 +29,7 @@ vi.mock('../../src/services/agent-service', () => ({
 }));
 
 import * as brokerService from '../../src/services/broker-service';
-import { isBrokerAgent } from '@nova/task-queue/src/inbox';
+import { isBrokerAgent } from '@nova/task-queue';
 import { listAllActiveAgents } from '../../src/services/agent-service';
 import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared';
 

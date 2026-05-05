@@ -21,8 +21,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared';
 import { auditLog } from '@nova/shared';
 import { BROKER_MAX_WAIT_MS } from '@nova/shared';
-import { redis } from '@nova/task-queue/src/index';
-import * as replyInbox from '@nova/task-queue/src/reply-inbox';
+import { redis } from '@nova/task-queue';
+import { replyInbox } from '@nova/task-queue';
 import { authSelfUcan } from '../auth/self-ucan';
 import { activeSseStreams } from '../metrics';
 

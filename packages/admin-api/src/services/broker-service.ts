@@ -6,11 +6,11 @@ import {
   inboxKey,
   inflightKey,
   isBrokerAgent,
-} from '@nova/task-queue/src/inbox';
+} from '@nova/task-queue';
 import {
   replyInboxKey,
   replyInflightKey,
-} from '@nova/task-queue/src/reply-inbox';
+} from '@nova/task-queue';
 import { listAllActiveAgents } from './agent-service';
 
 export type BrokerMode = 'broker' | 'direct';

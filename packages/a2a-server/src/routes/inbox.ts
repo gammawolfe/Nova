@@ -14,10 +14,10 @@ import {
   BROKER_MAX_WAIT_MS,
   BROKER_RESULT_MAX_BYTES,
 } from '@nova/shared';
-import { redis } from '@nova/task-queue/src/index';
-import * as inbox from '@nova/task-queue/src/inbox';
-import * as replyInbox from '@nova/task-queue/src/reply-inbox';
-import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
+import { redis } from '@nova/task-queue';
+import { inbox } from '@nova/task-queue';
+import { replyInbox } from '@nova/task-queue';
+import { writeDeadLetter } from '@nova/task-queue';
 import { authSelfUcan } from '../auth/self-ucan';
 import { activeSseStreams } from '../metrics';
 
