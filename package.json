@@ -32,10 +32,12 @@
     "backup": "bash scripts/backup.sh",
     "did:exchange": "tsx scripts/did-exchange.ts",
     "revoke:ucan": "tsx scripts/revoke-ucan.ts",
-    "lint": "eslint packages/*/src/**/*.ts"
+    "lint": "eslint packages/*/src/**/*.ts",
+    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs --no-progress packages/"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "dependency-cruiser": "^17.4.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.5.0"
