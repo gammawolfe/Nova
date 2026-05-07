@@ -6,7 +6,7 @@
 // swapping the handler to 'echo' isolates whether the problem is in the
 // daemon's machinery or in the handler itself.
 
-import type { Handler, HandlerFactory, HandlerResult } from './index.js';
+import type { Handler, HandlerFactory, HandlerResult } from './types.js';
 import type { QueuedTask } from '@nova/shared/src/types';
 
 export const echoHandlerFactory: HandlerFactory = () => {

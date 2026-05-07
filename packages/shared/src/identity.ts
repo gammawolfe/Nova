@@ -25,6 +25,16 @@ export interface IdentityWithCreds extends Identity {
     trustTier?: number;
     ucanRenewalUrl?: string;
   };
+  // H17 — Claim secret for grant pickup. Generated at registration time,
+  // sent to the server only as a SHA-256 commitment. Persisted locally
+  // alongside the private key (the file is already mode 0600). When the
+  // active key backend is 'keychain', the secret rides in the on-disk JSON
+  // — it is a 32-byte uniform random value with the same effective entropy
+  // as the Ed25519 private scalar, but its compromise only enables a
+  // one-time grant pickup race within the 24h claim window, not signing.
+  // Treating it as ~equivalent to the keypair file is the simpler and
+  // safer call than splitting it across stores.
+  claimSecret?: string;
 }
 
 function encodeDidKey(rawPublicKey: Buffer): string {

@@ -51,6 +51,7 @@ export class NovaClient {
     operatorUrl?: string | undefined;
     skills: Array<{ id: string; name: string; description: string; tags?: string[] | undefined; inputSchema?: unknown; outputSchema?: unknown }>;
     replyUrl?: string | undefined;
+    claimCommitment?: string | undefined;
   }): Promise<{ status: 'pending'; tenantId: string; agentId: string; statusUrl: string }> {
     return json('POST', joinUrl(this.opts.novaUrl, '/register'), payload);
   }
@@ -64,13 +65,18 @@ export class NovaClient {
     return json('POST', joinUrl(this.opts.novaUrl, '/register/verify-invite'), { invite });
   }
 
-  async registrationStatus(tenantId: string, agentId: string): Promise<{
+  async registrationStatus(tenantId: string, agentId: string, claimSecret?: string): Promise<{
     status: 'pending' | 'active' | 'deregistered';
     tenantId: string;
     agentId: string;
     grant?: { jwt: string; cid: string; expiresAt: string; trustTier?: number };
+    error?: string;
   }> {
-    return json('GET', joinUrl(this.opts.novaUrl, `/register/status/${tenantId}/${agentId}`));
+    const headers: Record<string, string> = {};
+    if (claimSecret) {
+      headers['x-claim-secret'] = claimSecret;
+    }
+    return json('GET', joinUrl(this.opts.novaUrl, `/register/status/${tenantId}/${agentId}`), undefined, headers);
   }
 
   // ── Discovery ────────────────────────────────────────────────────────────

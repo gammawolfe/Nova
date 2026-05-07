@@ -33,6 +33,12 @@ export interface AgentConfig {
   did?: string | undefined;
   publicKey?: string | undefined;
   replyUrl?: string | undefined;
+  // H17 — Hash of the client-generated claim secret. When present, GET
+  // /register/status requires the matching secret in X-Claim-Secret to
+  // release the post-approval grant. Persisted to disk so reissue can
+  // continue to honour it across server restarts. Rotated on key rotation
+  // and on nova_reissue_ucan when the operator opts to refresh it.
+  claimCommitment?: string | undefined;
 }
 
 async function publishLifecycle(event: AgentLifecycleEvent): Promise<void> {
@@ -260,7 +266,10 @@ export async function getActiveAgent(agentId: string): Promise<ParsedAgentMeta |
 }
 
 export type AgentUpdateInput =
-  Partial<Omit<AgentConfig, 'operatorUrl'>> & { operatorUrl?: string | null | undefined };
+  Partial<Omit<AgentConfig, 'operatorUrl' | 'claimCommitment'>> & {
+    operatorUrl?: string | null | undefined;
+    claimCommitment?: string | null | undefined;
+  };
 
 export async function updateAgent(
   tenantId: string,
@@ -276,6 +285,13 @@ export async function updateAgent(
   // the broker gate (isBrokerAgent) sees the field as absent on disk.
   if (updates.operatorUrl === null) {
     delete (updated as { operatorUrl?: string }).operatorUrl;
+  }
+  // Same null-as-clear convention for claimCommitment. Used by the H17
+  // reissue path with clearClaimCommitment:true to drop the commitment so
+  // a re-registering agent (or one that lost its secret) can claim again
+  // without presenting the original.
+  if (updates.claimCommitment === null) {
+    delete (updated as { claimCommitment?: string }).claimCommitment;
   }
   await writeAtomicallyAsync(agentConfigPath({ tenantId, agentId }), updated);
   await indexAgentMeta(getSharedRedis(), updated);

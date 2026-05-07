@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema } from '@nova/shared/src/admin-schemas';
+import { AgentCreateSchema, AgentUpdateSchema, AgentApprovalSchema, UcanReissueSchema } from '@nova/shared/src/admin-schemas';
 import * as agentService from '../services/agent-service';
 import * as trustService from '../services/trust-service';
 import * as ucanService from '../services/ucan-service';
@@ -162,7 +162,31 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
 agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
   try {
     const { tenantId, agentId } = p(req);
+    const data = UcanReissueSchema.parse(req.body ?? {});
     const result = await ucanService.reissueGrant(tenantId, agentId);
+
+    // H17 — Optionally strip the claim-secret commitment when an operator
+    // reissues for an agent that has lost its local secret. Without this
+    // flag, the existing commitment continues to gate pickup so a stolen
+    // tenantId/agentId can't be claimed by an attacker who never had the
+    // original secret. With it, the next status fetch delivers the grant
+    // unauthenticated — equivalent to the pre-H17 behaviour, scoped to a
+    // single operator-approved reissue event.
+    if (data.clearClaimCommitment) {
+      const agent = await agentService.getAgent(tenantId, agentId);
+      if (agent && agent.claimCommitment) {
+        await agentService.updateAgent(tenantId, agentId, { claimCommitment: null });
+        logger.warn(
+          { tenantId, agentId, reason: data.reason },
+          'H17: claim-secret commitment cleared on operator-issued reissue',
+        );
+      }
+    }
+
+    // H17 — Always clear the failure counter on reissue. A reissue that
+    // didn't clear stale failure state could trip the lockout immediately
+    // for a legitimate agent that's still presenting the right secret.
+    await getSharedRedis().del(`nova:grant-claim-fails:${tenantId}:${agentId}`);
 
     await getSharedRedis().set(
       grantClaimKey(tenantId, agentId),
@@ -177,7 +201,7 @@ agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
     );
 
     logger.info(
-      { tenantId, agentId, cid: result.cid, tier: result.trustTier },
+      { tenantId, agentId, cid: result.cid, tier: result.trustTier, clearedCommitment: data.clearClaimCommitment },
       'Grant reissued for claim pickup',
     );
     res.status(200).json({
@@ -188,6 +212,7 @@ agentsRouter.post('/:agentId/ucans/reissue', async (req, res, next) => {
       cid: result.cid,
       trustTier: result.trustTier,
       allowedSkills: result.allowedSkills,
+      claimCommitmentCleared: data.clearClaimCommitment,
       nextStep: 'Agent should call GET /register/status (or nova_check_registration) to pick up the fresh grant.',
     });
   } catch (err: any) { next(err); }

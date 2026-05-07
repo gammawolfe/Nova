@@ -18,7 +18,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import fsp from 'fs/promises';
 import { z } from 'zod';
-import type { Handler, HandlerFactory, HandlerContext, HandlerResult } from './index.js';
+import type { Handler, HandlerFactory, HandlerContext, HandlerResult } from './types.js';
 import type { QueuedTask } from '@nova/shared/src/types';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';

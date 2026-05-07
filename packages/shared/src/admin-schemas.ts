@@ -125,6 +125,17 @@ export const SelfRegisterSchema = z.object({
     outputSchema: z.record(z.unknown()).optional(),
   })).min(1),
   replyUrl: z.string().url().optional(),   // Optional webhook for approval; polling via /register/status works without it
+  // ── H17: Claim-secret commitment ────────────────────────────────────────
+  // 32-byte SHA-256 hex digest of a client-generated 32-byte CSPRNG secret.
+  // The secret itself is NEVER sent at registration. The client retains the
+  // secret locally and presents it as a header on GET /register/status to
+  // claim the post-approval UCAN grant. This binds grant pickup to proof of
+  // possession of the registering client.
+  //
+  // Optional during the migration window — when omitted, status fetches
+  // proceed unauthenticated (legacy behaviour). The flip to required is
+  // gated by the server-side flag NOVA_REQUIRE_CLAIM_SECRET.
+  claimCommitment: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 // ── Tenant Invites ──────────────────────────────────────────────────────────
@@ -142,6 +153,25 @@ export const AgentApprovalSchema = z.object({
   ucanExpiryDays: z.number().int().min(1).max(365).default(30),
   allowedSkills: z.array(z.string()).min(1).default(['*']),
   notes: z.string().max(500).optional(),
+});
+
+// ── UCAN Reissue ────────────────────────────────────────────────────────────
+//
+// Operator recovery for the one-time UCAN claim. Default behaviour is a
+// straight refresh — same claim-secret commitment, fresh JWT and TTL — so a
+// running agent that already holds its secret picks up the new grant
+// transparently on its next nova_check_registration call.
+//
+// `clearClaimCommitment: true` is the lost-secret escape hatch. It strips
+// the stored commitment from the agent record so the next status fetch
+// returns the grant without a secret presentation. Use only when the agent
+// has *demonstrably* lost its claim secret (e.g. ~/.nova was wiped) and
+// you've verified out-of-band that this is the legitimate operator. The
+// reissue audit log captures who used it.
+
+export const UcanReissueSchema = z.object({
+  clearClaimCommitment: z.boolean().default(false),
+  reason: z.string().max(500).optional(),
 });
 
 // ── Agent Key Rotation (Proof-of-Possession of OLD key) ────────────────────
