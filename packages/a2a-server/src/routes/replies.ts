@@ -25,6 +25,7 @@ import { redis } from '@nova/task-queue/src/index';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { authSelfUcan } from '../auth/self-ucan';
 import { activeSseStreams } from '../metrics';
+import { registerSseCleanup } from '../sse-registry';
 
 export const repliesRouter = Router({ mergeParams: true });
 
@@ -125,12 +126,17 @@ repliesRouter.get('/:agentId/replies/stream', async (req: Request, res: Response
     cleaned = true;
     activeSseStreams.dec();
     clearInterval(heartbeat);
+    unregister();
     if (sub) {
       sub.unsubscribe().catch(() => {});
       sub.quit().catch(() => {});
       sub = null;
     }
   }
+
+  // H1 — register cleanup with the global SSE registry so graceful shutdown
+  // tears down reply subscribers along with task-stream + inbox subscribers.
+  const unregister = registerSseCleanup(cleanup);
 
   const heartbeat = setInterval(() => {
     try {

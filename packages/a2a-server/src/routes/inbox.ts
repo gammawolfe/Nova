@@ -1,6 +1,6 @@
 // packages/a2a-server/src/routes/inbox.ts
 import IORedis from 'ioredis';
-import { Router, Request, Response, NextFunction } from 'express';
+import express, { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import {
@@ -20,6 +20,7 @@ import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import { authSelfUcan } from '../auth/self-ucan';
 import { activeSseStreams } from '../metrics';
+import { registerSseCleanup } from '../sse-registry';
 
 // ── Router ───────────────────────────────────────────────────────────────────
 
@@ -52,9 +53,19 @@ inboxRouter.get('/:agentId/inbox', async (req: Request, res: Response, next: Nex
 });
 
 // ── POST /agents/:agentId/inbox/:taskId/respond ─────────────────────────────
+//
+// H2 — Dedicated express.json with a larger limit, sized to
+// BROKER_RESULT_MAX_BYTES. Mounted as the first handler on this route so it
+// supersedes the global 64kb parser the rest of the service uses. We don't
+// override globally because the larger limit is only needed for TaskResult
+// payloads — task ingress and admin POSTs stay tight.
+const respondBodyParser = express.json({
+  limit: BROKER_RESULT_MAX_BYTES,
+});
 
 inboxRouter.post(
   '/:agentId/inbox/:taskId/respond',
+  respondBodyParser,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const paramAgentId = req.params['agentId'];
@@ -311,12 +322,17 @@ inboxRouter.get('/:agentId/inbox/stream', async (req: Request, res: Response) =>
     cleaned = true;
     activeSseStreams.dec();
     clearInterval(heartbeat);
+    unregister();
     if (sub) {
       sub.unsubscribe().catch(() => {});
       sub.quit().catch(() => {});
       sub = null;
     }
   }
+
+  // H1 — register cleanup with the global SSE registry so graceful shutdown
+  // can drain inbox subscribers in a deterministic order.
+  const unregister = registerSseCleanup(cleanup);
 
   const heartbeat = setInterval(() => {
     try {

@@ -41,7 +41,8 @@
     "cli:build:linux": "bun build packages/cli/src/index.ts --compile --target=bun-linux-x64 --outfile dist/nova-linux-x64",
     "cli:build:windows": "bun build packages/cli/src/index.ts --compile --target=bun-windows-x64 --outfile dist/nova-windows-x64.exe",
     "cli:build:all": "npm run cli:build:macos-arm && npm run cli:build:macos-x64 && npm run cli:build:linux && npm run cli:build:windows",
-    "test:acceptance:h17": "tsx scripts/acceptance-test-h17.ts"
+    "test:acceptance:h17": "tsx scripts/acceptance-test-h17.ts",
+    "test:acceptance:graceful-shutdown": "tsx scripts/acceptance-test-graceful-shutdown.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
