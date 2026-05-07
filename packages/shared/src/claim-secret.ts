@@ -70,11 +70,3 @@ export function commitmentEquals(a: string, b: string): boolean {
   // timingSafeEqual on equal-length Buffers
   return crypto.timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 }
-
-/**
- * Validate the shape of a commitment string (64 lowercase hex). Useful for
- * rejecting malformed input at the API edge before any storage write.
- */
-export function isValidCommitment(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-}

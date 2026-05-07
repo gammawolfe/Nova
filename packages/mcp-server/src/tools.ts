@@ -18,7 +18,7 @@ import {
   getGrantIfFresh,
 } from '@nova/shared/src/ucan-store.js';
 import { mintInvocationToken, mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
-import { generateClaimSecret, CLAIM_SECRET_HEADER } from '@nova/shared/src/claim-secret.js';
+import { generateClaimSecret, commitmentOf, CLAIM_SECRET_HEADER } from '@nova/shared/src/claim-secret.js';
 import { agentIdentityPath } from '@nova/shared/src/paths.js';
 import fsp from 'fs/promises';
 import type { NovaClient } from './nova-client.js';
@@ -221,7 +221,6 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       let claimSecret: string;
       let claimCommitment: string;
       if (identity.claimSecret) {
-        const { commitmentOf } = await import('@nova/shared/src/claim-secret.js');
         claimSecret = identity.claimSecret;
         claimCommitment = commitmentOf(claimSecret);
       } else {
