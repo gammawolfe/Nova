@@ -17,7 +17,6 @@ import {
 
 export const registerRouter = Router();
 
-const rateStore = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = parseInt(process.env.RATE_LIMIT_REGISTER || '20', 10);
 
 // H17 — When true, reject registrations without a claimCommitment and
@@ -26,23 +25,42 @@ const RATE_LIMIT = parseInt(process.env.RATE_LIMIT_REGISTER || '20', 10);
 // claim-secret flow.
 const REQUIRE_CLAIM_SECRET = process.env.NOVA_REQUIRE_CLAIM_SECRET === 'true';
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = rateStore.get(ip);
-  if (!entry || now > entry.resetAt) {
-    rateStore.set(ip, { count: 1, resetAt: now + 60_000 });
+// H4 — Redis-backed rate limiter for /register and /verify-invite. Mirrors
+// the INCR + EXPIRE NX pattern used for task ingress in index.ts so the
+// limit holds across multiple a2a-server instances behind a load balancer.
+//
+// Behaviour matrix:
+//   • First request from an IP in a 60s window → INCR returns 1, EXPIRE NX
+//     sets the TTL.
+//   • Subsequent requests in the same window → INCR returns N; if N ≤
+//     RATE_LIMIT we pass; if N > RATE_LIMIT we 429.
+//   • Window expires → key is deleted by Redis; next request starts fresh.
+//
+// Failure mode: if Redis is unavailable, fail-open. The previous in-memory
+// limiter could neither survive a restart nor coordinate across processes;
+// the Redis variant is strictly stronger. If Redis goes down completely,
+// blocking new agent registrations because we can't count requests would
+// be a self-imposed outage on a service that's already under degraded-
+// dependencies pressure. Log loudly and pass the request through — the
+// rest of the pipeline still gates on invite signature verification.
+async function checkRateLimit(ip: string): Promise<boolean> {
+  try {
+    const redis = getSharedRedis();
+    const key = `nova:register-rate:${ip}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      // First hit in this window — set the TTL so the key auto-expires.
+      // EXPIRE NX is unnecessary here because we just created the key with
+      // INCR; a plain EXPIRE is correct and avoids a race where two
+      // concurrent INCRs both see count===1 (impossible — INCR is atomic).
+      await redis.expire(key, 60);
+    }
+    return count <= RATE_LIMIT;
+  } catch (err) {
+    logger.error({ err }, 'H4: Redis unavailable during register rate-limit check; failing open');
     return true;
   }
-  entry.count++;
-  return entry.count <= RATE_LIMIT;
 }
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateStore) {
-    if (now > entry.resetAt) rateStore.delete(ip);
-  }
-}, 60_000);
 
 /**
  * POST /register — self-registration via signed invite.
@@ -57,7 +75,7 @@ setInterval(() => {
 registerRouter.post('/', async (req: Request, res: Response) => {
   const senderIp = req.ip ?? '0.0.0.0';
 
-  if (!checkRateLimit(senderIp)) {
+  if (!(await checkRateLimit(senderIp))) {
     res.setHeader('Retry-After', '60');
     return res.status(429).json({ error: 'RATE_LIMITED', message: 'Too many registration attempts' });
   }
@@ -227,7 +245,7 @@ registerRouter.post('/', async (req: Request, res: Response) => {
  */
 registerRouter.post('/verify-invite', async (req: Request, res: Response) => {
   const senderIp = req.ip ?? '0.0.0.0';
-  if (!checkRateLimit(senderIp)) {
+  if (!(await checkRateLimit(senderIp))) {
     res.setHeader('Retry-After', '60');
     return res.status(429).json({ error: 'RATE_LIMITED' });
   }
@@ -327,6 +345,16 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
   const redis = getSharedRedis();
   const claimKey = `nova:grant-claim:${tenantId}:${agentId}`;
   const failKey = `nova:grant-claim-fails:${tenantId}:${agentId}`;
+
+  // H3 — Use a non-destructive read for the existence check and verification
+  // gates. The claim is only consumed atomically (via GETDEL) at the moment
+  // we've decided to deliver it, which guarantees that two concurrent
+  // pollers can never both succeed: one wins the GETDEL and gets the
+  // payload, the other sees null and falls through to the no-grant branch.
+  //
+  // Verification-failure paths (wrong secret, missing secret, lockout) do
+  // NOT consume the claim — only successful delivery does, and the lockout
+  // path explicitly burns the claim with `del`.
   const claim = await redis.get(claimKey);
   if (!claim) {
     // Already claimed (or never approved) — return status without grant.
@@ -345,7 +373,7 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
       return res.json(response);
     }
     // Legacy: deliver grant once, just like before H17.
-    return deliverAndDelete(res, response, claim, redis, claimKey);
+    return deliverAtomic(res, response, redis, claimKey);
   }
 
   if (typeof presented !== 'string' || presented.length === 0) {
@@ -379,26 +407,34 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
     return res.json(response);
   }
 
-  // Verified — deliver the grant and burn the claim.
+  // Verified — deliver the grant atomically and clear the fail counter.
   await redis.del(failKey);
-  return deliverAndDelete(res, response, claim, redis, claimKey);
+  return deliverAtomic(res, response, redis, claimKey);
 });
 
 /**
- * Common one-shot delivery: parse the claim payload, attach to response,
- * and delete the Redis entry. Encapsulated so the legacy and the verified
- * paths converge on identical behaviour.
+ * Atomic claim delivery: GETDEL pops the claim from Redis in a single
+ * round-trip. Returns the parsed grant in the response if the claim was
+ * still present, otherwise returns the response without a grant — the
+ * latter happens when a concurrent poller already won the race for this
+ * claim. Idempotent and safe to call once per request.
+ *
+ * Requires Redis 6.2+ (GETDEL command). Earlier Redis versions need the
+ * pre-H3 get-then-del pattern, which is racy by construction.
  */
-async function deliverAndDelete(
+async function deliverAtomic(
   res: Response,
   response: any,
-  claim: string,
   redis: ReturnType<typeof getSharedRedis>,
   claimKey: string,
 ): Promise<Response> {
+  const claim = await redis.getdel(claimKey);
+  if (!claim) {
+    // Lost the race — another poller already consumed the claim.
+    return res.json(response);
+  }
   try {
     response.grant = JSON.parse(claim);
-    await redis.del(claimKey);
   } catch {
     logger.warn({ claimKey }, 'Malformed grant claim payload');
   }

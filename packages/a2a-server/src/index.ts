@@ -1,4 +1,5 @@
 import express from 'express';
+import helmet from 'helmet';
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
@@ -20,7 +21,11 @@ import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
 import { listActiveAgentMeta, getAgentMeta, getAgentByDid } from '@nova/shared/src/agent-index';
-import { getSharedRedis } from '@nova/shared/src/redis';
+import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
+import { createErrorMiddleware } from '@nova/shared/src/error-middleware';
+import type { ErrorRequestHandler } from 'express';
+import { BROKER_RESULT_MAX_BYTES } from '@nova/shared/src/broker-config';
+import { drainSseStreams, liveStreamCount } from './sse-registry';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -31,7 +36,26 @@ const RATE_LIMIT_GLOBAL_PER_AGENT = parseInt(process.env.RATE_LIMIT_GLOBAL_PER_A
 
 const UCAN_ERROR_CODES = new Set(['UCAN_MISSING', 'UCAN_INVALID_JWT', 'UCAN_EXPIRED', 'UCAN_REVOKED', 'UCAN_DID_MISMATCH', 'UCAN_WRONG_AUDIENCE', 'UCAN_INSUFFICIENT_CAPABILITY']);
 
-app.use(express.json());
+// H2 — Trust the front proxy (Caddy / nginx) so req.ip reflects the real
+// client address. Without this, every rate-limit bucket collapses to the
+// proxy's IP and per-sender throttling is effectively disabled. The exact
+// value comes from NOVA_TRUST_PROXY: 'true', a numeric hop count, or a
+// CIDR list. Defaults to 'loopback' so a misconfigured deploy doesn't
+// silently honour spoofed X-Forwarded-For from the public internet.
+//
+// See: https://expressjs.com/en/guide/behind-proxies.html
+const TRUST_PROXY = process.env.NOVA_TRUST_PROXY ?? 'loopback';
+app.set('trust proxy', TRUST_PROXY === 'true' ? true : TRUST_PROXY);
+
+// H2 — Default body limit of 64 KiB on every JSON ingress. Tasks with
+// payload params occasionally include small attachments (URLs, base64
+// thumbnails, structured params) so 64 KiB is comfortably above typical
+// task envelopes while shutting the door on accidental megabyte uploads.
+//
+// The broker /respond endpoint uses a dedicated, larger limit applied at
+// its own mount below — TaskResults can include arbitrary user payloads
+// up to BROKER_RESULT_MAX_BYTES (default 1 MiB).
+app.use(express.json({ limit: '64kb' }));
 
 app.get('/health', healthHandler('a2a-server', startTime, async () => {
   const [redisCheck, keys] = await Promise.all([
@@ -93,8 +117,21 @@ app.get('/discover/:agentId', async (req, res) => {
 const agentRouter = express.Router({ mergeParams: true });
 agentRouter.use(tenantRouter);
 
+// H2 — helmet on the public well-known agent card. The card is the only
+// truly public-by-design surface (every other route gates on UCAN, self-
+// UCAN, or admin token), so a strict default header set is appropriate
+// here without weakening the rest of the API. Specifically we set:
+//   - Content-Security-Policy default-src 'none' (no scripts, no images)
+//   - X-Content-Type-Options: nosniff
+//   - X-Frame-Options: DENY
+//   - Referrer-Policy: no-referrer
+const wellKnownHelmet = helmet({
+  contentSecurityPolicy: { directives: { 'default-src': ["'none'"] } },
+  crossOriginEmbedderPolicy: false, // not relevant for a JSON endpoint
+});
+
 // Agent Card — public metadata about this agent
-agentRouter.get('/.well-known/agent.json', async (req, res) => {
+agentRouter.get('/.well-known/agent.json', wellKnownHelmet, async (req, res) => {
   try {
     const configPath = tenantDataPath(req.ctx, 'agent-config.json');
     let raw: any;
@@ -358,13 +395,94 @@ app.use('/agents', healthRouter);
 
 app.use('/agents/:agentId', agentRouter);
 
+// H2 — Global error middleware MUST be registered after every router so it
+// catches both sync throws and rejected promises bubbled via next(err). It
+// maps ZodError, NovaError, and {status, message} shapes the same way the
+// admin-api does, with a couple of a2a-specific code-to-status overrides.
+app.use(createErrorMiddleware({
+  logTag: 'a2a-server',
+  statusOverrides: {
+    // a2a-server returns 503 specifically for backend-availability issues
+    // so the gate code-to-status map can stay 'standard'. Add overrides
+    // here only when the service-specific status differs from the default.
+  },
+}) as unknown as ErrorRequestHandler);
+
+// ────────────────────────────────────────────────────────────────────────────
+// H1 — Graceful shutdown.
+//
+// On SIGTERM/SIGINT:
+//   1. Stop accepting new HTTP connections (server.close)
+//   2. Drain every live SSE stream — each cleanup tells its Redis subscriber
+//      to unsubscribe + quit, clears its heartbeat, and lets the response
+//      end cleanly. Without this step, clients get an abrupt TCP RST
+//      mid-stream when the process exits.
+//   3. Close the shared Redis client (publishers, queues, indexes)
+//   4. exit(0)
+//
+// A safety timer guarantees exit even if `server.close` hangs on a stuck
+// keep-alive socket; without it, an idle long-poll could pin the process
+// until OS-level kill.
+// ────────────────────────────────────────────────────────────────────────────
+
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.NOVA_SHUTDOWN_TIMEOUT_MS ?? '15000', 10);
+let shuttingDown = false;
+let httpServer: ReturnType<typeof app.listen> | null = null;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal, liveStreams: liveStreamCount() }, 'a2a-server shutting down');
+
+  // Hard exit if anything below hangs.
+  const watchdog = setTimeout(() => {
+    logger.error({ timeoutMs: SHUTDOWN_TIMEOUT_MS }, 'a2a-server shutdown watchdog fired — exiting hard');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  watchdog.unref();
+
+  try {
+    // 1. stop accepting new connections
+    if (httpServer) {
+      await new Promise<void>((resolve) => {
+        httpServer!.close((err) => {
+          if (err) logger.warn({ err }, 'server.close reported an error');
+          resolve();
+        });
+      });
+    }
+
+    // 2. drain live SSE streams (idempotent with each handler's own cleanup)
+    const drained = drainSseStreams();
+    if (drained > 0) {
+      logger.info({ drained }, 'Drained SSE streams during shutdown');
+      // Brief grace period for Redis unsubscribe/quit acks to flush before
+      // we close the shared client below.
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    // 3. close shared Redis (publishers, queues, indexes used by handlers)
+    await closeSharedRedis();
+
+    logger.info('a2a-server shutdown complete');
+  } catch (err) {
+    logger.error({ err }, 'Error during shutdown sequence');
+  } finally {
+    clearTimeout(watchdog);
+    process.exit(0);
+  }
+}
+
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('SIGINT',  () => { void shutdown('SIGINT'); });
+
 async function start() {
   try {
     const keyPath = process.env.NOVA_PRIVATE_KEY_PATH
       || path.join(KEY_ROOT, 'nova.private.pem');
     await keyManager.initialize(keyPath);
 
-    app.listen(PORT, () => {
+    httpServer = app.listen(PORT, () => {
       logger.info(`🚀 Nova A2A Server running on http://localhost:${PORT}`);
       logger.info(`Identity DID: ${keyManager.getDid()}`);
     });

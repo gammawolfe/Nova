@@ -5,6 +5,7 @@ import { redisKey } from '@nova/shared/src/tenant';
 import { TERMINAL_STATUSES } from '@nova/shared/src/types';
 import { redis, getTaskState } from '@nova/task-queue/src/index';
 import { activeSseStreams } from './metrics';
+import { registerSseCleanup } from './sse-registry';
 
 export const streamRouter = Router({ mergeParams: true });
 
@@ -111,12 +112,18 @@ streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) =>
     cleaned = true;
     activeSseStreams.dec();
     clearInterval(heartbeat);
+    unregister();
     if (sub) {
       sub.unsubscribe().catch(() => {});
       sub.quit().catch(() => {});
       sub = null;
     }
   }
+
+  // H1 — register with the live-stream registry so graceful shutdown can
+  // drain this connection cleanly. unregister() is called from cleanup()
+  // above so a natural close doesn't leak a closure into the registry.
+  const unregister = registerSseCleanup(cleanup);
 
   sub.on('message', (_channel: string, message: string) => {
     try {
