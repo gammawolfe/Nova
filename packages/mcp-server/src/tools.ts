@@ -18,6 +18,7 @@ import {
   getGrantIfFresh,
 } from '@nova/shared/src/ucan-store.js';
 import { mintInvocationToken, mintSelfAuthToken } from '@nova/shared/src/ucan-mint.js';
+import { generateClaimSecret, CLAIM_SECRET_HEADER } from '@nova/shared/src/claim-secret.js';
 import { agentIdentityPath } from '@nova/shared/src/paths.js';
 import fsp from 'fs/promises';
 import type { NovaClient } from './nova-client.js';
@@ -213,6 +214,23 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       const identity = await loadIdentity(args.agentId);
       if (!identity) return err(`No identity for '${args.agentId}'. Run nova_generate_identity first.`);
 
+      // H17 — generate a fresh claim secret, persist alongside the identity,
+      // send only the commitment to the server. If a secret already exists
+      // locally (re-run after a transient register failure), reuse it so the
+      // server-side commitment stays consistent.
+      let claimSecret: string;
+      let claimCommitment: string;
+      if (identity.claimSecret) {
+        const { commitmentOf } = await import('@nova/shared/src/claim-secret.js');
+        claimSecret = identity.claimSecret;
+        claimCommitment = commitmentOf(claimSecret);
+      } else {
+        const fresh = generateClaimSecret();
+        claimSecret = fresh.secret;
+        claimCommitment = fresh.commitment;
+        await saveIdentity({ ...identity, claimSecret });
+      }
+
       const client = bootstrapClient(tenant.novaUrl);
       try {
         const result = await client.register({
@@ -225,6 +243,7 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
           ...(args.operatorUrl !== undefined ? { operatorUrl: args.operatorUrl } : {}),
           skills: args.skills,
           ...(args.replyUrl !== undefined ? { replyUrl: args.replyUrl } : {}),
+          claimCommitment,
         });
         return ok({
           status: result.status,
@@ -257,7 +276,18 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       if (!identity) return err(`No identity for '${resolvedAgentId}'`);
 
       const client = bootstrapClient(tenant.novaUrl);
-      const status = await client.registrationStatus(tenant.tenantId, resolvedAgentId);
+      const status = await client.registrationStatus(tenant.tenantId, resolvedAgentId, identity.claimSecret);
+
+      // H17 — server tells us the claim has been locked after repeated
+      // mismatches. The local secret is no longer authoritative; operator
+      // must reissue.
+      if (status.error === 'CLAIM_LOCKED') {
+        return err(
+          `CLAIM_LOCKED: Grant pickup for '${resolvedAgentId}' was locked by Nova after repeated claim-secret mismatches. ` +
+          `Ask the operator to run nova_reissue_ucan with tenantId='${tenant.tenantId}' agentId='${resolvedAgentId}' (requires NOVA_ADMIN_TOKEN). ` +
+          `If this happens repeatedly without operator intervention, your tenantId/agentId may be leaked — investigate before reissuing.`,
+        );
+      }
 
       if (status.status === 'active' && status.grant) {
         await withCacheLock(resolvedAgentId, async () => {

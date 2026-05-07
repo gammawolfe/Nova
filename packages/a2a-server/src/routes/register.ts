@@ -10,11 +10,21 @@ import { getSharedRedis } from '@nova/shared/src/redis';
 import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
 import { verifyInvite, consumeInvite } from '@nova/shared/src/invites';
 import { validateId } from '@nova/shared/src/validation';
+import {
+  CLAIM_SECRET_HEADER, MAX_FAILED_ATTEMPTS,
+  commitmentOf, commitmentEquals,
+} from '@nova/shared/src/claim-secret';
 
 export const registerRouter = Router();
 
 const rateStore = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = parseInt(process.env.RATE_LIMIT_REGISTER || '20', 10);
+
+// H17 — When true, reject registrations without a claimCommitment and
+// require X-Claim-Secret on status fetches that would release a grant.
+// Defaults off during rollout; flip to true once all MCP clients ship the
+// claim-secret flow.
+const REQUIRE_CLAIM_SECRET = process.env.NOVA_REQUIRE_CLAIM_SECRET === 'true';
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
@@ -61,7 +71,7 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     });
   }
 
-  const { invite, agentId, name, description, publicKey, did, operatorUrl, skills, replyUrl } = parseResult.data;
+  const { invite, agentId, name, description, publicKey, did, operatorUrl, skills, replyUrl, claimCommitment } = parseResult.data;
 
   // Step 1: verify invite (signature, exp, claims) — does NOT consume.
   // The token stays live until step 5 so that any downstream validation failure
@@ -92,6 +102,17 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     return res.status(400).json({
       error: 'AGENT_ID_MISMATCH',
       message: `Invite was minted for agentId '${agentIdHint}' but registration requested '${agentId}'`,
+    });
+  }
+
+  // H17 — Reject hintless registrations missing claimCommitment when the
+  // server flag is on. We don't enforce it unconditionally yet so that older
+  // clients can still onboard during the rollout window. Operators flip the
+  // flag on once their MCP fleet is upgraded.
+  if (REQUIRE_CLAIM_SECRET && !claimCommitment) {
+    return res.status(400).json({
+      error: 'CLAIM_COMMITMENT_REQUIRED',
+      message: 'This Nova requires claimCommitment in registration. Upgrade your MCP client.',
     });
   }
 
@@ -172,6 +193,7 @@ registerRouter.post('/', async (req: Request, res: Response) => {
       did,
       publicKey,
       replyUrl,
+      claimCommitment,
     };
 
     await writeAtomicallyAsync(configPath, config);
@@ -246,11 +268,33 @@ registerRouter.post('/verify-invite', async (req: Request, res: Response) => {
  * 24h TTL). The claim is deleted on read so a compromised endpoint can't
  * re-read credentials.
  *
+ * H17 — Grant pickup is gated by the claim-secret commitment registered in
+ * POST /register. Callers present the secret in X-Claim-Secret; the server
+ * compares its SHA-256 against the stored commitment in constant time.
+ *
+ * Behaviour matrix:
+ *
+ *   | Agent has commitment? | Header present?  | Grant returned? |
+ *   |-----------------------|------------------|-----------------|
+ *   | yes                   | yes & match      | YES (one-shot)  |
+ *   | yes                   | yes & mismatch   | NO (count++)    |
+ *   | yes                   | missing          | NO              |
+ *   | no  (legacy)          | (any)            | YES if flag off |
+ *   | no  (legacy)          | (any)            | NO if flag on   |
+ *
+ * After MAX_FAILED_ATTEMPTS mismatches the claim is deleted; the operator
+ * must run nova_reissue_ucan to re-enable pickup.
+ *
+ * Status fields (status, tenantId, agentId) are always returned regardless
+ * of secret presentation — only the grant payload is gated. This lets the
+ * agent discover its own approval state without burning the secret.
+ *
  * Response shapes:
  *   { status: 'pending' }
- *   { status: 'active', grant: { jwt, cid, expiresAt, trustTier } }   // only on first fetch
- *   { status: 'active' }                                               // subsequent fetches
+ *   { status: 'active', grant: { jwt, cid, expiresAt, trustTier } }   // first authorised fetch
+ *   { status: 'active' }                                               // subsequent or unauthorised
  *   { status: 'deregistered' }
+ *   { status: 'active', error: 'CLAIM_LOCKED' }                       // too many mismatches
  *   404 if agent does not exist
  */
 registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Response) => {
@@ -276,19 +320,87 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
 
   const response: any = { status: agent.status, tenantId, agentId };
 
-  if (agent.status === 'active') {
-    const redis = getSharedRedis();
-    const claimKey = `nova:grant-claim:${tenantId}:${agentId}`;
-    const claim = await redis.get(claimKey);
-    if (claim) {
-      try {
-        response.grant = JSON.parse(claim);
-        await redis.del(claimKey);
-      } catch {
-        logger.warn({ tenantId, agentId }, 'Malformed grant claim payload');
-      }
-    }
+  if (agent.status !== 'active') {
+    return res.json(response);
   }
 
-  res.json(response);
+  const redis = getSharedRedis();
+  const claimKey = `nova:grant-claim:${tenantId}:${agentId}`;
+  const failKey = `nova:grant-claim-fails:${tenantId}:${agentId}`;
+  const claim = await redis.get(claimKey);
+  if (!claim) {
+    // Already claimed (or never approved) — return status without grant.
+    return res.json(response);
+  }
+
+  // H17 verification path
+  const presented = req.header(CLAIM_SECRET_HEADER);
+  const storedCommitment = agent.claimCommitment as string | undefined;
+
+  // Legacy registrations have no commitment. When the flag is off we return
+  // the grant for backwards compat; when on, we refuse and the agent must
+  // re-register (or have its grant reissued via the operator path).
+  if (!storedCommitment) {
+    if (REQUIRE_CLAIM_SECRET) {
+      return res.json(response);
+    }
+    // Legacy: deliver grant once, just like before H17.
+    return deliverAndDelete(res, response, claim, redis, claimKey);
+  }
+
+  if (typeof presented !== 'string' || presented.length === 0) {
+    // Commitment present but no header — caller must prove possession.
+    // Don't increment the failure counter for the missing case; that lets
+    // an out-of-date client poll until it learns it needs the secret.
+    return res.json(response);
+  }
+
+  const presentedCommitment = commitmentOf(presented);
+  if (!commitmentEquals(presentedCommitment, storedCommitment)) {
+    // Mismatch — increment fail counter, lock after threshold.
+    const fails = await redis.incr(failKey);
+    if (fails === 1) {
+      // Match the claim TTL so the counter expires alongside the grant.
+      await redis.expire(failKey, 24 * 3600);
+    }
+    if (fails >= MAX_FAILED_ATTEMPTS) {
+      // Burn the claim. Operator must reissue; legitimate agent rotates.
+      await redis.del(claimKey);
+      logger.warn(
+        { tenantId, agentId, fails },
+        'H17: claim locked after repeated secret mismatch',
+      );
+      return res.json({ ...response, error: 'CLAIM_LOCKED' });
+    }
+    logger.warn(
+      { tenantId, agentId, fails },
+      'H17: claim secret mismatch',
+    );
+    return res.json(response);
+  }
+
+  // Verified — deliver the grant and burn the claim.
+  await redis.del(failKey);
+  return deliverAndDelete(res, response, claim, redis, claimKey);
 });
+
+/**
+ * Common one-shot delivery: parse the claim payload, attach to response,
+ * and delete the Redis entry. Encapsulated so the legacy and the verified
+ * paths converge on identical behaviour.
+ */
+async function deliverAndDelete(
+  res: Response,
+  response: any,
+  claim: string,
+  redis: ReturnType<typeof getSharedRedis>,
+  claimKey: string,
+): Promise<Response> {
+  try {
+    response.grant = JSON.parse(claim);
+    await redis.del(claimKey);
+  } catch {
+    logger.warn({ claimKey }, 'Malformed grant claim payload');
+  }
+  return res.json(response);
+}

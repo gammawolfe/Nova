@@ -1,6 +1,6 @@
 // packages/task-queue/src/inbox.ts
 import fsp from 'fs/promises';
-import { redis } from './index';
+import { getSharedRedis } from '@nova/shared/src/redis';
 import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { logger } from '@nova/shared/src/logger';
@@ -8,6 +8,12 @@ import {
   BROKER_VISIBILITY_TIMEOUT_MS,
   BROKER_RECLAIM_CEILING,
 } from '@nova/shared/src/broker-config';
+
+// Inline reference to the shared singleton — equivalent to the prior
+// `redis` re-export from ./index, but without the inbox→index→inbox cycle
+// that the re-export created. Pull is lazy so module init order is robust
+// to either being imported first.
+const redis = getSharedRedis();
 import { writeDeadLetter } from './dead-letter';
 
 // ── Key helpers ─────────────────────────────────────────────────────────────

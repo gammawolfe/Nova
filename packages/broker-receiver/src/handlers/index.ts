@@ -1,8 +1,9 @@
 // packages/broker-receiver/src/handlers/index.ts
 //
-// Handler contract + registry. A handler receives a task and returns a
-// TaskResult-ish payload. The dispatcher wraps its return in the final
-// broker respond body (status + result or error).
+// Handler registry + built-in registration. The contract types live in
+// ./types so individual handlers can declare their interface without
+// importing from this file (which would create a runtime-irrelevant but
+// structurally-circular dependency).
 //
 // HandlerContext.signal fires when:
 //   • the daemon is shutting down, OR
@@ -11,40 +12,15 @@
 // it still work but risk being double-dispatched if Nova's reclaim worker
 // picks up the task before respond lands.
 
-import type { QueuedTask } from '@nova/shared/src/types';
 import type { ReceiverConfig } from '../config.js';
+import type { Handler, HandlerFactory } from './types.js';
 
-export interface HandlerResultOk {
-  status: 'ok';
-  result: unknown;
-}
-
-export interface HandlerResultError {
-  status: 'error';
-  error: { code: string; message: string; retryable?: boolean };
-}
-
-export type HandlerResult = HandlerResultOk | HandlerResultError;
-
-export interface HandlerContext {
-  agentId: string;
-  signal: AbortSignal;
-  logger: Logger;
-}
-
-export interface Logger {
-  debug(obj: Record<string, unknown>, msg?: string): void;
-  info(obj: Record<string, unknown>, msg?: string): void;
-  warn(obj: Record<string, unknown>, msg?: string): void;
-  error(obj: Record<string, unknown>, msg?: string): void;
-}
-
-export interface Handler {
-  name: string;
-  handle(task: QueuedTask, ctx: HandlerContext): Promise<HandlerResult>;
-}
-
-export type HandlerFactory = (config: Record<string, unknown>) => Handler | Promise<Handler>;
+// Re-export the contract surface so existing imports of this module keep
+// working unchanged.
+export type {
+  Handler, HandlerFactory, HandlerResult, HandlerResultOk, HandlerResultError,
+  HandlerContext, Logger,
+} from './types.js';
 
 const registry = new Map<string, HandlerFactory>();
 
