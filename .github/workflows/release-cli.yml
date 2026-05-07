@@ -1,0 +1,140 @@
+# .github/workflows/release-cli.yml
+#
+# Triggered by pushing a tag: git tag v0.1.0 && git push --tags
+#
+# Builds nova binaries for macOS arm64, macOS x64, Linux x64, and Windows x64,
+# then creates a GitHub release with all four as downloadable assets.
+# The sha256 checksums are computed and attached as nova-checksums.txt.
+# After release, the Homebrew formula sha256 placeholders need updating —
+# see the "Update formula" step comment below.
+
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: bun-darwin-aarch64
+            asset:  nova-macos-arm64
+          - target: bun-darwin-x64
+            asset:  nova-macos-x64
+          - target: bun-linux-x64
+            asset:  nova-linux-x64
+          - target: bun-windows-x64
+            asset:  nova-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build binary
+        run: |
+          bun build packages/cli/src/index.ts \
+            --compile \
+            --target=${{ matrix.target }} \
+            --outfile=dist/${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          retention-days: 1
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Make Linux/macOS binaries executable
+        run: chmod +x dist/nova-macos-arm64 dist/nova-macos-x64 dist/nova-linux-x64
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          sha256sum nova-macos-arm64 nova-macos-x64 nova-linux-x64 nova-windows-x64.exe \
+            > nova-checksums.txt
+          cat nova-checksums.txt
+
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          # Extract the section for this version from CHANGELOG.md if it exists
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk "/^## \[?${VERSION#v}\]?/{found=1; next} /^## /{if(found) exit} found{print}" CHANGELOG.md)
+          fi
+          NOTES="${NOTES:-Release ${VERSION}}"
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nova CLI ${{ github.ref_name }}
+          body: |
+            ${{ steps.changelog.outputs.notes }}
+
+            ## Installation
+
+            **macOS / Linux (curl):**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/gammawolfe/Nova/main/install.sh | bash
+            ```
+
+            **Direct download:**
+            | Platform | Binary |
+            |---|---|
+            | macOS Apple Silicon | `nova-macos-arm64` |
+            | macOS Intel | `nova-macos-x64` |
+            | Linux x64 | `nova-linux-x64` |
+            | Windows x64 | `nova-windows-x64.exe` |
+
+            Verify with `nova-checksums.txt`.
+
+          files: |
+            dist/nova-macos-arm64
+            dist/nova-macos-x64
+            dist/nova-linux-x64
+            dist/nova-windows-x64.exe
+            dist/nova-checksums.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # ── Update Homebrew formula sha256s ──────────────────────────────────
+      # After this workflow runs, update Formula/nova.rb with the sha256s
+      # from nova-checksums.txt and commit the formula change.
+      # When the tap is published (C2), this can be automated via a
+      # separate workflow that opens a PR on the tap repo.
+      - name: Print sha256s for formula update
+        run: |
+          echo ""
+          echo "Update Formula/nova.rb with these sha256 values:"
+          cat dist/nova-checksums.txt
