@@ -6,7 +6,7 @@ import { Router } from 'express';
 import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { adminAuth } from './middleware/auth';
-import { errorHandler } from './middleware/error-handler';
+import { createErrorMiddleware } from '@nova/shared/src/error-middleware';
 import { tenantsRouter } from './routes/tenants';
 import { agentsRouter } from './routes/agents';
 import { allAgentsRouter } from './routes/all-agents';
@@ -126,7 +126,7 @@ app.use('/admin/broker', brokerSummaryRouter);
 app.use('/admin', systemRouter);
 
 // Error handler must be last
-app.use(errorHandler);
+app.use(createErrorMiddleware({ shape: 'admin', logTag: 'admin-api' }));
 
 const server = app.listen(Number(PORT), '0.0.0.0', () => {
   logger.info(`Admin API running on http://127.0.0.1:${PORT}`);

@@ -2,17 +2,30 @@
 //
 // Express error handler shared between admin-api and a2a-server.
 //
-// Maps:
-//   • ZodError                → 400 with structured issues
-//   • NovaError               → status from a code-to-status map; falls back to 500
-//   • err.status (numeric)    → that status, with err.message as the body
-//   • Anything else           → 500 'Internal server error', stack logged but not returned
+// Supports two response shapes via the `shape` option:
 //
-// The same shape was previously inlined in admin-api/src/middleware/error-handler.ts;
-// extracting here so a2a-server's H2 hardening pass can adopt it without
-// duplicating the body. admin-api can switch to this helper in a follow-up
-// PR — the public response shape is identical to the existing handler so
-// such a swap is a no-op for clients.
+//   shape: 'detailed' (default) — used by a2a-server. Always includes a
+//     `message` field; ZodError emits structured `issues`; unhandled errors
+//     emit a stable error code 'INTERNAL_ERROR'. This is the shape callers
+//     of a2a-server have grown up with since H2.
+//
+//   shape: 'admin'              — used by admin-api. Preserves the wire
+//     format the admin web UI's api.js helper depends on:
+//       err.message ← parsed.error
+//       err.details ← parsed.details
+//     Specifically:
+//       - ZodError → { error: 'Validation failed', issues: <raw zod issues> }
+//       - NovaError → { error: <code>, message: <msg> }
+//       - { status: N, message } → { error: <message> }
+//       - unhandled → { error: 'Internal server error' }
+//
+// Maps NovaError codes to HTTP status via DEFAULT_STATUS_MAP, with caller
+// overrides merged on top. Fields not present in the chosen shape are
+// omitted; both shapes always honour the status code lookup.
+//
+// New code should prefer the 'detailed' shape. The 'admin' shape exists
+// solely to preserve backward compatibility with the existing admin web
+// UI; flipping it to 'detailed' is a breaking change for that UI.
 
 import type { ErrorRequestHandler, Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
@@ -47,7 +60,14 @@ const DEFAULT_STATUS_MAP: Record<string, number> = {
   CLASSIFIER_UNAVAILABLE: 503,
 };
 
+export type ErrorMiddlewareShape = 'detailed' | 'admin';
+
 export interface ErrorMiddlewareOptions {
+  /**
+   * Wire shape for error responses. Defaults to 'detailed' for new callers;
+   * admin-api passes 'admin' to preserve the existing UI contract.
+   */
+  shape?: ErrorMiddlewareShape;
   /**
    * Override status code for specific NovaError codes. Merged on top of
    * DEFAULT_STATUS_MAP so callers can extend rather than replace.
@@ -62,6 +82,7 @@ export interface ErrorMiddlewareOptions {
 }
 
 export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorRequestHandler {
+  const shape = opts.shape ?? 'detailed';
   const statusMap = { ...DEFAULT_STATUS_MAP, ...(opts.statusOverrides ?? {}) };
   const logTag = opts.logTag ?? 'unhandled-http-error';
 
@@ -77,6 +98,13 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
     }
 
     if (err instanceof ZodError) {
+      if (shape === 'admin') {
+        res.status(400).json({
+          error: 'Validation failed',
+          issues: err.issues,
+        });
+        return;
+      }
       res.status(400).json({
         error: 'SCHEMA_INVALID',
         message: 'Validation failed',
@@ -87,25 +115,33 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
 
     if (err instanceof NovaError) {
       const status = statusMap[err.code] ?? 500;
-      res.status(status).json({
-        error: err.code,
-        message: err.message,
-        ...(err.retryable ? { retryable: true } : {}),
-      });
+      const body: Record<string, unknown> = { error: err.code, message: err.message };
+      if (shape === 'detailed' && err.retryable) body['retryable'] = true;
+      res.status(status).json(body);
       return;
     }
 
     if (err && typeof err === 'object' && typeof (err as any).status === 'number') {
       const status = (err as any).status as number;
+      const message = (err as any).message ?? 'Request failed';
+      if (shape === 'admin') {
+        // Preserve admin-api's old shape: error == message, no separate field.
+        res.status(status).json({ error: message });
+        return;
+      }
       res.status(status).json({
         error: (err as any).code ?? `HTTP_${status}`,
-        message: (err as any).message ?? 'Request failed',
+        message,
       });
       return;
     }
 
     // Unexpected — log full detail server-side, return generic 500 to client.
     logger.error({ err, path: req.path, method: req.method, tag: logTag }, 'Unhandled HTTP error');
+    if (shape === 'admin') {
+      res.status(500).json({ error: 'Internal server error' });
+      return;
+    }
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   };
 }
