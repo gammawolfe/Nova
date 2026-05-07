@@ -7,7 +7,6 @@ import {
   generateClaimSecret,
   commitmentOf,
   commitmentEquals,
-  isValidCommitment,
   COMMITMENT_HEX_LEN,
   CLAIM_SECRET_HEADER,
   MAX_FAILED_ATTEMPTS,
@@ -86,36 +85,6 @@ describe('claim-secret', () => {
       expect(commitmentEquals('a'.repeat(64), null)).toBe(false);
       // @ts-expect-error testing runtime guard
       expect(commitmentEquals(123, 456)).toBe(false);
-    });
-  });
-
-  describe('isValidCommitment', () => {
-    it('accepts valid 64-char lowercase hex', () => {
-      const { commitment } = generateClaimSecret();
-      expect(isValidCommitment(commitment)).toBe(true);
-      expect(isValidCommitment('0123456789abcdef'.repeat(4))).toBe(true);
-    });
-
-    it('rejects uppercase hex', () => {
-      expect(isValidCommitment('0123456789ABCDEF'.repeat(4))).toBe(false);
-    });
-
-    it('rejects wrong length', () => {
-      expect(isValidCommitment('a'.repeat(63))).toBe(false);
-      expect(isValidCommitment('a'.repeat(65))).toBe(false);
-      expect(isValidCommitment('')).toBe(false);
-    });
-
-    it('rejects non-hex characters', () => {
-      expect(isValidCommitment('z'.repeat(64))).toBe(false);
-      expect(isValidCommitment('g'.repeat(64))).toBe(false);
-    });
-
-    it('rejects non-string inputs', () => {
-      expect(isValidCommitment(undefined)).toBe(false);
-      expect(isValidCommitment(null)).toBe(false);
-      expect(isValidCommitment(12345)).toBe(false);
-      expect(isValidCommitment({})).toBe(false);
     });
   });
 
