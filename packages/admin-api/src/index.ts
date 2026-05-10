@@ -132,14 +132,39 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
   logger.info(`Admin API running on http://127.0.0.1:${PORT}`);
 });
 
+// Graceful shutdown — watchdog forces exit if server.close hangs on a
+// stuck keep-alive; idempotent so a SIGINT-then-SIGTERM doesn't race.
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.NOVA_SHUTDOWN_TIMEOUT_MS ?? '15000', 10);
+let shuttingDown = false;
+
 async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info({ signal }, 'Admin API shutting down');
-  server.close(async () => {
+
+  const watchdog = setTimeout(() => {
+    logger.error({ timeoutMs: SHUTDOWN_TIMEOUT_MS }, 'admin-api shutdown watchdog fired — exiting hard');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  watchdog.unref();
+
+  try {
+    await new Promise<void>((resolve) => {
+      server.close((err) => {
+        if (err) logger.warn({ err }, 'server.close reported an error');
+        resolve();
+      });
+    });
     const { closeSharedRedis } = await import('@nova/shared/src/redis');
     await closeSharedRedis();
+    logger.info('admin-api shutdown complete');
+  } catch (err) {
+    logger.error({ err }, 'Error during shutdown sequence');
+  } finally {
+    clearTimeout(watchdog);
     process.exit(0);
-  });
+  }
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('SIGINT', () => { void shutdown('SIGINT'); });

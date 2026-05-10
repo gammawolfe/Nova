@@ -368,18 +368,44 @@ healthApp.get('/health', (healthHandler('agent-connector', connectorStartTime, a
 
 healthApp.get('/metrics', metricsHandler(connectorRegistry) as any);
 
-healthApp.listen(Number(HEALTH_PORT), () => {
+const healthServer = healthApp.listen(Number(HEALTH_PORT), () => {
   logger.info(`Agent Connector health/metrics on port ${HEALTH_PORT}`);
 });
 
-// Graceful shutdown
-async function shutdown() {
-  logger.info('Shutting down Agent Connector safely...');
-  stopReclaimWorker();
-  clearInterval(heartbeatInterval);
-  await shutdownAllWorkers();
-  process.exit(0);
+// Graceful shutdown — watchdog forces exit if any step hangs; idempotent
+// so repeated signals are no-ops; closes the health HTTP server too.
+const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.NOVA_SHUTDOWN_TIMEOUT_MS ?? '15000', 10);
+let shuttingDown = false;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ signal }, 'agent-connector shutting down');
+
+  const watchdog = setTimeout(() => {
+    logger.error({ timeoutMs: SHUTDOWN_TIMEOUT_MS }, 'agent-connector shutdown watchdog fired — exiting hard');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  watchdog.unref();
+
+  try {
+    stopReclaimWorker();
+    clearInterval(heartbeatInterval);
+    await shutdownAllWorkers();
+    await new Promise<void>((resolve) => {
+      healthServer.close((err) => {
+        if (err) logger.warn({ err }, 'healthServer.close reported an error');
+        resolve();
+      });
+    });
+    logger.info('agent-connector shutdown complete');
+  } catch (err) {
+    logger.error({ err }, 'Error during shutdown sequence');
+  } finally {
+    clearTimeout(watchdog);
+    process.exit(0);
+  }
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
