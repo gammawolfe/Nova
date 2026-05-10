@@ -190,6 +190,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       grant_not_from_nova: 'UCAN_WRONG_AUDIENCE',
       grant_wrong_audience: 'UCAN_DID_MISMATCH',
       grant_does_not_subsume_invocation: 'UCAN_INSUFFICIENT_CAPABILITY',
+      revocation_check_failed: 'UCAN_REVOKED',
     };
 
     return await recordAndReturn({

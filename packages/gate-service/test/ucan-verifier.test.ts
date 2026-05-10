@@ -1,21 +1,24 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import fsp from 'fs/promises';
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-// Hold the temp data root so the vi.mock factory can read it lazily.
-const state: { dataRoot: string } = { dataRoot: '' };
-
-vi.mock('@nova/shared/src/tenant', async () => {
-  const actual = await vi.importActual<typeof import('@nova/shared/src/tenant')>('@nova/shared/src/tenant');
-  return {
-    ...actual,
-    tenantDataPath: (ctx: { tenantId: string; agentId: string }, ...parts: string[]) =>
-      path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', ctx.agentId, ...parts),
-  };
+// Pin DATA_ROOT to a temp dir BEFORE any module that reads
+// process.env.DATA_ROOT at import time (tenant.ts in particular). vi.hoisted
+// runs ahead of all imports, so tenant.ts sees this value when it computes
+// its `DATA_ROOT` constant.
+const { dataRoot } = vi.hoisted(() => {
+  const fsm = require('fs');
+  const osm = require('os');
+  const pathm = require('path');
+  const dir = fsm.mkdtempSync(pathm.join(osm.tmpdir(), 'gate-ucan-test-'));
+  process.env.DATA_ROOT = dir;
+  return { dataRoot: dir as string };
 });
 
-// Suppress expected warn logs from the forged-signature negative case.
+// Suppress expected warn logs from negative cases (forged signature,
+// revocation I/O failure).
 vi.mock('@nova/shared/src/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(), trace: vi.fn() },
 }));
@@ -27,6 +30,10 @@ import { verifyUCAN, extractIssuerDid } from '../src/ucan-verifier';
 
 const ctx = { tenantId: 't1', agentId: 'a1' };
 const SCOPE = 'nova:t1:a1:skill:chat';
+
+// Canonical revocation directory — matches what admin-api writes to and the
+// gate-service reads from. UCAN CIDs are sha256, so this is cross-tenant.
+const revokedDir = path.join(dataRoot, 'ucans', 'revoked');
 
 interface Identity {
   did: string;
@@ -77,17 +84,11 @@ function mintInvocation(opts: {
   return buildUcanJwt(payload, crypto.createPrivateKey(opts.sender.privateKeyPem));
 }
 
-let nova: Identity;
-let sender: Identity;
-
-beforeAll(async () => {
-  state.dataRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'gate-ucan-test-'));
-  nova = generateIdentity('nova');
-  sender = generateIdentity('sender');
-});
+const nova: Identity = generateIdentity('nova');
+const sender: Identity = generateIdentity('sender');
 
 afterAll(async () => {
-  await fsp.rm(state.dataRoot, { recursive: true, force: true });
+  await fsp.rm(dataRoot, { recursive: true, force: true });
 });
 
 describe('extractIssuerDid', () => {
@@ -123,7 +124,6 @@ describe('verifyUCAN', () => {
   it('rejects when the outer signature is invalid (wrong key)', async () => {
     const intruder = generateIdentity('intruder');
     const grant = mintGrant({ nova, sender });
-    // sender's payload, but signed by an unrelated key
     const payload: UcanPayload = {
       iss: sender.did,
       aud: nova.did,
@@ -193,7 +193,7 @@ describe('verifyUCAN', () => {
 
   it('rejects when the grant audience is not the invocation issuer', async () => {
     const otherSender = generateIdentity('other-sender');
-    const grant = mintGrant({ nova, sender: otherSender }); // grant aud = other-sender
+    const grant = mintGrant({ nova, sender: otherSender });
     const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
     const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
     expect(r.valid).toBe(false);
@@ -209,7 +209,6 @@ describe('verifyUCAN', () => {
   });
 
   it('rejects when the invocation widens the grant capability', async () => {
-    // Grant only covers tenant t1, but invocation tries to invoke t2.
     const narrowGrant = mintGrant({
       nova,
       sender,
@@ -239,37 +238,74 @@ describe('verifyUCAN', () => {
     expect(r.reason).toBe('ucan_insufficient_capability');
   });
 
-  it('rejects when the invocation CID has been revoked', async () => {
-    const grant = mintGrant({ nova, sender });
-    const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
-    const cid = computeCid(invocation);
-    // The verifier looks under tenants/<tenantId>/agents/<agentId>/../ucans/revoked/
-    // which path.join normalizes to tenants/<tenantId>/agents/ucans/revoked/.
-    const revokedDir = path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', 'ucans', 'revoked');
-    await fsp.mkdir(revokedDir, { recursive: true });
-    await fsp.writeFile(path.join(revokedDir, `${cid}.json`), '{}');
-    try {
-      const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
-      expect(r.valid).toBe(false);
-      expect(r.reason).toBe('ucan_revoked');
-    } finally {
-      await fsp.rm(revokedDir, { recursive: true, force: true });
+  describe('revocation', () => {
+    // Each test writes its own tombstone and tears it down, so the canonical
+    // dir is reused across the suite without state bleed.
+    function writeTombstone(cid: string): void {
+      fs.mkdirSync(revokedDir, { recursive: true });
+      fs.writeFileSync(path.join(revokedDir, `${cid}.json`), '{}');
     }
-  });
+    function clearTombstone(cid: string): void {
+      try { fs.unlinkSync(path.join(revokedDir, `${cid}.json`)); } catch { /* ignore */ }
+    }
 
-  it('rejects when the grant CID has been revoked (cascades to invocation)', async () => {
-    const grant = mintGrant({ nova, sender });
-    const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
-    const grantCid = computeCid(grant);
-    const revokedDir = path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', 'ucans', 'revoked');
-    await fsp.mkdir(revokedDir, { recursive: true });
-    await fsp.writeFile(path.join(revokedDir, `${grantCid}.json`), '{}');
-    try {
-      const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
-      expect(r.valid).toBe(false);
-      expect(r.reason).toBe('ucan_revoked');
-    } finally {
-      await fsp.rm(revokedDir, { recursive: true, force: true });
-    }
+    it('reads from the canonical cross-tenant path used by admin-api', async () => {
+      const grant = mintGrant({ nova, sender });
+      const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
+      const cid = computeCid(invocation);
+      writeTombstone(cid);
+      try {
+        const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
+        expect(r.valid).toBe(false);
+        expect(r.reason).toBe('ucan_revoked');
+      } finally {
+        clearTombstone(cid);
+      }
+    });
+
+    it('rejects when the grant CID has been revoked (cascades to invocation)', async () => {
+      const grant = mintGrant({ nova, sender });
+      const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
+      const grantCid = computeCid(grant);
+      writeTombstone(grantCid);
+      try {
+        const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
+        expect(r.valid).toBe(false);
+        expect(r.reason).toBe('ucan_revoked');
+      } finally {
+        clearTombstone(grantCid);
+      }
+    });
+
+    it('fails closed when the revocation directory is unreadable (not silent-pass)', async () => {
+      // Create the dir as a regular file to force EISDIR / non-ENOENT on access
+      // when the verifier tries to look up <cid>.json under it. Using mode 0
+      // would be the obvious choice but it doesn't reliably trigger EACCES
+      // when the test runs as root (which is the case in this sandbox).
+      const blockedRoot = path.join(dataRoot, 'ucans', 'revoked-blocked-' + Date.now());
+      fs.mkdirSync(path.dirname(blockedRoot), { recursive: true });
+      fs.writeFileSync(blockedRoot, 'not-a-directory');
+      try {
+        // Temporarily redirect the verifier at the broken path by renaming.
+        const realPath = path.join(dataRoot, 'ucans', 'revoked');
+        const stash = realPath + '.stash';
+        const hadReal = fs.existsSync(realPath);
+        if (hadReal) fs.renameSync(realPath, stash);
+        try {
+          fs.renameSync(blockedRoot, realPath);
+          const grant = mintGrant({ nova, sender });
+          const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
+          const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
+          expect(r.valid).toBe(false);
+          expect(r.reason).toBe('revocation_check_failed');
+        } finally {
+          // Restore the real (or empty) revoked dir
+          try { fs.unlinkSync(realPath); } catch { /* ignore */ }
+          if (hadReal) fs.renameSync(stash, realPath);
+        }
+      } finally {
+        try { fs.unlinkSync(blockedRoot); } catch { /* ignore */ }
+      }
+    });
   });
 });
