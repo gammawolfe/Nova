@@ -45,11 +45,16 @@ async function main() {
     usage();
   }
 
-  const revokedDir = path.join(DATA_ROOT, 'tenants', tenantId, 'ucans', 'revoked');
+  // Canonical revocation directory — same path admin-api writes to and the
+  // gate-service reads from. The --tenant flag is kept for operator clarity
+  // (you usually want to know which tenant a CID belongs to before revoking)
+  // but doesn't appear in the path: UCAN CIDs are sha256 and globally unique.
+  const revokedDir = path.join(DATA_ROOT, 'ucans', 'revoked');
   fs.mkdirSync(revokedDir, { recursive: true });
 
   const tombstone = {
     cid,
+    tenantId,
     revokedAt: new Date().toISOString(),
     reason,
   };
@@ -66,7 +71,7 @@ async function main() {
   fs.renameSync(tmpPath, tombstonePath);
 
   // Also update the issued metadata if it exists
-  const issuedPath = path.join(DATA_ROOT, 'tenants', tenantId, 'ucans', 'issued', cid + '.json');
+  const issuedPath = path.join(DATA_ROOT, 'ucans', 'issued', cid + '.json');
   if (fs.existsSync(issuedPath)) {
     const issued = JSON.parse(fs.readFileSync(issuedPath, 'utf8'));
     const updated = { ...issued, revoked: true, revokedAt: tombstone.revokedAt, revokedReason: reason };

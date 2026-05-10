@@ -1,6 +1,7 @@
 import fsp from 'fs/promises';
+import path from 'path';
 import { validate as ucansValidate } from '@ucans/ucans';
-import { TenantContext, tenantDataPath } from '@nova/shared/src/tenant';
+import { TenantContext, DATA_ROOT } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
 import {
   computeCid,
@@ -130,17 +131,25 @@ export async function verifyUCAN(
   }
 
   // 9. Revocation — check both the invocation CID and the grant CID against
-  // the per-tenant tombstone directory. The revoked path is shared across
-  // tenants at data/ucans/revoked/ (tenantDataPath('..',...) walks up).
+  // the global tombstone directory. UCAN CIDs are sha256 hashes (globally
+  // unique), so revocation is cross-tenant; this is the same path that
+  // admin-api writes to in revokeUcan() and that a2a-server's status route
+  // reads. ENOENT means "not revoked"; any other I/O error fails closed —
+  // we'd rather quarantine a legitimate task than admit a possibly-revoked
+  // one because the disk is misbehaving.
+  const revokedDir = path.join(DATA_ROOT, 'ucans', 'revoked');
   const outerCid = computeCid(ucanJwt);
   const grantCid = computeCid(grantJwt);
   for (const cid of [outerCid, grantCid]) {
-    const revokedPath = tenantDataPath(ctx, '..', 'ucans', 'revoked', cid + '.json');
+    const revokedPath = path.join(revokedDir, cid + '.json');
     try {
       await fsp.access(revokedPath);
       return { valid: false, reason: 'ucan_revoked' };
-    } catch {
-      // Not revoked — continue.
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue; // not revoked — continue
+      logger.warn({ err: (err as Error).message, code, cid }, 'Revocation check I/O error — failing closed');
+      return { valid: false, reason: 'revocation_check_failed' };
     }
   }
 
