@@ -66,8 +66,8 @@ export const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.nova', 'broker-rece
 
 export interface ConfigInputs {
   cli: Partial<Record<string, unknown>>;
-  env?: NodeJS.ProcessEnv;
-  configPath?: string;
+  env?: NodeJS.ProcessEnv | undefined;
+  configPath?: string | undefined;
 }
 
 /**

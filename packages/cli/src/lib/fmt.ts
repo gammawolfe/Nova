@@ -133,6 +133,7 @@ export function table(rows: any[], columns: Column[]): void {
 }
 
 function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex -- intentional: strip ANSI escape sequences
   return s.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
