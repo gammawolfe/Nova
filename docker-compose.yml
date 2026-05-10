@@ -15,7 +15,11 @@ services:
   a2a-server:
     build:
       context: .
-      dockerfile: Dockerfile.a2a-server
+      dockerfile: Dockerfile
+      args:
+        SERVICE: a2a-server
+        NPM_WORKSPACES: --workspace=packages/shared --workspace=packages/gate-service --workspace=packages/task-queue --workspace=packages/a2a-server
+        PORT: "3001"
     init: true
     ports:
       - "3001:3001"
@@ -39,7 +43,12 @@ services:
   gate-service:
     build:
       context: .
-      dockerfile: Dockerfile.gate-service
+      dockerfile: Dockerfile
+      args:
+        SERVICE: gate-service
+        NPM_WORKSPACES: --workspace=packages/shared --workspace=packages/gate-service
+        ENTRY: dist/server.js
+        PORT: "3002"
     init: true
     volumes:
       - ./data:/app/data:rw
@@ -61,7 +70,11 @@ services:
   agent-connector:
     build:
       context: .
-      dockerfile: Dockerfile.agent-connector
+      dockerfile: Dockerfile
+      args:
+        SERVICE: agent-connector
+        NPM_WORKSPACES: --workspace=packages/shared --workspace=packages/task-queue --workspace=packages/agent-connector
+        PORT: "3003"
     init: true
     volumes:
       - ./data:/app/data:rw
@@ -82,7 +95,11 @@ services:
   admin-api:
     build:
       context: .
-      dockerfile: Dockerfile.admin-api
+      dockerfile: Dockerfile
+      args:
+        SERVICE: admin-api
+        NPM_WORKSPACES: --workspace=packages/shared --workspace=packages/task-queue --workspace=packages/admin-api
+        PORT: "3005"
     init: true
     ports:
       - "127.0.0.1:3005:3005"
