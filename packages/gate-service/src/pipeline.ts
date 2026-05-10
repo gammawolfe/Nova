@@ -12,7 +12,11 @@ import { extractStrings, patternMatch, llmClassify, classifyDecision } from './c
 import { writeQuarantine } from './quarantine';
 import { gateDecisions, gateLatency, classifierResults, quarantineDepth } from './metrics';
 
-const GATE_LLM_FAIL_CLOSED = process.env.GATE_LLM_FAIL_CLOSED === 'true';
+// Default fail-closed: when the LLM classifier is unavailable, quarantine
+// the request rather than let it through. Operators can opt in to fail-open
+// by setting GATE_LLM_FAIL_CLOSED=false, but this leaves layer-5 injection
+// detection offline during outages.
+const GATE_LLM_FAIL_CLOSED = process.env.GATE_LLM_FAIL_CLOSED !== 'false';
 
 export interface GateContext {
   tenantCtx: TenantContext;
@@ -354,17 +358,20 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       });
     }
 
-    // Classifier unavailable → skip the LLM check, let the request through.
-    // The other 5 gates (actor, UCAN, audit, schema, pattern) still protect us.
+    // Classifier unavailable + GATE_LLM_FAIL_CLOSED=false → fail-open:
+    // skip layer-5 LLM injection detection and let the request through.
+    // Layers 1-4 (tier, UCAN, schema, pattern-match) still run.
     await auditLog(tenantCtx, {
       event: 'classifier_unavailable',
       senderDid: senderDid ?? undefined,
       tier,
       reason: err.message,
+      metadata: { failMode: 'open' },
     });
+    classifierResults.inc({ result: 'fail_open', stage: 'llm_error' });
     logger.warn(
       { err: err.message },
-      'LLM classifier unavailable — skipping injection check, relying on other gates'
+      'LLM classifier unavailable — fail-open enabled (GATE_LLM_FAIL_CLOSED=false), injection detection bypassed'
     );
   }
 
