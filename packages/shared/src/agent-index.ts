@@ -53,8 +53,27 @@ export interface AgentLifecycleEvent {
 }
 
 /**
+ * Thrown by indexAgentMeta when an agentId is already claimed by a different
+ * tenant. Nova's protocol uses agentId alone in public URLs (`/agents/:agentId/...`),
+ * so two tenants cannot share an agentId — registration must fail loudly,
+ * not silently clobber the previous tenant's index entry.
+ */
+export class AgentIdConflictError extends Error {
+  readonly status = 409;
+  readonly code = 'AGENT_EXISTS_OTHER_TENANT';
+  constructor(public agentId: string, public existingTenantId: string, public attemptedTenantId: string) {
+    super(`Agent '${agentId}' is already registered in tenant '${existingTenantId}' (attempted to claim from tenant '${attemptedTenantId}')`);
+    this.name = 'AgentIdConflictError';
+  }
+}
+
+/**
  * Index an agent's public discovery metadata in Redis.
  * Called on create, approve, and update.
+ *
+ * Rejects with AgentIdConflictError if the agentId is already claimed by a
+ * different tenant. Re-indexing the same (tenantId, agentId) pair is allowed
+ * and idempotent (used for status transitions).
  */
 export async function indexAgentMeta(
   redis: IORedis,
@@ -69,6 +88,15 @@ export async function indexAgentMeta(
     did?: string | undefined;
   }
 ): Promise<void> {
+  // Defend against cross-tenant collisions. The window between this read and
+  // the pipeline below is tiny but non-atomic; under contention the SETNX-like
+  // semantics are enforced at the caller level (register.ts pre-flight) and a
+  // racing second writer would still see an existing key on the next call.
+  const existingTenantId = await redis.get(agentIndexKey(config.agentId));
+  if (existingTenantId && existingTenantId !== config.tenantId) {
+    throw new AgentIdConflictError(config.agentId, existingTenantId, config.tenantId);
+  }
+
   const did = config.did ?? '';
   const pipe = redis.pipeline()
     .set(agentIndexKey(config.agentId), config.tenantId)

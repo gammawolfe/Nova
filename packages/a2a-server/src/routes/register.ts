@@ -7,7 +7,7 @@ import { SelfRegisterSchema } from '@nova/shared/src/admin-schemas';
 import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis } from '@nova/shared/src/redis';
-import { indexAgentMeta, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
+import { indexAgentMeta, agentIndexKey, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
 import { verifyInvite, consumeInvite } from '@nova/shared/src/invites';
 import { validateId } from '@nova/shared/src/validation';
 import {
@@ -168,6 +168,18 @@ registerRouter.post('/', async (req: Request, res: Response) => {
         });
       }
     } catch { /* agent doesn't exist — proceed */ }
+
+    // Step 4b: agentId is global within a Nova (URLs are /agents/:agentId/...),
+    // so reject pre-flight if another tenant already owns it. indexAgentMeta
+    // also enforces this defensively, but checking before consumeInvite avoids
+    // burning the invite on a doomed registration.
+    const claimedBy = await getSharedRedis().get(agentIndexKey(agentId));
+    if (claimedBy && claimedBy !== tenantId) {
+      return res.status(409).json({
+        error: 'AGENT_EXISTS_OTHER_TENANT',
+        message: `Agent '${agentId}' is already registered in tenant '${claimedBy}'. agentId must be unique within a Nova; pick a different one.`,
+      });
+    }
 
     // Step 5: consume the invite atomically. All reversible validation is done;
     // any failure after this point leaves the invite burned, which is acceptable
