@@ -4,7 +4,7 @@ import { DATA_ROOT, TenantContext, tenantDataPath } from '@nova/shared/src/tenan
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis, closeSharedRedis } from '@nova/shared/src/redis';
 import { ID_RE, validateId } from '@nova/shared/src/validation';
-import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, ParsedAgentMeta, AGENT_LIFECYCLE_CHANNEL, AgentLifecycleEvent } from '@nova/shared/src/agent-index';
+import { indexAgentMeta, deindexAgent, listActiveAgentMeta, getAgentMeta, agentIndexKey, ParsedAgentMeta, AGENT_LIFECYCLE_CHANNEL, AgentLifecycleEvent } from '@nova/shared/src/agent-index';
 
 export { closeSharedRedis as closeRedis };
 export type { ParsedAgentMeta };
@@ -49,6 +49,22 @@ function agentConfigPath(ctx: TenantContext): string {
   return tenantDataPath(ctx, 'agent-config.json');
 }
 
+/**
+ * Pre-flight: agentId is global within a Nova (URLs are /agents/:agentId/...),
+ * so a tenant cannot create an agent whose id is already claimed by another
+ * tenant. Performed before any disk writes so a doomed registration leaves
+ * no orphan files behind. indexAgentMeta also enforces this defensively.
+ */
+async function assertAgentIdAvailable(tenantId: string, agentId: string): Promise<void> {
+  const claimedBy = await getSharedRedis().get(agentIndexKey(agentId));
+  if (claimedBy && claimedBy !== tenantId) {
+    throw Object.assign(
+      new Error(`Agent '${agentId}' is already registered in tenant '${claimedBy}'. agentId must be unique within a Nova; pick a different one.`),
+      { status: 409, code: 'AGENT_EXISTS_OTHER_TENANT' }
+    );
+  }
+}
+
 export async function createAgent(tenantId: string, data: {
   agentId: string; name: string; description?: string | undefined; operatorUrl?: string | undefined;
   skills: AgentConfig['skills']; highPrivilegeSkills?: string[] | undefined;
@@ -56,6 +72,7 @@ export async function createAgent(tenantId: string, data: {
 }): Promise<AgentConfig> {
   validateId(tenantId, 'tenantId');
   validateId(data.agentId, 'agentId');
+  await assertAgentIdAvailable(tenantId, data.agentId);
   const ctx: TenantContext = { tenantId, agentId: data.agentId };
   const agentDir = tenantDataPath(ctx);
 
@@ -99,6 +116,7 @@ export async function createAgentPending(tenantId: string, data: {
 }): Promise<AgentConfig> {
   validateId(tenantId, 'tenantId');
   validateId(data.agentId, 'agentId');
+  await assertAgentIdAvailable(tenantId, data.agentId);
   const ctx: TenantContext = { tenantId, agentId: data.agentId };
   const agentDir = tenantDataPath(ctx);
 

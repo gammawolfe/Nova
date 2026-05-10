@@ -1,6 +1,6 @@
 import fsp from 'fs/promises';
 import path from 'path';
-import { validate as ucansValidate } from '@ucans/ucans';
+import { novaUcansValidate } from '@nova/shared/src/ucan-plugins';
 import { TenantContext, DATA_ROOT } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
 import {
@@ -70,7 +70,7 @@ export async function verifyUCAN(
 
   // 1. Outer signature + expiry
   try {
-    await ucansValidate(ucanJwt);
+    await novaUcansValidate(ucanJwt);
   } catch (err: any) {
     const msg: string = (err.message ?? '').toLowerCase();
     if (msg.includes('expir')) return { valid: false, reason: 'ucan_expired' };
@@ -92,7 +92,7 @@ export async function verifyUCAN(
 
   // 4. Grant signature + expiry
   try {
-    await ucansValidate(grantJwt);
+    await novaUcansValidate(grantJwt);
   } catch (err: any) {
     const msg: string = (err.message ?? '').toLowerCase();
     if (msg.includes('expir')) return { valid: false, reason: 'grant_expired' };
