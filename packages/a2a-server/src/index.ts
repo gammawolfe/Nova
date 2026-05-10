@@ -17,6 +17,7 @@ import { streamRouter } from './stream';
 import { inboxRouter } from './routes/inbox';
 import { repliesRouter } from './routes/replies';
 import { healthRouter } from './routes/health';
+import { wellKnownRouter } from './routes/well-known';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { a2aRegistry } from './metrics';
@@ -377,6 +378,7 @@ agentRouter.post('/tasks', async (req, res) => {
 });
 
 // Self-registration endpoint (public, no auth, outside agent routing)
+app.use('/', wellKnownRouter);
 app.use('/register', registerRouter);
 
 // Broker inbox pull endpoints — mounted before agentRouter so /:agentId/inbox

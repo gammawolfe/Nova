@@ -13,7 +13,8 @@
 // agent's public DID (visible via /discover) to forge a self-UCAN.
 
 import { Request, Response } from 'express';
-import { validate as ucansValidate, parse as ucansParse } from '@ucans/ucans';
+import { parse as ucansParse } from '@ucans/ucans';
+import { novaUcansValidate } from '@nova/shared/src/ucan-plugins';
 import { getAgentMeta } from '@nova/shared/src/agent-index';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { TenantContext } from '@nova/shared/src/tenant';
@@ -41,7 +42,7 @@ export async function verifySelfUcan(jwt: string): Promise<SelfUcanResult | Self
       return { ok: false, reason: 'malformed_jwt' };
     }
 
-    await ucansValidate(jwt);
+    await novaUcansValidate(jwt);
 
     const decoded = await ucansParse(jwt);
     const issuerDid: string | undefined = decoded.payload.iss;
