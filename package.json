@@ -45,9 +45,13 @@
     "test:acceptance:graceful-shutdown": "tsx scripts/acceptance-test-graceful-shutdown.ts"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.4",
     "@types/node": "^22.0.0",
+    "eslint": "9.39.4",
+    "globals": "15.15.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
+    "typescript-eslint": "8.59.2",
     "vitest": "^1.5.0"
   },
   "dependencies": {
