@@ -6,9 +6,11 @@ import { describe, it, expect } from 'vitest';
 import { generateKeyPairSync, createPublicKey } from 'crypto';
 import {
   buildDidDocument,
+  buildDidWeb,
   ed25519PublicKeyToMultibase,
   multibaseToEd25519PublicKey,
   didWebToUrl,
+  validateDidWebHost,
 } from '../src/did-document';
 
 function makeEd25519Pair() {
@@ -110,5 +112,63 @@ describe('didWebToUrl', () => {
 
   it('rejects non-did:web inputs', () => {
     expect(() => didWebToUrl('did:key:z6Mk')).toThrow(/Not a did:web/);
+  });
+});
+
+describe('validateDidWebHost', () => {
+  it('accepts a bare hostname', () => {
+    expect(validateDidWebHost('nova.family.com')).toBe('nova.family.com');
+  });
+
+  it('accepts a hostname with port', () => {
+    expect(validateDidWebHost('nova.family.com:8443')).toBe('nova.family.com:8443');
+  });
+
+  it('accepts hostnames with hyphens', () => {
+    expect(validateDidWebHost('nova-staging.example.com')).toBe('nova-staging.example.com');
+  });
+
+  it('rejects empty input', () => {
+    expect(() => validateDidWebHost('')).toThrow(/Invalid did:web host/);
+  });
+
+  it('rejects schemes', () => {
+    expect(() => validateDidWebHost('https://nova.family.com')).toThrow(/Invalid did:web host/);
+  });
+
+  it('rejects paths', () => {
+    expect(() => validateDidWebHost('nova.family.com/path')).toThrow(/Invalid did:web host/);
+  });
+
+  it('rejects whitespace', () => {
+    expect(() => validateDidWebHost('nova.family.com ')).toThrow(/Invalid did:web host/);
+  });
+
+  it('rejects underscores (not valid DNS labels)', () => {
+    expect(() => validateDidWebHost('nova_family.com')).toThrow(/Invalid did:web host/);
+  });
+});
+
+describe('buildDidWeb', () => {
+  it('builds a host-only did:web', () => {
+    expect(buildDidWeb('nova.family.com')).toBe('did:web:nova.family.com');
+  });
+
+  it('percent-encodes the port colon', () => {
+    expect(buildDidWeb('nova.family.com:8443')).toBe('did:web:nova.family.com%3A8443');
+  });
+
+  it('round-trips with didWebToUrl on a host-only DID', () => {
+    expect(didWebToUrl(buildDidWeb('nova.family.com')))
+      .toBe('https://nova.family.com/.well-known/did.json');
+  });
+
+  it('round-trips with didWebToUrl on a port-suffixed DID', () => {
+    expect(didWebToUrl(buildDidWeb('nova.family.com:8443')))
+      .toBe('https://nova.family.com:8443/.well-known/did.json');
+  });
+
+  it('rejects invalid hosts (delegates to validateDidWebHost)', () => {
+    expect(() => buildDidWeb('https://nova.family.com')).toThrow(/Invalid did:web host/);
   });
 });
