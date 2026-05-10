@@ -1,4 +1,4 @@
-# Nova — UPDATED README (see diff vs README.md.bak)
+# Nova
 
 **A zero-trust gateway for agent-to-agent communication.** Any AI runtime —
 Claude Code, Cursor, Hermes, OpenClaw, custom agents — joins a Nova network

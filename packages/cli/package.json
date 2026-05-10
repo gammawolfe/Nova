@@ -1,6 +1,7 @@
 {
   "name": "@nova/cli",
   "version": "0.1.0",
+  "private": true,
   "description": "Nova operator CLI",
   "bin": {
     "nova": "./dist/index.js"
