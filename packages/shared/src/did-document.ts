@@ -161,3 +161,29 @@ export function didWebToUrl(did: string): string {
   }
   return `https://${host}/${pathSegs.join('/')}/did.json`;
 }
+
+/**
+ * Validate a host[:port] string suitable for embedding in a did:web DID.
+ *
+ * Loose DNS check + optional :port. We don't try to be IDNA-correct — punycode
+ * the input upstream if needed. The intent is to catch obvious typos at
+ * configuration time, not to be a domain-name validator.
+ */
+export function validateDidWebHost(input: string): string {
+  if (!/^[a-zA-Z0-9.-]+(:\d{1,5})?$/.test(input)) {
+    throw new Error(
+      `Invalid did:web host: "${input}". Expected DNS host with optional :port (e.g. nova.family.com or nova.family.com:8443).`,
+    );
+  }
+  return input;
+}
+
+/**
+ * Build a `did:web:<host>` DID from a host[:port] string. Per the did:web
+ * spec, `:` is the path delimiter inside the DID, so a literal port colon
+ * must be percent-encoded as `%3A`.
+ */
+export function buildDidWeb(host: string): string {
+  validateDidWebHost(host);
+  return `did:web:${host.replace(':', '%3A')}`;
+}
