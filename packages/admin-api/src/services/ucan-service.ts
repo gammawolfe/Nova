@@ -32,13 +32,23 @@ import { buildUcanJwt, computeCid, type UcanCapability, type UcanPayload } from 
 
 interface UcanMetadata {
   cid: string;
-  issuedTo: string;       // subject DID (the sender receiving the grant)
-  capabilities: string[]; // flattened "with" strings for convenience
+  issuedTo: string;        // subject DID — agent DID for grants, peer Nova DID for federation
+  capabilities: string[];  // flattened "with" strings for convenience
   expiresAt: string;
   issuedAt: string;
-  tenantId: string;
+  /**
+   * Tenant scope. Set for tenant-issued approval grants. Omitted for
+   * federation grants, which are Nova-level (operator-to-peer-Nova
+   * delegations that aren't owned by any single tenant). Tenant-scoped
+   * listings filter on equality, which naturally excludes records with
+   * no `tenantId`.
+   */
+  tenantId?: string;
   revoked: boolean;
-  kind: 'grant';          // Always 'grant' in the new model; kept as a field for future-proofing
+  /** Distinguishes operator-issued approval grants from federation grants. */
+  kind: 'grant' | 'federation';
+  /** Optional operator note (currently used by federation grants for audit). */
+  note?: string;
 }
 
 const issuedDir = path.join(DATA_ROOT, 'ucans', 'issued');
@@ -105,6 +115,107 @@ export async function issueApprovalGrant(tenantId: string, data: {
   await writeAtomicallyAsync(path.join(issuedDir, cid + '.json'), metadata);
 
   return { jwt, cid, expiresAt };
+}
+
+// ── Federation grant issuance ───────────────────────────────────────────────
+
+/**
+ * Issue a federation grant: a UCAN this Nova signs that delegates a scoped
+ * set of capabilities to a peer Nova. The peer's users can then mint
+ * invocations whose `prf` chain includes this grant, and our gate's chain
+ * walker verifies authority back to our own signature.
+ *
+ * Produces a UCAN:
+ *   iss: this Nova's gateway DID  (signed with our private key)
+ *   aud: peer Nova's gateway DID  (did:web or did:key)
+ *   att: [capability, ...]        (each as { with, can: 'invoke' })
+ *   prf: []                       (root of the delegation chain)
+ *   exp: now + expiryDays
+ *
+ * The JWT is returned for the operator to hand to the peer's operator
+ * (out-of-band — e-mail, secure transfer, whatever). Persistence on this
+ * side stores metadata only; if the operator loses the JWT they re-issue.
+ *
+ * Note: the peer Nova should ALSO appear in `data/keys/trusted-issuers.json`
+ * (Phase 2A primitive) — minting a federation grant doesn't auto-trust the
+ * peer in the chain verifier's defense-in-depth check. That's an
+ * intentional two-step: minting is "I'm willing to issue you authority";
+ * trusted-issuers is "I'm willing to accept invocations chained through
+ * you." Operators may want to pre-issue grants without yet enabling them.
+ */
+export async function issueFederationGrant(data: {
+  peerDid: string;
+  scope: string[];
+  expiryDays: number;
+  note?: string | undefined;
+}): Promise<{ jwt: string; cid: string; expiresAt: string; peerDid: string }> {
+  const novaDid = await loadNovaDid();
+  if (!novaDid) {
+    throw new Error('Nova DID not found — run scripts/generate-keys.ts first');
+  }
+  if (!data.peerDid) {
+    throw new Error('issueFederationGrant requires peerDid');
+  }
+  if (data.peerDid === novaDid) {
+    throw new Error('issueFederationGrant: peerDid equals this Nova\'s DID — federation grants are for peer Novas, not self');
+  }
+
+  const exp = Math.floor(Date.now() / 1000) + data.expiryDays * 86400;
+  const expiresAt = new Date(exp * 1000).toISOString();
+
+  const att: UcanCapability[] = data.scope.map(cap => ({ with: cap, can: 'invoke' }));
+
+  const payload: UcanPayload = {
+    iss: novaDid,
+    aud: data.peerDid,
+    exp,
+    att,
+    prf: [],
+    jti: crypto.randomUUID(),
+  };
+
+  const privateKey = await loadNovaPrivateKey();
+  const jwt = buildUcanJwt(payload, privateKey);
+  const cid = computeCid(jwt);
+
+  await fsp.mkdir(issuedDir, { recursive: true });
+  const metadata: UcanMetadata = {
+    cid,
+    issuedTo: data.peerDid,
+    capabilities: data.scope,
+    expiresAt,
+    issuedAt: new Date().toISOString(),
+    revoked: false,
+    kind: 'federation',
+    ...(data.note !== undefined ? { note: data.note } : {}),
+  };
+  await writeAtomicallyAsync(path.join(issuedDir, cid + '.json'), metadata);
+
+  logger.info({ peerDid: data.peerDid, cid, scope: data.scope, expiresAt }, 'Federation grant issued');
+
+  return { jwt, cid, expiresAt, peerDid: data.peerDid };
+}
+
+/**
+ * List all issued federation grants (Nova-level, no tenant filter). Returns
+ * metadata only — the JWT itself is not persisted; operators keep the copy
+ * returned at issuance time.
+ */
+export async function listFederationGrants(): Promise<UcanMetadata[]> {
+  let files: string[];
+  try { files = (await fsp.readdir(issuedDir)).filter(f => f.endsWith('.json')); }
+  catch { return []; }
+
+  const all = await Promise.all(
+    files.map(async f => {
+      try {
+        const meta = JSON.parse(await fsp.readFile(path.join(issuedDir, f), 'utf8')) as UcanMetadata;
+        if (meta.kind !== 'federation') return null;
+        return meta;
+      } catch { return null; }
+    }),
+  );
+  return all.filter((m): m is UcanMetadata => m !== null);
 }
 
 // ── Revocation ──────────────────────────────────────────────────────────────
