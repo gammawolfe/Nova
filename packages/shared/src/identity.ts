@@ -94,6 +94,23 @@ export async function saveIdentity(identity: IdentityWithCreds): Promise<void> {
 }
 
 /**
+ * Materialise an identity record by combining its on-disk JSON metadata
+ * with the freshly-loaded private key PEM. Used by `loadIdentity` to
+ * return a fully-populated `IdentityWithCreds` regardless of which
+ * KeyBackend currently holds the key.
+ *
+ * Extracted so the spread-order semantics of the original site can't
+ * silently drift on future edits — the explicit field assignments make
+ * "the returned record has both the metadata flags AND the PEM" obvious.
+ */
+function materialiseIdentity(
+  parsed: IdentityWithCreds,
+  pem: string,
+): IdentityWithCreds {
+  return { ...parsed, privateKeyPem: pem };
+}
+
+/**
  * Load an identity, materialising the private key via the active KeyBackend.
  *
  * Handles three layouts on disk:
@@ -131,18 +148,26 @@ export async function loadIdentity(agentId: string): Promise<IdentityWithCreds |
         `regenerate the identity, or delete ${agentIdentityPath(agentId)} to start fresh.`,
       );
     }
-    return { ...parsed, privateKeyPem: pem };
+    return materialiseIdentity(parsed, pem);
   }
 
   // storedBackend === 'file' — PEM is inline. If the current backend is
   // keychain, upgrade in place so subsequent loads are consistent.
   if (backend.name === 'keychain' && parsed.privateKeyPem) {
-    await backend.storePrivateKey(agentId, parsed.privateKeyPem);
-    const migrated: IdentityWithCreds = { ...parsed, privateKeyPem: '', keyBackend: 'keychain' };
+    // Migration: stash the inline PEM into the keychain, then rewrite the
+    // on-disk JSON without the PEM and with keyBackend:"keychain". The
+    // returned record carries the PEM so the caller's downstream use
+    // (signing, exporting) doesn't have to re-fetch from the keychain
+    // it just stored.
+    const inlinePem = parsed.privateKeyPem;
+    await backend.storePrivateKey(agentId, inlinePem);
+
+    const persisted: IdentityWithCreds = { ...parsed, privateKeyPem: '', keyBackend: 'keychain' };
     const tmp = agentIdentityPath(agentId) + '.tmp';
-    await fsp.writeFile(tmp, JSON.stringify(migrated, null, 2), { mode: 0o600 });
+    await fsp.writeFile(tmp, JSON.stringify(persisted, null, 2), { mode: 0o600 });
     await fsp.rename(tmp, agentIdentityPath(agentId));
-    return { ...migrated, privateKeyPem: parsed.privateKeyPem };
+
+    return materialiseIdentity(persisted, inlinePem);
   }
 
   return parsed;

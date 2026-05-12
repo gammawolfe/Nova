@@ -1,5 +1,6 @@
 import fsp from 'fs/promises';
 import { NOVA_HOME, TENANT_CONFIG_PATH } from './paths.js';
+import { parseInviteJwtPayload, ParseInvitePayloadOptions } from './invites.js';
 
 export interface TenantConfig {
   novaUrl: string;
@@ -26,25 +27,24 @@ export async function saveTenantConfig(cfg: TenantConfig): Promise<void> {
   await fsp.rename(tmp, TENANT_CONFIG_PATH);
 }
 
+/**
+ * Decode an invite JWT's payload without verifying the signature. Used by
+ * client-side flows (CLI inspect, MCP decode, broker-receiver init) that
+ * need to read the invite's claims before deciding whether to commit local
+ * state. Server-side flows must use `verifyInvite` from `./invites.js`,
+ * which layers signature verification on top.
+ *
+ * Thin wrapper over `parseInviteJwtPayload` — kept here for source
+ * compatibility with the broad caller surface (mcp-server, broker-receiver,
+ * and this module itself).
+ */
 export function decodeInvitePayload(
   token: string,
-  opts: { allowExpired?: boolean } = {},
+  opts: ParseInvitePayloadOptions = {},
 ): { tenantId: string; agentIdHint?: string; exp: number; jti: string; expired?: boolean } {
-  // Strip whitespace before parsing — terminal line-wrapping can introduce
-  // newlines into a pasted JWT. Must stay symmetric with verifyInvite in
-  // packages/shared/src/invites.ts so client-side decode and server-side
-  // signature verification accept the same input.
-  const normalized = token.replace(/\s+/g, '');
-  const parts = normalized.split('.');
-  if (parts.length !== 3) throw new Error('Malformed invite token');
-  let payload: any;
-  try { payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')); }
-  catch { throw new Error('Invite payload malformed'); }
-  if (payload.typ !== 'invite') throw new Error('Not an invite token');
-  if (!payload.tenantId || typeof payload.exp !== 'number' || !payload.jti) {
-    throw new Error('Invite missing claims');
-  }
-  const expired = payload.exp < Math.floor(Date.now() / 1000);
-  if (expired && !opts.allowExpired) throw new Error('Invite expired');
-  return expired ? { ...payload, expired: true } : payload;
+  const parsed = parseInviteJwtPayload(token, opts);
+  // Strip the `parts` helper — callers of the decode-only path don't need
+  // the raw JWT segments.
+  const { parts: _parts, ...payload } = parsed;
+  return payload;
 }
