@@ -1,5 +1,4 @@
 // packages/a2a-server/src/routes/inbox.ts
-import IORedis from 'ioredis';
 import express, { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
@@ -18,8 +17,7 @@ import * as inbox from '@nova/task-queue/src/inbox';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import { authSelfUcan } from '../auth/self-ucan';
-import { activeSseStreams } from '../metrics';
-import { registerSseCleanup } from '../sse-registry';
+import { createSseHandler } from '../sse-handler';
 
 // ── Router ───────────────────────────────────────────────────────────────────
 
@@ -267,146 +265,50 @@ inboxRouter.get('/:agentId/inbox/peek', async (req: Request, res: Response, next
 
 // ── GET /agents/:agentId/inbox/stream — SSE inbox notifications ─────────────
 //
-// Resume contract: client may send Last-Event-ID with the seq of the last
-// notification it processed. The replay path skips entries whose seq is <=
-// that value. Live events are forwarded as they arrive.
-//
-// Resume-gap handling (see docs/superpowers/specs/2026-04-22-mcp-push-subscriptions.md
-// §"The resume gap"): SUBSCRIBE first and buffer live events, then LRANGE
-// snapshot, flush snapshot, then flush buffered live events skipping any seq
-// already emitted during snapshot.
+// Resume contract: client sends Last-Event-ID with the seq of the last
+// notification it processed; replay skips entries whose seq is <= that
+// value. The factory closes the resume gap via subscribe-first-then-replay-
+// then-drain-buffered ordering (see sse-handler.ts).
 
-const INBOX_HEARTBEAT_INTERVAL_MS = 15_000;
-
-function writeSSE(
-  res: Response,
-  event: { id?: number | undefined; type: string; data: unknown },
-): void {
-  if (event.id !== undefined) res.write(`id: ${event.id}\n`);
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event.data)}\n\n`);
-  if (typeof (res as any).flush === 'function') (res as any).flush();
-}
-
-inboxRouter.get('/:agentId/inbox/stream', async (req: Request, res: Response) => {
-  const paramAgentId = req.params['agentId'];
-  if (!paramAgentId) return void res.status(400).json({ error: 'AGENT_ID_REQUIRED' });
-
-  const ctx = await authSelfUcan(req, res, paramAgentId);
-  if (!ctx) return;
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders();
-
-  const lastEventId = parseInt((req.headers['last-event-id'] as string) ?? '0', 10) || 0;
-  const channel = inbox.inboxNotifyChannel(ctx);
-
-  let cleaned = false;
-  let sub: IORedis | null = null;
-  activeSseStreams.inc();
-
-  // Seqs emitted during the replay phase. We skip these when flushing the
-  // buffered live events (they'd be duplicates) and when forwarding live
-  // events (protects against the SUBSCRIBE-before-LRANGE window where the
-  // same task was already captured in the snapshot).
-  const replayedSeqs = new Set<number>();
-  let replayDone = false;
-  const buffered: string[] = [];
-
-  function cleanup(): void {
-    if (cleaned) return;
-    cleaned = true;
-    activeSseStreams.dec();
-    clearInterval(heartbeat);
-    unregister();
-    if (sub) {
-      sub.unsubscribe().catch(() => {});
-      sub.quit().catch(() => {});
-      sub = null;
-    }
-  }
-
-  // H1 — register cleanup with the global SSE registry so graceful shutdown
-  // can drain inbox subscribers in a deterministic order.
-  const unregister = registerSseCleanup(cleanup);
-
-  const heartbeat = setInterval(() => {
-    try {
-      writeSSE(res, { type: 'heartbeat', data: { at: new Date().toISOString() } });
-    } catch {
-      cleanup();
-    }
-  }, INBOX_HEARTBEAT_INTERVAL_MS);
-
-  try {
-    sub = getSharedRedis().duplicate();
-    await sub.subscribe(channel);
-  } catch (err: any) {
-    logger.error({ err: err.message, ctx }, 'Failed to subscribe to inbox notify channel');
-    cleanup();
-    return void res.end();
-  }
-
-  sub.on('message', (_channel, message) => {
-    if (!replayDone) {
-      buffered.push(message);
-      return;
-    }
-    try {
-      const note = JSON.parse(message) as inbox.InboxNotification;
-      if (replayedSeqs.has(note.seq)) return;
-      if (note.seq <= lastEventId) return;
-      writeSSE(res, { id: note.seq, type: 'enqueued', data: note });
-    } catch (err: any) {
-      logger.warn({ err: err.message, ctx }, 'Malformed inbox-notify message');
-    }
-  });
-
-  sub.on('error', (err) => {
-    logger.error({ err: err.message, ctx }, 'Inbox SSE subscriber error');
-    cleanup();
-    res.end();
-  });
-
-  req.on('close', () => cleanup());
-
-  // Snapshot replay. list() returns newest-first (LPUSH head); emit oldest-
-  // first so SSE `id:` values are monotonically increasing, matching what a
-  // client expects from a resumable stream.
-  try {
-    const entries = await inbox.list(ctx);
+const inboxStreamHandler = createSseHandler({
+  logTag: 'inbox-stream',
+  channel: (req: Request) => inbox.inboxNotifyChannel(req.ctx),
+  async *replay(req) {
+    // list() returns newest-first (LPUSH head); emit oldest-first so SSE
+    // `id:` values are monotonically increasing, matching what a resumable
+    // client expects.
+    const entries = await inbox.list(req.ctx);
     entries.reverse();
     for (const entry of entries) {
       if (typeof entry.seq !== 'number') continue;
-      if (entry.seq <= lastEventId) continue;
       const note: inbox.InboxNotification = {
         seq: entry.seq,
         taskId: entry.taskId,
         intent: entry.task.intent,
         enqueuedAt: entry.task.queuedAt ?? new Date().toISOString(),
       };
-      writeSSE(res, { id: entry.seq, type: 'enqueued', data: note });
-      replayedSeqs.add(entry.seq);
+      yield { id: entry.seq, type: 'enqueued', data: note };
     }
-  } catch (err: any) {
-    logger.warn({ err: err.message, ctx }, 'Inbox SSE replay failed');
-  }
-
-  // Flush the live events that arrived during replay. Dedup against the
-  // replay set, and honor Last-Event-ID.
-  replayDone = true;
-  for (const message of buffered) {
+  },
+  parseLive(raw) {
     try {
-      const note = JSON.parse(message) as inbox.InboxNotification;
-      if (replayedSeqs.has(note.seq)) continue;
-      if (note.seq <= lastEventId) continue;
-      writeSSE(res, { id: note.seq, type: 'enqueued', data: note });
+      const note = JSON.parse(raw) as inbox.InboxNotification;
+      return { id: note.seq, type: 'enqueued', data: note };
     } catch {
-      // tolerated — same as live-path parse failure
+      return null;
     }
+  },
+});
+
+inboxRouter.get('/:agentId/inbox/stream', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const paramAgentId = req.params['agentId'];
+    if (!paramAgentId) return void res.status(400).json({ error: 'AGENT_ID_REQUIRED' });
+    const ctx = await authSelfUcan(req, res, paramAgentId);
+    if (!ctx) return;
+    req.ctx = ctx;
+    await inboxStreamHandler(req, res);
+  } catch (err) {
+    next(err);
   }
-  buffered.length = 0;
 });

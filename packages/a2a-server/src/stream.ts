@@ -1,156 +1,81 @@
-import IORedis from 'ioredis';
-import { Router, Request, Response } from 'express';
+import { Router, Request } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey } from '@nova/shared/src/tenant';
 import { TERMINAL_STATUSES } from '@nova/shared/src/types';
 import { getTaskState } from '@nova/task-queue/src/index';
 import { getSharedRedis } from '@nova/shared/src/redis';
-
-const redis = getSharedRedis();
-import { activeSseStreams } from './metrics';
-import { registerSseCleanup } from './sse-registry';
+import { createSseHandler, SseEvent } from './sse-handler';
 
 export const streamRouter = Router({ mergeParams: true });
-
-const HEARTBEAT_INTERVAL_MS = 15_000;
-
-function sendSSEEvent(res: Response, event: { id?: number; type: string; data: unknown }): void {
-  if (event.id !== undefined) res.write(`id: ${event.id}\n`);
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event.data)}\n\n`);
-  // Flush immediately so the client sees it right away
-  if (typeof (res as any).flush === 'function') {
-    (res as any).flush();
-  }
-}
 
 /**
  * GET /agents/:agentId/tasks/:taskId/stream
  *
- * Server-Sent Events streaming endpoint.
- * Replays missed events using Last-Event-ID header, then streams live events via Redis pub/sub.
- * Sends a heartbeat every 15 seconds to keep the connection alive.
+ * Server-Sent Events streaming endpoint. Replays missed events from the
+ * per-task log (a sorted set scored by event id) and then forwards live
+ * events via Redis pub/sub. See createSseHandler for the shared scaffold
+ * (subscribe-first, replay, drain-buffered, dedup, heartbeat, cleanup).
+ *
+ * Per-event id space:
+ *   - Each entry in the log is `{ id, type, data }` with a monotonically
+ *     increasing id; Last-Event-ID is honoured for resume.
+ *   - The factory dedups replay vs live by id so a publish that races our
+ *     replay scan can't be delivered twice.
+ *
+ * Terminal-state handling: tasks that are already in a terminal status when
+ * the client connects may have their terminal event in the log (replay
+ * emits it and isTerminal closes) OR may have terminated before the log
+ * was appended (postReplayTerminalCheck synthesises a result event from
+ * the stored TaskState).
  */
-streamRouter.get('/tasks/:taskId/stream', async (req: Request, res: Response) => {
-  const taskId = req.params['taskId'];
-  if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
-
-  const ctx = req.ctx;
-
-  // Set SSE response headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx/Caddy buffering
-  res.flushHeaders();
-
-  let cleaned = false;
-  activeSseStreams.inc();
-  const lastEventId = parseInt((req.headers['last-event-id'] as string) ?? '0', 10);
-  const logKey = redisKey(ctx, 'task-events-log', taskId);
-  const channelKey = redisKey(ctx, 'task-events', taskId);
-
-  // Replay missed events from sorted set (events with id > lastEventId)
-  let missedCount = 0;
-  try {
-    const missed = await redis.zrangebyscore(logKey, lastEventId + 1, '+inf');
-    for (const item of missed) {
-      const parsed = JSON.parse(item) as { id: number; type: string; data: unknown };
-      sendSSEEvent(res, parsed);
-      missedCount++;
-    }
-  } catch (err: any) {
-    logger.warn({ err: err.message, taskId }, 'Failed to replay SSE events');
-  }
-
-  // Check if task is already terminal — send result and close
-  try {
-    const task = await getTaskState(ctx, taskId);
-    if (!task) {
-      sendSSEEvent(res, {
-        id: lastEventId + missedCount + 1,
-        type: 'error',
-        data: { error: 'Task not found' },
-      });
-      return res.end();
-    }
-
-    if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
-      sendSSEEvent(res, {
-        id: lastEventId + missedCount + 1,
-        type: 'result',
-        data: task.result ?? { status: task.status },
-      });
-      return res.end();
-    }
-  } catch (err: any) {
-    logger.warn({ err: err.message, taskId }, 'Failed to check task state for SSE');
-  }
-
-  // Subscribe to Redis pub/sub for live events
-  // IMPORTANT: pub/sub requires a dedicated connection
-  let sub: IORedis | null = null;
-  try {
-    sub = redis.duplicate();
-    await sub.subscribe(channelKey);
-  } catch (err: any) {
-    logger.error({ err: err.message, taskId }, 'Failed to subscribe to SSE channel');
-    return res.end();
-  }
-
-  // Heartbeat to keep connection alive
-  const heartbeat = setInterval(() => {
-    try {
-      sendSSEEvent(res, {
-        type: 'heartbeat',
-        data: { timestamp: new Date().toISOString() },
-      });
-    } catch {
-      cleanup();
-    }
-  }, HEARTBEAT_INTERVAL_MS);
-
-  function cleanup() {
-    if (cleaned) return;
-    cleaned = true;
-    activeSseStreams.dec();
-    clearInterval(heartbeat);
-    unregister();
-    if (sub) {
-      sub.unsubscribe().catch(() => {});
-      sub.quit().catch(() => {});
-      sub = null;
-    }
-  }
-
-  // H1 — register with the live-stream registry so graceful shutdown can
-  // drain this connection cleanly. unregister() is called from cleanup()
-  // above so a natural close doesn't leak a closure into the registry.
-  const unregister = registerSseCleanup(cleanup);
-
-  sub.on('message', (_channel: string, message: string) => {
-    try {
-      const event = JSON.parse(message) as { id: number; type: string; data: unknown };
-      sendSSEEvent(res, event);
-
-      const status = (event.data as any)?.status;
-      if ((TERMINAL_STATUSES as readonly string[]).includes(status)) {
-        cleanup();
-        res.end();
+streamRouter.get(
+  '/tasks/:taskId/stream',
+  createSseHandler({
+    logTag: 'task-stream',
+    channel(req: Request): string {
+      const taskId = req.params['taskId']!;
+      return redisKey(req.ctx, 'task-events', taskId);
+    },
+    async *replay(req, { lastEventId }) {
+      const taskId = req.params['taskId']!;
+      const logKey = redisKey(req.ctx, 'task-events-log', taskId);
+      const raws = await getSharedRedis().zrangebyscore(logKey, lastEventId + 1, '+inf');
+      for (const raw of raws) {
+        try {
+          yield JSON.parse(raw) as SseEvent;
+        } catch (err: any) {
+          logger.warn({ err: err.message, taskId }, 'Malformed task-events log entry');
+        }
       }
-    } catch (err: any) {
-      logger.warn({ err: err.message, taskId }, 'Failed to parse SSE pub/sub message');
-    }
-  });
-
-  sub.on('error', (err) => {
-    logger.error({ err: err.message, taskId }, 'SSE Redis subscriber error');
-    cleanup();
-    res.end();
-  });
-
-  // Cleanup when client disconnects
-  req.on('close', () => {
-    cleanup();
-  });
-});
+    },
+    parseLive(raw) {
+      try {
+        return JSON.parse(raw) as SseEvent;
+      } catch {
+        return null;
+      }
+    },
+    isTerminal(event) {
+      if (event.type === 'result' || event.type === 'error') return true;
+      const status = (event.data as { status?: string } | null)?.status;
+      return typeof status === 'string' && (TERMINAL_STATUSES as readonly string[]).includes(status);
+    },
+    async postReplayTerminalCheck(req, write) {
+      const taskId = req.params['taskId']!;
+      try {
+        const task = await getTaskState(req.ctx, taskId);
+        if (!task) {
+          write({ type: 'error', data: { error: 'Task not found' } });
+          return true;
+        }
+        if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
+          write({ type: 'result', data: task.result ?? { status: task.status } });
+          return true;
+        }
+      } catch (err: any) {
+        logger.warn({ err: err.message, taskId }, 'task-stream: terminal-check getTaskState failed');
+      }
+      return false;
+    },
+  }),
+);
