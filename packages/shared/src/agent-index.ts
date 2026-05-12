@@ -74,6 +74,12 @@ export class AgentIdConflictError extends Error {
  * Rejects with AgentIdConflictError if the agentId is already claimed by a
  * different tenant. Re-indexing the same (tenantId, agentId) pair is allowed
  * and idempotent (used for status transitions).
+ *
+ * If `opts.lifecycle` is provided the lifecycle event is published as part
+ * of the same Redis pipeline. Callers should prefer this to a separate
+ * PUBLISH after the index write — without atomicity, a crash between the
+ * two leaves the agent indexed but no lifecycle event ever firing, which
+ * silently breaks downstream cache-invalidation subscribers.
  */
 export async function indexAgentMeta(
   redis: IORedis,
@@ -86,7 +92,8 @@ export async function indexAgentMeta(
     skills: Array<{ id: string; name: string; description: string; tags?: string[] | undefined; [key: string]: unknown }>;
     capabilities: { streaming: boolean; pushNotifications: boolean; stateTransitionHistory: boolean };
     did?: string | undefined;
-  }
+  },
+  opts?: { lifecycle?: AgentLifecycleEvent },
 ): Promise<void> {
   // Defend against cross-tenant collisions. The window between this read and
   // the pipeline below is tiny but non-atomic; under contention the SETNX-like
@@ -112,6 +119,9 @@ export async function indexAgentMeta(
     })
     .sadd(AGENT_REGISTRY_SET, config.agentId);
   if (did) pipe.set(didIndexKey(did), config.agentId);
+  if (opts?.lifecycle) {
+    pipe.publish(AGENT_LIFECYCLE_CHANNEL, JSON.stringify(opts.lifecycle));
+  }
   await pipe.exec();
 }
 

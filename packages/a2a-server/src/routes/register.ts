@@ -7,7 +7,7 @@ import { SelfRegisterSchema } from '@nova/shared/src/admin-schemas';
 import { DATA_ROOT, TenantContext } from '@nova/shared/src/tenant';
 import { writeAtomicallyAsync } from '@nova/shared/src/fs-utils';
 import { getSharedRedis } from '@nova/shared/src/redis';
-import { indexAgentMeta, agentIndexKey, AGENT_LIFECYCLE_CHANNEL } from '@nova/shared/src/agent-index';
+import { indexAgentMeta, agentIndexKey } from '@nova/shared/src/agent-index';
 import { verifyInvite, consumeInvite } from '@nova/shared/src/invites';
 import { validateId } from '@nova/shared/src/validation';
 import {
@@ -245,11 +245,14 @@ registerRouter.post('/', async (req: Request, res: Response) => {
 
     await writeAtomicallyAsync(configPath, config);
 
-    const redis = getSharedRedis();
-    await indexAgentMeta(redis, config);
-    await redis.publish(AGENT_LIFECYCLE_CHANNEL, JSON.stringify({
-      action: 'created', tenantId, agentId, status: 'pending',
-    }));
+    // Atomic index + lifecycle publish — without the pipeline form, a
+    // crash between these two writes leaves the agent indexed but no
+    // lifecycle event ever firing, which silently breaks downstream
+    // cache invalidation (tenant-router's LRU subscriber, MCP push
+    // subscribers, etc.).
+    await indexAgentMeta(getSharedRedis(), config, {
+      lifecycle: { action: 'created', tenantId, agentId, status: 'pending' },
+    });
 
     res.status(201).json({
       status: 'pending',
@@ -344,6 +347,140 @@ registerRouter.post('/verify-invite', async (req: Request, res: Response) => {
  *   { status: 'active', error: 'CLAIM_LOCKED' }                       // too many mismatches
  *   404 if agent does not exist
  */
+// ── GET /register/status helpers ────────────────────────────────────────────
+//
+// The handler implements this matrix (mirrored in the JSDoc above):
+//
+//   | Agent has commitment? | Header present?  | Grant returned? |
+//   |-----------------------|------------------|-----------------|
+//   | yes                   | yes & match      | YES (one-shot)  |
+//   | yes                   | yes & mismatch   | NO (count++)    |
+//   | yes                   | missing          | NO              |
+//   | no  (legacy)          | (any)            | YES if flag off |
+//   | no  (legacy)          | (any)            | NO if flag on   |
+//
+// The helpers below let the handler read top-to-bottom in the same order
+// as the matrix. Each helper has one concern and is independently
+// testable; the handler is a thin orchestrator.
+
+type AgentRecord = { status: string; claimCommitment?: string } & Record<string, unknown>;
+
+/**
+ * Read the agent config from disk. Returns null when the file is missing
+ * (404 path); throws on any other I/O error so the handler's try/catch
+ * surfaces the failure as a 500 via the global error middleware.
+ */
+async function loadAgent(tenantId: string, agentId: string): Promise<AgentRecord | null> {
+  const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
+  try {
+    return JSON.parse(await fsp.readFile(configPath, 'utf8')) as AgentRecord;
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+type ClaimAssessment =
+  /** No claim is present (never approved, or already consumed). */
+  | { kind: 'no-claim' }
+  /** Caller is authorized; the handler should attempt atomic delivery. */
+  | { kind: 'deliver' }
+  /** Caller is not authorized; respond with status only. */
+  | { kind: 'refuse' }
+  /** Caller exceeded the mismatch budget; respond with status + CLAIM_LOCKED. */
+  | { kind: 'locked' };
+
+/**
+ * Resolve whether the caller is allowed to pick up the approval grant.
+ * Reads the claim, checks the commitment matrix, updates failure counters
+ * and the lockout state — but does NOT consume the claim. Atomic
+ * consumption happens in deliverGrantAtomic so two concurrent pollers
+ * can race exactly one winner.
+ *
+ * Side effects (intentionally inside this helper so the handler is pure
+ * matrix-routing):
+ *   - INCR + EXPIRE on the fail-counter when a mismatch is observed
+ *   - DEL on the claim key on lockout (burn the claim; operator must
+ *     reissue)
+ *   - DEL on the fail-counter once a verified match is observed
+ *
+ * H3 invariant: only the 'deliver' path triggers GETDEL on the claim,
+ * which guarantees at most one poller can ever receive the grant.
+ */
+async function assessClaim(args: {
+  redis: ReturnType<typeof getSharedRedis>;
+  claimKey: string;
+  failKey: string;
+  storedCommitment: string | undefined;
+  presented: string | undefined;
+  tenantId: string;
+  agentId: string;
+}): Promise<ClaimAssessment> {
+  const { redis, claimKey, failKey, storedCommitment, presented, tenantId, agentId } = args;
+
+  const claim = await redis.get(claimKey);
+  if (!claim) return { kind: 'no-claim' };
+
+  // Legacy registrations have no commitment. When the rollout flag is
+  // off we deliver for backwards compat; when on, we refuse and the
+  // agent must re-register (or have its grant reissued operator-side).
+  if (!storedCommitment) {
+    return REQUIRE_CLAIM_SECRET ? { kind: 'refuse' } : { kind: 'deliver' };
+  }
+
+  if (typeof presented !== 'string' || presented.length === 0) {
+    // Commitment present but no header. Don't increment the failure
+    // counter for the missing-header case — that lets an out-of-date
+    // client poll until it learns it needs the secret without burning
+    // its own claim.
+    return { kind: 'refuse' };
+  }
+
+  if (commitmentEquals(commitmentOf(presented), storedCommitment)) {
+    // Verified — clear the fail counter so a future legitimate retry
+    // after a typo doesn't carry over a hot count.
+    await redis.del(failKey);
+    return { kind: 'deliver' };
+  }
+
+  // Mismatch — increment fail counter, lock after threshold.
+  const fails = await redis.incr(failKey);
+  if (fails === 1) {
+    // Match the claim TTL so the counter expires alongside the grant.
+    await redis.expire(failKey, 24 * 3600);
+  }
+  if (fails >= MAX_FAILED_ATTEMPTS) {
+    await redis.del(claimKey);
+    logger.warn({ tenantId, agentId, fails }, 'H17: claim locked after repeated secret mismatch');
+    return { kind: 'locked' };
+  }
+  logger.warn({ tenantId, agentId, fails }, 'H17: claim secret mismatch');
+  return { kind: 'refuse' };
+}
+
+/**
+ * Atomic claim delivery: GETDEL pops the claim in a single round-trip.
+ * Returns the parsed grant when the claim was still present; null on a
+ * race-loss (another poller already consumed the claim) or on a
+ * malformed payload.
+ *
+ * Requires Redis 6.2+ (GETDEL command); earlier Redis versions need the
+ * pre-H3 get-then-del pattern, which is racy by construction.
+ */
+async function deliverGrantAtomic(
+  redis: ReturnType<typeof getSharedRedis>,
+  claimKey: string,
+): Promise<unknown | null> {
+  const claim = await redis.getdel(claimKey);
+  if (!claim) return null;
+  try {
+    return JSON.parse(claim);
+  } catch {
+    logger.warn({ claimKey }, 'Malformed grant claim payload');
+    return null;
+  }
+}
+
 registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Response) => {
   const tenantId = req.params['tenantId'];
   const agentId = req.params['agentId'];
@@ -357,115 +494,40 @@ registerRouter.get('/status/:tenantId/:agentId', async (req: Request, res: Respo
     return res.status(400).json({ error: 'INVALID_IDS' });
   }
 
-  const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
-  let agent: any;
-  try {
-    agent = JSON.parse(await fsp.readFile(configPath, 'utf8'));
-  } catch {
-    return res.status(404).json({ error: 'AGENT_NOT_FOUND' });
-  }
+  const agent = await loadAgent(tenantId, agentId);
+  if (!agent) return res.status(404).json({ error: 'AGENT_NOT_FOUND' });
 
-  const response: any = { status: agent.status, tenantId, agentId };
+  const response: { status: string; tenantId: string; agentId: string; grant?: unknown; error?: string } = {
+    status: agent.status, tenantId, agentId,
+  };
 
-  if (agent.status !== 'active') {
-    return res.json(response);
-  }
+  // Non-active agents never have a deliverable grant — return status only.
+  if (agent.status !== 'active') return res.json(response);
 
   const redis = getSharedRedis();
   const claimKey = `nova:grant-claim:${tenantId}:${agentId}`;
   const failKey = `nova:grant-claim-fails:${tenantId}:${agentId}`;
 
-  // H3 — Use a non-destructive read for the existence check and verification
-  // gates. The claim is only consumed atomically (via GETDEL) at the moment
-  // we've decided to deliver it, which guarantees that two concurrent
-  // pollers can never both succeed: one wins the GETDEL and gets the
-  // payload, the other sees null and falls through to the no-grant branch.
-  //
-  // Verification-failure paths (wrong secret, missing secret, lockout) do
-  // NOT consume the claim — only successful delivery does, and the lockout
-  // path explicitly burns the claim with `del`.
-  const claim = await redis.get(claimKey);
-  if (!claim) {
-    // Already claimed (or never approved) — return status without grant.
-    return res.json(response);
-  }
+  const assessment = await assessClaim({
+    redis,
+    claimKey,
+    failKey,
+    storedCommitment: agent.claimCommitment,
+    presented: req.header(CLAIM_SECRET_HEADER),
+    tenantId,
+    agentId,
+  });
 
-  // H17 verification path
-  const presented = req.header(CLAIM_SECRET_HEADER);
-  const storedCommitment = agent.claimCommitment as string | undefined;
-
-  // Legacy registrations have no commitment. When the flag is off we return
-  // the grant for backwards compat; when on, we refuse and the agent must
-  // re-register (or have its grant reissued via the operator path).
-  if (!storedCommitment) {
-    if (REQUIRE_CLAIM_SECRET) {
+  switch (assessment.kind) {
+    case 'no-claim':
+    case 'refuse':
+      return res.json(response);
+    case 'locked':
+      return res.json({ ...response, error: 'CLAIM_LOCKED' });
+    case 'deliver': {
+      const grant = await deliverGrantAtomic(redis, claimKey);
+      if (grant) response.grant = grant;
       return res.json(response);
     }
-    // Legacy: deliver grant once, just like before H17.
-    return deliverAtomic(res, response, redis, claimKey);
   }
-
-  if (typeof presented !== 'string' || presented.length === 0) {
-    // Commitment present but no header — caller must prove possession.
-    // Don't increment the failure counter for the missing case; that lets
-    // an out-of-date client poll until it learns it needs the secret.
-    return res.json(response);
-  }
-
-  const presentedCommitment = commitmentOf(presented);
-  if (!commitmentEquals(presentedCommitment, storedCommitment)) {
-    // Mismatch — increment fail counter, lock after threshold.
-    const fails = await redis.incr(failKey);
-    if (fails === 1) {
-      // Match the claim TTL so the counter expires alongside the grant.
-      await redis.expire(failKey, 24 * 3600);
-    }
-    if (fails >= MAX_FAILED_ATTEMPTS) {
-      // Burn the claim. Operator must reissue; legitimate agent rotates.
-      await redis.del(claimKey);
-      logger.warn(
-        { tenantId, agentId, fails },
-        'H17: claim locked after repeated secret mismatch',
-      );
-      return res.json({ ...response, error: 'CLAIM_LOCKED' });
-    }
-    logger.warn(
-      { tenantId, agentId, fails },
-      'H17: claim secret mismatch',
-    );
-    return res.json(response);
-  }
-
-  // Verified — deliver the grant atomically and clear the fail counter.
-  await redis.del(failKey);
-  return deliverAtomic(res, response, redis, claimKey);
 });
-
-/**
- * Atomic claim delivery: GETDEL pops the claim from Redis in a single
- * round-trip. Returns the parsed grant in the response if the claim was
- * still present, otherwise returns the response without a grant — the
- * latter happens when a concurrent poller already won the race for this
- * claim. Idempotent and safe to call once per request.
- *
- * Requires Redis 6.2+ (GETDEL command). Earlier Redis versions need the
- * pre-H3 get-then-del pattern, which is racy by construction.
- */
-async function deliverAtomic(
-  res: Response,
-  response: any,
-  redis: ReturnType<typeof getSharedRedis>,
-  claimKey: string,
-): Promise<Response> {
-  const claim = await redis.getdel(claimKey);
-  if (!claim) {
-    // Lost the race — another poller already consumed the claim.
-    return res.json(response);
-  }
-  try {
-    response.grant = JSON.parse(claim);
-  } catch {
-    logger.warn({ claimKey }, 'Malformed grant claim payload');
-  }
-  return res.json(response);
-}
