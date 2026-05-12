@@ -56,9 +56,16 @@ function makeStubClient(behaviour: {
   };
 }
 
-function jsonResponse(payload: unknown) {
+/**
+ * Build a stub messages.create response that emits a `tool_use` block
+ * with the given classification input — what the real model returns when
+ * the classifier forces it to invoke `report_classification`.
+ */
+function toolUseResponse(input: unknown) {
   return {
-    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    content: [
+      { type: 'tool_use', name: 'report_classification', id: 'tool_test', input },
+    ],
   };
 }
 
@@ -70,7 +77,7 @@ beforeEach(() => {
 describe('llmClassify — happy path', () => {
   it('returns a parsed response from the injected client', async () => {
     const client = makeStubClient({
-      responses: [jsonResponse({ injection: false, confidence: 0.05, indicators: [] })],
+      responses: [toolUseResponse({ injection: false, confidence: 0.05, indicators: [] })],
     });
 
     const result = await llmClassify(strings, ctx, { client });
@@ -82,7 +89,7 @@ describe('llmClassify — happy path', () => {
 
   it('caches the result so a second call hits Redis (no SDK call)', async () => {
     const client = makeStubClient({
-      responses: [jsonResponse({ injection: true, confidence: 0.9, indicators: ['ignore previous'] })],
+      responses: [toolUseResponse({ injection: true, confidence: 0.9, indicators: ['ignore previous'] })],
     });
 
     const first = await llmClassify(strings, ctx, { client });
@@ -95,17 +102,36 @@ describe('llmClassify — happy path', () => {
     expect(client.messages.create).toHaveBeenCalledTimes(1); // unchanged
   });
 
-  it('strips markdown fences before JSON.parse', async () => {
+  it('forces tool_choice on the report_classification tool', async () => {
+    const client = makeStubClient({
+      responses: [toolUseResponse({ injection: false, confidence: 0, indicators: [] })],
+    });
+    await llmClassify(strings, ctx, { client });
+    const body = client.messages.create.mock.calls[0]?.[0];
+    expect(body?.tools).toHaveLength(1);
+    expect(body?.tools?.[0]?.name).toBe('report_classification');
+    expect(body?.tool_choice).toEqual({ type: 'tool', name: 'report_classification' });
+  });
+
+  it('ignores leading text blocks and reads the tool_use block', async () => {
+    // A future model may emit narration before the tool_use; the classifier
+    // should still find the structured block.
     const client = makeStubClient({
       responses: [{
-        content: [{
-          type: 'text',
-          text: '```json\n{"injection": false, "confidence": 0.1, "indicators": []}\n```',
-        }],
+        content: [
+          { type: 'text', text: 'I will assess the text.' },
+          {
+            type: 'tool_use',
+            name: 'report_classification',
+            id: 'tool_test',
+            input: { injection: true, confidence: 0.95, indicators: ['ignore previous'] },
+          },
+        ],
       }],
     });
     const result = await llmClassify(strings, ctx, { client });
-    expect(result.injection).toBe(false);
+    expect(result.injection).toBe(true);
+    expect(result.confidence).toBe(0.95);
   });
 });
 
@@ -127,7 +153,7 @@ describe('llmClassify — retry behaviour', () => {
     const client = makeStubClient({
       responses: [
         new Error('flaky'),
-        jsonResponse({ injection: false, confidence: 0.02, indicators: [] }),
+        toolUseResponse({ injection: false, confidence: 0.02, indicators: [] }),
       ],
     });
 
@@ -136,15 +162,30 @@ describe('llmClassify — retry behaviour', () => {
     expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 
-  it('retries when the response shape is malformed (missing fields)', async () => {
+  it('retries when the tool_use input is missing required fields', async () => {
     const client = makeStubClient({
       responses: [
-        { content: [{ type: 'text', text: '{"oops": true}' }] }, // wrong shape
-        jsonResponse({ injection: true, confidence: 0.99, indicators: ['x'] }),
+        toolUseResponse({ oops: true }), // missing injection/confidence/indicators
+        toolUseResponse({ injection: true, confidence: 0.99, indicators: ['x'] }),
       ],
     });
     const result = await llmClassify(strings, ctx, { client });
     expect(result.injection).toBe(true);
+    expect(client.messages.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries when the model emits text instead of a tool_use', async () => {
+    // tool_choice forces the tool in production, but a stubbed or
+    // future-misbehaving client could emit text. Defensive validation
+    // retries through.
+    const client = makeStubClient({
+      responses: [
+        { content: [{ type: 'text', text: 'sorry I cannot comply' }] }, // no tool_use
+        toolUseResponse({ injection: false, confidence: 0.05, indicators: [] }),
+      ],
+    });
+    const result = await llmClassify(strings, ctx, { client });
+    expect(result.injection).toBe(false);
     expect(client.messages.create).toHaveBeenCalledTimes(2);
   });
 
@@ -165,7 +206,7 @@ describe('llmClassify — retry behaviour', () => {
 describe('llmClassify — request timeout', () => {
   it('passes an AbortSignal to the SDK request', async () => {
     const client = makeStubClient({
-      responses: [jsonResponse({ injection: false, confidence: 0.0, indicators: [] })],
+      responses: [toolUseResponse({ injection: false, confidence: 0.0, indicators: [] })],
     });
 
     await llmClassify(strings, ctx, { client });
@@ -196,7 +237,7 @@ describe('llmClassify — request timeout', () => {
               reject(err);
             }, { once: true });
           });
-          return jsonResponse({ injection: false, confidence: 0, indicators: [] }) as any;
+          return toolUseResponse({ injection: false, confidence: 0, indicators: [] }) as any;
         }),
       },
     };
