@@ -1,8 +1,8 @@
 import express from 'express';
 import { Job } from 'bullmq';
 import { logger } from '@nova/shared/src/logger';
-import { auditLog } from '@nova/shared/src/audit';
-import { TenantContext } from '@nova/shared/src/tenant';
+import { auditLog, startAuditLogConsumer } from '@nova/shared/src/audit';
+import { TenantContext, DATA_ROOT } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova/shared/src/agent-index';
 import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent, reclaimAll } from '@nova/task-queue/src/index';
@@ -294,6 +294,23 @@ initWorkerManager(processTask).catch(err => {
   process.exit(1);
 });
 
+// ── Audit drain consumer ───────────────────────────────────────────────────
+//
+// This process is the canonical host for the audit drain: it's the only
+// long-running service that doesn't sit on the HTTP request path. The
+// consumer reads from `nova:audit:stream` (XADD'd by every service via
+// auditLog) and writes per-tenant daily JSONL files under DATA_ROOT/audit/.
+// admin-api's queryAuditLogs reads those files; without this consumer
+// running, the audit stream accumulates in Redis forever and admin queries
+// return empty.
+//
+// The abort controller is wired into the shutdown sequence below so the
+// consumer exits cleanly on SIGTERM rather than getting terminated
+// mid-XREADGROUP.
+const auditDrainAbort = new AbortController();
+startAuditLogConsumer(DATA_ROOT, { signal: auditDrainAbort.signal })
+  .catch(err => logger.error({ err }, 'Audit drain consumer crashed'));
+
 // ── Broker inbox reclaim worker ─────────────────────────────────────────────
 let reclaimTimer: NodeJS.Timeout | null = null;
 
@@ -391,6 +408,9 @@ async function shutdown(signal: string): Promise<void> {
   try {
     stopReclaimWorker();
     clearInterval(heartbeatInterval);
+    // Signal the audit drain consumer to exit cleanly. Its loop blocks on
+    // XREADGROUP for up to 5s, so the wait below is bounded.
+    auditDrainAbort.abort();
     await shutdownAllWorkers();
     await new Promise<void>((resolve) => {
       healthServer.close((err) => {
