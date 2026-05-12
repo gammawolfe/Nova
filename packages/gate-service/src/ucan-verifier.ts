@@ -22,10 +22,19 @@ export interface UCANVerificationResult {
   /** Depth at which validation failed (0 = outer, 1 = grant, …). Undefined on success. */
   chainDepth?: number;
   /**
-   * Full chain length on success: 1 for a today-style self-rooted single-link
-   * grant; 2+ for federation chains. Undefined on failure.
+   * Full chain length on success: 2 for a today-style self-rooted single-link
+   * grant (outer + 1 root proof); 3+ for federation chains. Undefined on
+   * failure.
    */
   chainLength?: number;
+  /**
+   * Audience of the chain root for federation chains (`aud` of the
+   * Nova-signed federation grant — i.e. the peer Nova we delegated to).
+   * Undefined for single-link (non-federation) chains where the root's
+   * audience is just the local sender. Surfaced for audit-log enrichment
+   * so operators can attribute federated requests to a peer.
+   */
+  peerDid?: string;
 }
 
 /**
@@ -150,6 +159,9 @@ export async function verifyUCAN(
   }
 
   // grantCid is the immediate proof (cids[1]). chainLength is total link count.
+  // peerDid is the chain root's aud for federation chains — undefined for
+  // single-link (depth=1) chains because the root's aud is just the local
+  // sender, which is already surfaced as `issuerDid`.
   const grantCid = chain.cids[1];
   const result: UCANVerificationResult = {
     valid: true,
@@ -157,6 +169,7 @@ export async function verifyUCAN(
     chainLength: chain.cids.length,
   };
   if (grantCid !== undefined) result.grantCid = grantCid;
+  if (chain.depth > 1) result.peerDid = chain.root.payload.aud;
   return result;
 }
 

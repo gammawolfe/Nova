@@ -150,6 +150,10 @@ describe('verifyUCAN', () => {
       grantCid: computeCid(grant),
       chainLength: 2,
     });
+    // Single-link (non-federation) chain: peerDid is intentionally omitted —
+    // there's no peer Nova involved, so attributing a request to one would
+    // be misleading.
+    expect(r.peerDid).toBeUndefined();
   });
 
   it('rejects a malformed JWT', async () => {
@@ -412,6 +416,7 @@ describe('verifyUCAN', () => {
         issuerDid: peerSender.did,
         grantCid: computeCid(peerGrant),
         chainLength: 3,
+        peerDid: novaB.did, // chain root's aud — the peer Nova we federated with
       });
     });
 
