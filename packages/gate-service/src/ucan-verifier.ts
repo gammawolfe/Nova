@@ -3,10 +3,12 @@ import path from 'path';
 import { novaUcansValidate } from '@nova/shared/src/ucan-plugins';
 import { TenantContext, DATA_ROOT } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
+import { loadTrustedIssuers, isTrustedPeerDid } from '@nova/shared/src/trusted-issuers';
 import {
   computeCid,
   parseUcanJwt,
   capsSubsumeAll,
+  walkUcanChain,
   UcanCapability,
   UcanPayload,
 } from '@nova/shared/src/ucan';
@@ -15,49 +17,57 @@ export interface UCANVerificationResult {
   valid: boolean;
   reason?: string;
   issuerDid?: string;
+  /** CID of the immediate proof (depth=1 link). Preserved for audit-log compatibility. */
   grantCid?: string;
+  /** Depth at which validation failed (0 = outer, 1 = grant, …). Undefined on success. */
+  chainDepth?: number;
+  /**
+   * Full chain length on success: 1 for a today-style self-rooted single-link
+   * grant; 2+ for federation chains. Undefined on failure.
+   */
+  chainLength?: number;
 }
 
 /**
- * Verify a sender-signed delegation-chain UCAN at ingress.
+ * Verify a sender-signed UCAN at ingress, accepting both today's single-link
+ * self-rooted grants AND multi-link federation chains rooted at Nova's DID.
  *
- * Token shape expected:
+ * Outer (invocation) token:
+ *   iss: sender agent DID
+ *   aud: this Nova's gateway DID
+ *   att: [destination-scoped capability]
+ *   prf: [link1Jwt]                ← exactly one
+ *   exp: short (minutes)
  *
- *   outer (invocation):
- *     iss: sender agent DID
- *     aud: Nova gateway DID
- *     att: [narrow destination-scoped capability]
- *     prf: [grantJwt]
- *     exp: short (minutes)
+ * Chain (walking outer → root):
+ *   - Each non-root link has exactly one proof in `prf`.
+ *   - link[i].aud === link[i-1].iss  (audience linkage)
+ *   - link[i].att subsumes link[i-1].att  (monotonic narrowing — never widens)
+ *   - Root link has iss === novaDid AND prf: [] (cryptographic anchor;
+ *     trust is established by walking back to our own signature, not by
+ *     trusting any intermediate issuer).
  *
- *   prf[0] (approval grant):
- *     iss: Nova gateway DID
- *     aud: sender agent DID
- *     att: [broad tenant-scoped capability]
- *     prf: []
- *     exp: long (~30 days)
+ * For chains of length > 1 (federation case), the penultimate hop's
+ * audience must also be present in the operator's `trusted-issuers.json`
+ * allowlist. This is defense-in-depth: cryptographic validity is necessary
+ * but the operator wants explicit opt-in for which peer Novas may carry
+ * delegations. Removing a peer from the list is a kill switch independent
+ * of CID revocation. Single-link chains (no federation) skip this check —
+ * the root IS Nova, no peer is involved.
  *
- * Checks:
- *   1. Outer signature + expiry (via @ucans/ucans, which derives the signing
- *      pubkey from the outer iss did:key).
- *   2. Outer aud === Nova's gateway DID.
- *   3. Outer has at least one prf entry — the approval grant.
- *   4. Grant signature + expiry (pubkey derived from grant iss did:key; this
- *      iss is equal to novaDid, so the signing key is Nova's).
- *   5. Grant iss === novaDid (can't be bypassed with an arbitrary root token).
- *   6. Grant aud === outer iss (chain linkage — the grant was issued to this
- *      sender specifically).
- *   7. Grant att subsumes outer att (delegation is narrowing, not widening).
- *   8. Outer att subsumes the required capability (the invocation actually
- *      authorizes this specific destination + skill).
- *   9. Neither outer CID nor grant CID is in the per-tenant revocation
- *      tombstone directory. Revoking the grant cascades to every invocation
- *      derived from it — which is why invocation tokens are ephemeral (5 min)
- *      and don't individually need to be revoked.
+ * Validation order (each check is cheap → expensive):
+ *   1. Outer parses                                  → ucan_malformed
+ *   2. Outer signature + expiry                      → ucan_invalid_signature / ucan_expired
+ *   3. Outer aud === novaDid                         → ucan_wrong_audience
+ *   4. Outer att covers requiredScope                → ucan_insufficient_capability
+ *   5. Outer has at least one proof                  → ucan_no_proof
+ *   6. Chain walks to a novaDid-rooted link          → chain_* reasons (with depth)
+ *   7. Trusted-peer check (chains length > 1 only)   → chain_peer_untrusted
+ *   8. Revocation tombstone for any link             → ucan_revoked / revocation_check_failed
  */
 export async function verifyUCAN(
   ucanJwt: string,
-  ctx: TenantContext,
+  _ctx: TenantContext,
   novaDid: string,
   requiredScope: string,
 ): Promise<UCANVerificationResult> {
@@ -68,7 +78,9 @@ export async function verifyUCAN(
     return { valid: false, reason: 'ucan_malformed' };
   }
 
-  // 1. Outer signature + expiry
+  // 1. Outer signature + expiry. Validated separately from the chain walk so
+  //    a forged outer surfaces as `ucan_invalid_signature` rather than
+  //    `chain_link_invalid_signature at depth 0`.
   try {
     await novaUcansValidate(ucanJwt);
   } catch (err: any) {
@@ -83,77 +95,69 @@ export async function verifyUCAN(
     return { valid: false, reason: 'ucan_wrong_audience' };
   }
 
-  // 3. Proof chain present
-  const proofs = outer.payload.prf ?? [];
-  if (proofs.length === 0 || !proofs[0]) {
-    return { valid: false, reason: 'ucan_no_proof' };
-  }
-  const grantJwt = proofs[0];
-
-  // 4. Grant signature + expiry
-  try {
-    await novaUcansValidate(grantJwt);
-  } catch (err: any) {
-    const msg: string = (err.message ?? '').toLowerCase();
-    if (msg.includes('expir')) return { valid: false, reason: 'grant_expired' };
-    logger.warn({ err: err.message }, 'Grant UCAN validation failed');
-    return { valid: false, reason: 'grant_invalid_signature' };
-  }
-
-  let grant: { payload: UcanPayload };
-  try {
-    grant = parseUcanJwt(grantJwt);
-  } catch {
-    return { valid: false, reason: 'grant_malformed' };
-  }
-
-  // 5. Grant iss = novaDid (root of trust)
-  if (grant.payload.iss !== novaDid) {
-    return { valid: false, reason: 'grant_not_from_nova' };
-  }
-  // 6. Grant aud = outer iss (chain linkage)
-  if (grant.payload.aud !== outer.payload.iss) {
-    return { valid: false, reason: 'grant_wrong_audience' };
-  }
-
-  // 7. Grant subsumes outer (narrowing only)
-  if (!capsSubsumeAll(grant.payload.att, outer.payload.att)) {
-    return { valid: false, reason: 'grant_does_not_subsume_invocation' };
-  }
-
-  // 8. Invocation targets this destination — the invocation's capabilities
-  // must fall within the destination's namespace. requiredScope is the broad
-  // `nova:<destTenant>:<destAgent>:skill:*` envelope; the invocation's att can
-  // be this or narrower (e.g. a specific skill ID).
+  // 3. Invocation targets this destination — done before the chain walk so
+  //    we don't pay signature cost on calls aimed at the wrong agent.
   const destEnvelope: UcanCapability[] = [{ with: requiredScope, can: 'invoke' }];
   if (!capsSubsumeAll(destEnvelope, outer.payload.att)) {
     return { valid: false, reason: 'ucan_insufficient_capability' };
   }
 
-  // 9. Revocation — check both the invocation CID and the grant CID against
-  // the global tombstone directory. UCAN CIDs are sha256 hashes (globally
-  // unique), so revocation is cross-tenant; this is the same path that
-  // admin-api writes to in revokeUcan() and that a2a-server's status route
-  // reads. ENOENT means "not revoked"; any other I/O error fails closed —
-  // we'd rather quarantine a legitimate task than admit a possibly-revoked
-  // one because the disk is misbehaving.
+  // 4. Outer must carry at least one proof. Surfaced as the legacy reason
+  //    `ucan_no_proof` rather than chain_link_missing_proof at depth 0;
+  //    keeps the existing observability contract.
+  if ((outer.payload.prf?.length ?? 0) === 0) {
+    return { valid: false, reason: 'ucan_no_proof' };
+  }
+
+  // 5. Walk the chain from outer back to a Nova-rooted link.
+  const chain = await walkUcanChain(
+    { jwt: ucanJwt, payload: outer.payload },
+    novaDid,
+    novaUcansValidate,
+  );
+  if (!chain.ok) {
+    return { valid: false, reason: chain.reason, chainDepth: chain.depth };
+  }
+
+  // 6. Trusted-peer defense-in-depth. For federation chains (depth > 1), the
+  //    chain root is Nova's own delegation to a peer Nova (signed by us,
+  //    aud = the peer). That peer's DID must be in the operator's
+  //    trusted-issuers list. The chain itself proves delegation
+  //    cryptographically; this check is the operator's kill switch that
+  //    cuts off a peer without revoking individual grant CIDs.
+  if (chain.depth > 1) {
+    const peerDid = chain.root.payload.aud;
+    const trusted = await loadTrustedIssuers();
+    if (!isTrustedPeerDid(peerDid, trusted)) {
+      logger.warn({ peerDid, chainDepth: chain.depth }, 'Federation chain rejected: peer not in trusted-issuers');
+      return { valid: false, reason: 'chain_peer_untrusted', chainDepth: chain.depth };
+    }
+  }
+
+  // 7. Revocation — check every link in the chain.
   const revokedDir = path.join(DATA_ROOT, 'ucans', 'revoked');
-  const outerCid = computeCid(ucanJwt);
-  const grantCid = computeCid(grantJwt);
-  for (const cid of [outerCid, grantCid]) {
+  for (const cid of chain.cids) {
     const revokedPath = path.join(revokedDir, cid + '.json');
     try {
       await fsp.access(revokedPath);
       return { valid: false, reason: 'ucan_revoked' };
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') continue; // not revoked — continue
+      if (code === 'ENOENT') continue;
       logger.warn({ err: (err as Error).message, code, cid }, 'Revocation check I/O error — failing closed');
       return { valid: false, reason: 'revocation_check_failed' };
     }
   }
 
-  return { valid: true, issuerDid: outer.payload.iss, grantCid };
+  // grantCid is the immediate proof (cids[1]). chainLength is total link count.
+  const grantCid = chain.cids[1];
+  const result: UCANVerificationResult = {
+    valid: true,
+    issuerDid: outer.payload.iss,
+    chainLength: chain.cids.length,
+  };
+  if (grantCid !== undefined) result.grantCid = grantCid;
+  return result;
 }
 
 /**
