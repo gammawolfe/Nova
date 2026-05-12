@@ -5,7 +5,6 @@ import { auditLog } from '@nova/shared/src/audit';
 import {
   TASK_LIFECYCLE_CHANNEL,
   TaskLifecycleEvent,
-  getAgentMeta,
 } from '@nova/shared/src/agent-index';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { TaskResult } from '@nova/shared/src/types';
@@ -14,8 +13,7 @@ import {
   BROKER_RESULT_MAX_BYTES,
 } from '@nova/shared/src/broker-config';
 import * as inbox from '@nova/task-queue/src/inbox';
-import * as replyInbox from '@nova/task-queue/src/reply-inbox';
-import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
+import { deliverReply } from '@nova/task-queue/src/reply-delivery';
 import { authSelfUcan } from '../auth/self-ucan';
 import { createSseHandler } from '../sse-handler';
 
@@ -134,80 +132,18 @@ inboxRouter.post(
         return void res.status(409).json({ status: 'already_completed' });
       }
 
-      // Reply delivery branches on replyTo presence:
-      //   1. replyTo URL set       → POST to URL (existing webhook behavior)
-      //   2. senderAgentId known   → enqueue to sender's broker reply inbox
-      //   3. neither               → log + lifecycle only (ingress should have
-      //                              rejected this case, so it's a bug if hit)
-      if (entry.task.replyTo) {
-        try {
-          await fetch(entry.task.replyTo, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: serialized,
-            signal: AbortSignal.timeout(10_000),
-          });
-          await auditLog(ctx, { event: 'reply_delivered', taskId, metadata: { target: 'webhook' } });
-        } catch (deliveryErr: any) {
-          logger.warn(
-            { err: deliveryErr.message, taskId, replyTo: entry.task.replyTo },
-            'Broker respond: delivery to replyUrl failed',
-          );
-        }
-      } else if (entry.task.senderTenantId && entry.task.senderAgentId) {
-        const senderCtx = {
-          tenantId: entry.task.senderTenantId,
-          agentId: entry.task.senderAgentId,
-        };
-        const senderMeta = await getAgentMeta(getSharedRedis(), senderCtx.agentId);
-        if (!senderMeta || senderMeta.status !== 'active') {
-          // Sender deregistered or suspended between send and respond —
-          // result is undeliverable. Persist to DLQ for operator review.
-          await writeDeadLetter(senderCtx, {
-            taskId,
-            targetUrl: 'broker-reply',
-            taskResult,
-            failureReason: 'reply_sender_inactive',
-            httpStatus: 0,
-            attemptCount: 1,
-          });
-          await auditLog(ctx, {
-            event: 'reply_sender_inactive',
-            taskId,
-            metadata: {
-              senderTenantId: senderCtx.tenantId,
-              senderAgentId: senderCtx.agentId,
-              senderStatus: senderMeta?.status ?? 'missing',
-            },
-          });
-          logger.warn(
-            { taskId, senderAgentId: senderCtx.agentId, senderStatus: senderMeta?.status ?? 'missing' },
-            'Broker respond: sender inactive; result written to dead-letter',
-          );
-        } else {
-          try {
-            await replyInbox.enqueueReply(senderCtx, taskId, taskResult);
-            await auditLog(ctx, {
-              event: 'reply_broker_queued',
-              taskId,
-              metadata: {
-                senderTenantId: senderCtx.tenantId,
-                senderAgentId: senderCtx.agentId,
-              },
-            });
-          } catch (enqErr: any) {
-            logger.error(
-              { err: enqErr.message, taskId, senderAgentId: senderCtx.agentId },
-              'Broker respond: reply-inbox enqueue failed',
-            );
-          }
-        }
-      } else {
-        logger.warn(
-          { taskId },
-          'Broker respond: neither replyTo nor senderAgentId present — ingress should have rejected this',
-        );
-      }
+      // Route the result back to the sender. All branches (webhook,
+      // broker reply inbox, no-target) and their failure-mode handling
+      // (DLQ + audit) live in deliverReply so the HTTP layer stays
+      // transport-only. Pass the already-serialized body to avoid a
+      // second JSON.stringify on the hot path.
+      await deliverReply(taskId, taskResult, {
+        recipientCtx: ctx,
+        ...(entry.task.replyTo ? { replyTo: entry.task.replyTo } : {}),
+        ...(entry.task.senderTenantId ? { senderTenantId: entry.task.senderTenantId } : {}),
+        ...(entry.task.senderAgentId ? { senderAgentId: entry.task.senderAgentId } : {}),
+        serializedResult: serialized,
+      });
 
       const lifecycle: TaskLifecycleEvent = {
         action: status === 'ok' ? 'completed' : 'failed',

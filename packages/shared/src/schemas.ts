@@ -102,6 +102,7 @@ export const AuditEventSchema = z.object({
     'agent_discovered',
     'reply_broker_queued',
     'reply_delivered',
+    'reply_webhook_failed',
     'reply_acked',
     'reply_reclaimed',
     'reply_dead_lettered',
