@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, vi } from 'vitest';
 import fsp from 'fs/promises';
 import fs from 'fs';
 import os from 'os';
@@ -84,6 +84,41 @@ function mintInvocation(opts: {
   return buildUcanJwt(payload, crypto.createPrivateKey(opts.sender.privateKeyPem));
 }
 
+/**
+ * Mint a generic UCAN link with arbitrary issuer + audience + proofs. Used for
+ * multi-link chain tests (federation, sub-delegation) where the per-step
+ * helpers above (mintGrant, mintInvocation) are too constrained.
+ */
+function mintLink(opts: {
+  signer: Identity;
+  iss: string;
+  aud: string;
+  att?: UcanCapability[];
+  exp?: number;
+  prf?: string[];
+}): string {
+  const payload: UcanPayload = {
+    iss: opts.iss,
+    aud: opts.aud,
+    exp: opts.exp ?? nowSec() + 3600,
+    nbf: nowSec(),
+    att: opts.att ?? [{ with: 'nova:t1:*', can: 'invoke' }],
+    prf: opts.prf ?? [],
+    jti: crypto.randomUUID(),
+  };
+  return buildUcanJwt(payload, crypto.createPrivateKey(opts.signer.privateKeyPem));
+}
+
+/** Write the trusted-issuers allowlist used by federation chains. */
+function writeTrustedIssuers(dids: string[]): void {
+  const dir = path.join(dataRoot, 'keys');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'trusted-issuers.json'), JSON.stringify({ trusted: dids }));
+}
+function clearTrustedIssuers(): void {
+  try { fs.unlinkSync(path.join(dataRoot, 'keys', 'trusted-issuers.json')); } catch { /* ignore */ }
+}
+
 const nova: Identity = generateIdentity('nova');
 const sender: Identity = generateIdentity('sender');
 
@@ -113,6 +148,7 @@ describe('verifyUCAN', () => {
       valid: true,
       issuerDid: sender.did,
       grantCid: computeCid(grant),
+      chainLength: 2,
     });
   });
 
@@ -182,33 +218,37 @@ describe('verifyUCAN', () => {
     expect(r.reason).toBe('ucan_no_proof');
   });
 
-  it('rejects when the grant is not issued by Nova', async () => {
+  it('rejects when the chain has no Nova-rooted link', async () => {
+    // prf[0] is a self-signed grant from a fake root that never reaches Nova.
     const fakeRoot = generateIdentity('fake-root');
     const fakeGrant = mintGrant({ nova: fakeRoot, sender });
     const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: fakeGrant });
     const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
     expect(r.valid).toBe(false);
-    expect(r.reason).toBe('grant_not_from_nova');
+    expect(r.reason).toBe('chain_no_root');
+    expect(r.chainDepth).toBe(1);
   });
 
-  it('rejects when the grant audience is not the invocation issuer', async () => {
+  it('rejects when a link audience does not match the previous link issuer', async () => {
     const otherSender = generateIdentity('other-sender');
     const grant = mintGrant({ nova, sender: otherSender });
     const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
     const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
     expect(r.valid).toBe(false);
-    expect(r.reason).toBe('grant_wrong_audience');
+    expect(r.reason).toBe('chain_audience_mismatch');
+    expect(r.chainDepth).toBe(1);
   });
 
-  it('rejects when the grant is expired', async () => {
+  it('rejects when a link is expired', async () => {
     const grant = mintGrant({ nova, sender, exp: nowSec() - 1 });
     const invocation = mintInvocation({ sender, novaDid: nova.did, grantJwt: grant });
     const r = await verifyUCAN(invocation, ctx, nova.did, SCOPE);
     expect(r.valid).toBe(false);
-    expect(r.reason).toBe('grant_expired');
+    expect(r.reason).toBe('chain_link_expired');
+    expect(r.chainDepth).toBe(1);
   });
 
-  it('rejects when the invocation widens the grant capability', async () => {
+  it('rejects when a link widens the chain capability', async () => {
     const narrowGrant = mintGrant({
       nova,
       sender,
@@ -222,7 +262,8 @@ describe('verifyUCAN', () => {
     });
     const r = await verifyUCAN(invocation, ctx, nova.did, 'nova:t2:a1:skill:chat');
     expect(r.valid).toBe(false);
-    expect(r.reason).toBe('grant_does_not_subsume_invocation');
+    expect(r.reason).toBe('chain_capability_widened');
+    expect(r.chainDepth).toBe(1);
   });
 
   it("rejects when the invocation does not target the request's destination", async () => {
@@ -306,6 +347,227 @@ describe('verifyUCAN', () => {
       } finally {
         try { fs.unlinkSync(blockedRoot); } catch { /* ignore */ }
       }
+    });
+  });
+
+  describe('multi-link chains (federation)', () => {
+    // Federation chain shape (length 3):
+    //
+    //   outer       sender → novaA          (signed by sender)
+    //     prf[0] = peerGrant                (Nova B → sender — signed by novaB)
+    //       prf[0] = federationGrant        (Nova A → Nova B — signed by novaA)
+    //         prf[] = []                    (root)
+    //
+    // The receiving Nova ("novaA") walks back to its own signature. The
+    // operator must list novaB in trusted-issuers.json (defense-in-depth).
+    const novaA = nova; // alias for clarity
+    const novaB = generateIdentity('novaB');
+    const peerSender = generateIdentity('peer-sender');
+    const FEDERATION_SCOPE: UcanCapability[] = [{ with: 'nova:t1:*', can: 'invoke' }];
+
+    afterEach(() => { clearTrustedIssuers(); });
+
+    function buildFederationChain(opts?: {
+      peerGrantAud?: string;
+      peerGrantAtt?: UcanCapability[];
+      federationGrantAtt?: UcanCapability[];
+      federationGrantIss?: string;
+      invocationAtt?: UcanCapability[];
+      peerGrantExp?: number;
+      federationGrantExp?: number;
+    }) {
+      const federationGrant = mintLink({
+        signer: novaA,
+        iss: opts?.federationGrantIss ?? novaA.did,
+        aud: novaB.did,
+        att: opts?.federationGrantAtt ?? FEDERATION_SCOPE,
+        exp: opts?.federationGrantExp,
+        prf: [],
+      });
+      const peerGrant = mintLink({
+        signer: novaB,
+        iss: novaB.did,
+        aud: opts?.peerGrantAud ?? peerSender.did,
+        att: opts?.peerGrantAtt ?? FEDERATION_SCOPE,
+        exp: opts?.peerGrantExp,
+        prf: [federationGrant],
+      });
+      const invocation = mintLink({
+        signer: peerSender,
+        iss: peerSender.did,
+        aud: novaA.did,
+        att: opts?.invocationAtt ?? [{ with: SCOPE, can: 'invoke' }],
+        exp: nowSec() + 300,
+        prf: [peerGrant],
+      });
+      return { federationGrant, peerGrant, invocation };
+    }
+
+    it('accepts a 3-link federation chain when the peer is trusted', async () => {
+      writeTrustedIssuers([novaB.did]);
+      const { invocation, peerGrant } = buildFederationChain();
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r).toMatchObject({
+        valid: true,
+        issuerDid: peerSender.did,
+        grantCid: computeCid(peerGrant),
+        chainLength: 3,
+      });
+    });
+
+    it('rejects a federation chain when the peer Nova is not in trusted-issuers', async () => {
+      writeTrustedIssuers(['did:web:nova.other.example']); // novaB not listed
+      const { invocation } = buildFederationChain();
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_peer_untrusted');
+      expect(r.chainDepth).toBe(2);
+    });
+
+    it('rejects a federation chain when trusted-issuers.json is missing', async () => {
+      // No file written — loadTrustedIssuers returns empty set.
+      const { invocation } = buildFederationChain();
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_peer_untrusted');
+    });
+
+    it('rejects when an intermediate (depth 2) link widens the chain scope', async () => {
+      // Outer narrow → peerGrant broader-but-still-includes-outer → federation
+      // grant narrower than peerGrant. The widening edge is peerGrant→federation
+      // (depth 2), not outer→peerGrant (depth 1).
+      writeTrustedIssuers([novaB.did]);
+      const { invocation } = buildFederationChain({
+        peerGrantAtt: [{ with: 'nova:t1:*', can: 'invoke' }],
+        federationGrantAtt: [{ with: 'nova:t1:agent-b:*', can: 'invoke' }],
+      });
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_capability_widened');
+      expect(r.chainDepth).toBe(2);
+    });
+
+    it('rejects when audience linkage breaks at depth 2', async () => {
+      writeTrustedIssuers([novaB.did]);
+      const fakeNovaB = generateIdentity('fake-novaB');
+      const federationGrant = mintLink({
+        signer: novaA,
+        iss: novaA.did,
+        aud: fakeNovaB.did, // points at a different peer than the one signing the peer grant
+        att: FEDERATION_SCOPE,
+        prf: [],
+      });
+      const peerGrant = mintLink({
+        signer: novaB,
+        iss: novaB.did, // doesn't match fakeNovaB
+        aud: peerSender.did,
+        att: FEDERATION_SCOPE,
+        prf: [federationGrant],
+      });
+      const invocation = mintLink({
+        signer: peerSender,
+        iss: peerSender.did,
+        aud: novaA.did,
+        att: [{ with: SCOPE, can: 'invoke' }],
+        exp: nowSec() + 300,
+        prf: [peerGrant],
+      });
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_audience_mismatch');
+      expect(r.chainDepth).toBe(2);
+    });
+
+    it('rejects when an intermediate link is signed by the wrong key', async () => {
+      writeTrustedIssuers([novaB.did]);
+      const impostor = generateIdentity('impostor');
+      // peerGrant claims iss=novaB but is signed by impostor — signature
+      // validation fails when walkUcanChain descends.
+      const federationGrant = mintLink({
+        signer: novaA,
+        iss: novaA.did,
+        aud: novaB.did,
+        att: FEDERATION_SCOPE,
+        prf: [],
+      });
+      const forgedPeerGrant = mintLink({
+        signer: impostor,
+        iss: novaB.did, // claimed iss
+        aud: peerSender.did,
+        att: FEDERATION_SCOPE,
+        prf: [federationGrant],
+      });
+      const invocation = mintLink({
+        signer: peerSender,
+        iss: peerSender.did,
+        aud: novaA.did,
+        att: [{ with: SCOPE, can: 'invoke' }],
+        exp: nowSec() + 300,
+        prf: [forgedPeerGrant],
+      });
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_link_invalid_signature');
+      expect(r.chainDepth).toBe(1);
+    });
+
+    it('rejects when the deepest link claims iss=novaDid but still carries proofs (downgrade attempt)', async () => {
+      writeTrustedIssuers([novaB.did]);
+      // An attacker constructs a "root-like" link whose iss is novaDid but
+      // which itself has a non-empty prf, attempting to graft a longer
+      // chain onto our trust anchor. Strict-chain rejects this.
+      const buriedProof = mintLink({
+        signer: novaA, iss: novaA.did, aud: novaB.did, att: FEDERATION_SCOPE, prf: [],
+      });
+      const fakeRoot = mintLink({
+        signer: novaA,
+        iss: novaA.did,
+        aud: peerSender.did,
+        att: FEDERATION_SCOPE,
+        prf: [buriedProof], // a real root has prf:[]
+      });
+      const invocation = mintLink({
+        signer: peerSender,
+        iss: peerSender.did,
+        aud: novaA.did,
+        att: [{ with: SCOPE, can: 'invoke' }],
+        exp: nowSec() + 300,
+        prf: [fakeRoot],
+      });
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_root_has_proofs');
+    });
+
+    it('rejects when a link carries more than one proof (non-strict chain)', async () => {
+      writeTrustedIssuers([novaB.did]);
+      const federationGrant = mintLink({
+        signer: novaA, iss: novaA.did, aud: novaB.did, att: FEDERATION_SCOPE, prf: [],
+      });
+      const extraProof = mintLink({
+        signer: novaA, iss: novaA.did, aud: novaB.did, att: FEDERATION_SCOPE, prf: [],
+      });
+      const peerGrantPayload: UcanPayload = {
+        iss: novaB.did,
+        aud: peerSender.did,
+        exp: nowSec() + 3600,
+        nbf: nowSec(),
+        att: FEDERATION_SCOPE,
+        prf: [federationGrant, extraProof], // two proofs — rejected by strict-chain
+        jti: crypto.randomUUID(),
+      };
+      const peerGrant = buildUcanJwt(peerGrantPayload, crypto.createPrivateKey(novaB.privateKeyPem));
+      const invocation = mintLink({
+        signer: peerSender,
+        iss: peerSender.did,
+        aud: novaA.did,
+        att: [{ with: SCOPE, can: 'invoke' }],
+        exp: nowSec() + 300,
+        prf: [peerGrant],
+      });
+      const r = await verifyUCAN(invocation, ctx, novaA.did, SCOPE);
+      expect(r.valid).toBe(false);
+      expect(r.reason).toBe('chain_link_too_many_proofs');
     });
   });
 });
