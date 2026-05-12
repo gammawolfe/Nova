@@ -54,3 +54,20 @@ export const BROKER_QUEUE_SEQ_TTL_SECONDS = readInt('BROKER_QUEUE_SEQ_TTL_SECOND
  * independently of broker semantics.
  */
 export const BROKER_TASK_STATE_TTL_SECONDS = readInt('BROKER_TASK_STATE_TTL_SECONDS', 24 * 60 * 60);
+
+/**
+ * TTL on the per-process heartbeat key VisibilityQueue uses to mark
+ * itself alive. If the process dies, the key expires and the orphan
+ * sweep moves any entries left in that process's holding list back to
+ * the queue. Must be > BROKER_HEARTBEAT_REFRESH_MS by enough margin to
+ * tolerate one missed refresh under load. Default 30s.
+ */
+export const BROKER_HEARTBEAT_TTL_SECONDS = readInt('BROKER_HEARTBEAT_TTL_SECONDS', 30);
+
+/**
+ * How often a live VisibilityQueue process refreshes its heartbeat
+ * key. Should be ~1/3 of BROKER_HEARTBEAT_TTL_SECONDS to give two
+ * misses of slack before the sweep declares the process dead.
+ * Default 10s.
+ */
+export const BROKER_HEARTBEAT_REFRESH_MS = readInt('BROKER_HEARTBEAT_REFRESH_MS', 10 * 1000);
