@@ -89,6 +89,29 @@ export const UcanRevokeSchema = z.object({
   cid: z.string().min(1),
 });
 
+// ── Federation ──────────────────────────────────────────────────────────────
+//
+// Federation grants are Nova-to-Nova delegations: a UCAN signed by this Nova
+// with aud = a peer Nova's DID. The peer's users can then chain their own
+// invocations through this grant when calling our agents, and our gate's
+// chain walker verifies back to our signature.
+//
+// `peerDid` is restricted to `did:web:` or `did:key:` — the only DID methods
+// Nova's verifier resolves. Accepting other methods would mint grants no
+// peer can actually verify against.
+//
+// `scope` is a list of capability `with` strings the peer is delegated to
+// authorize within. Each becomes `{ with, can: 'invoke' }` in the UCAN's
+// `att`. Empty list is rejected — a federation grant that authorizes
+// nothing is a foot-gun.
+
+export const FederationGrantIssueSchema = z.object({
+  peerDid: z.string().regex(/^did:(web|key):/, 'peerDid must be did:web: or did:key:'),
+  scope: z.array(z.string().min(1)).min(1),
+  expiryDays: z.number().int().min(1).max(365).default(30),
+  note: z.string().max(500).optional(),
+});
+
 // ── Confirmation ────────────────────────────────────────────────────────────
 
 export const ConfirmApproveSchema = z.object({
