@@ -41,4 +41,4 @@ systemRouter.get('/health', healthHandler('admin-api', startTime, async () => {
   return { redis, data_dir, a2a_server, gate_service, agent_connector };
 }) as any);
 
-systemRouter.get('/metrics', metricsHandler(adminRegistry) as any);
+systemRouter.get('/metrics', metricsHandler(adminRegistry));

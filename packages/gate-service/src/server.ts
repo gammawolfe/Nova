@@ -35,7 +35,7 @@ app.get('/health', (healthHandler('gate-service', startTime, async () => {
   return { redis, data_dir, anthropic_api };
 })) as any);
 
-app.get('/metrics', metricsHandler(gateRegistry) as any);
+app.get('/metrics', metricsHandler(gateRegistry));
 
 const httpServer = app.listen(Number(PORT), () => {
   logger.info(`Gate Service health/metrics server on port ${PORT}`);
