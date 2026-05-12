@@ -2,13 +2,13 @@ import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
 import { TenantContext, tenantDataPath, KEY_ROOT } from '@nova/shared/src/tenant';
-import { GateErrorCode, NovaError } from '@nova/shared/src/errors';
-import { TrustTier, ActorRecord } from '@nova/shared/src/types';
+import { GateErrorCode } from '@nova/shared/src/errors';
+import { TrustTier, ActorRecord, TaskRequest } from '@nova/shared/src/types';
 import { auditLog } from '@nova/shared/src/audit';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { getAgentByDid } from '@nova/shared/src/agent-index';
-import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
+import { verifyUCAN, extractIssuerDid, UCANVerificationResult } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
@@ -41,51 +41,125 @@ export interface GateResult {
   parsedTask?: unknown;
 }
 
+// ── Step combinator ────────────────────────────────────────────────────────
+//
+// Each pipeline step returns a discriminated union. `pass` means the step
+// completed and produced a value for the next step; `fail` means the step
+// short-circuited with a finalised GateResult that the orchestrator wraps
+// and returns.
+//
+// This shape keeps the orchestrator's control flow explicit (no Promise
+// chains, no error-as-control-flow throws) while moving each step's
+// audit + quarantine plumbing into its own named function. Each step
+// function is independently readable and unit-testable.
+
+type StepPass<T> = { kind: 'pass'; value: T };
+type StepFail = { kind: 'fail'; result: GateResult };
+type Step<T> = StepPass<T> | StepFail;
+
+function pass<T>(value: T): StepPass<T> {
+  return { kind: 'pass', value };
+}
+
+function fail(result: GateResult): StepFail {
+  return { kind: 'fail', result };
+}
+
 /**
- * Executes the 5-layer Gate pipeline synchronously.
- * Returns a GateResult describing whether the task was accepted, quarantined, or dropped.
+ * Executes the 5-layer Gate pipeline. Returns a GateResult describing
+ * whether the task was accepted, quarantined, or dropped.
+ *
+ * The orchestrator stays thin: extract auth from headers, run each step
+ * in order, short-circuit on the first failure. Each step encapsulates
+ * its own audit + quarantine logic; see runTierStep, runUcanStep,
+ * runSchemaStep, runClassifyStep below.
  */
 export async function executeGatePipeline(ctx: GateContext): Promise<GateResult> {
   const { tenantCtx } = ctx;
   const receivedAt = new Date().toISOString();
   const endTimer = gateLatency.startTimer();
 
-  async function recordAndReturn(result: GateResult): Promise<GateResult> {
+  const recordAndReturn = (result: GateResult): GateResult => {
     endTimer();
     gateDecisions.inc({ decision: result.decision, error_code: result.errorCode ?? 'none' });
     // Note: prior versions did a fsp.readdir on the quarantine directory
-    // here to update the quarantineDepth gauge. That readdir ran on every
-    // quarantine decision and scaled with the directory's size — under
-    // quarantine pressure (DDoS, broken sender) it could dominate the
-    // gate hot path. Removed in favour of the `nova_gate_decisions_total
-    // {decision="quarantined"}` counter, which gives operators the same
-    // information without disk I/O. Periodic depth-sampling (background
-    // sweep) can be added back later if absolute pending-depth becomes a
-    // first-class signal again.
+    // here to update the quarantineDepth gauge. Removed in favour of the
+    // `nova_gate_decisions_total{decision="quarantined"}` counter, which
+    // gives operators the same information without disk I/O. See PR #73.
     return result;
-  }
+  };
 
-  // --- STEP 1: UCAN Pre-Extraction ---
-  const authHeader = ctx.headers['authorization'];
+  // Step 1: Auth header extraction (pure, no I/O).
+  const { ucanJwt, senderDid } = extractAuth(ctx.headers);
+
+  // Step 2: Trust tier resolution.
+  const tier = await runTierStep({ tenantCtx, body: ctx.body, receivedAt, senderDid });
+  if (tier.kind === 'fail') return recordAndReturn(tier.result);
+
+  // Step 3: UCAN verification. Need agent DID first.
+  const agentDid = ctx.agentDid ?? await loadAgentDid();
+  const ucan = await runUcanStep({
+    tenantCtx, body: ctx.body, receivedAt, senderDid,
+    tier: tier.value.tier, ucanJwt, agentDid,
+  });
+  if (ucan.kind === 'fail') return recordAndReturn(ucan.result);
+
+  // Step 4: Schema validation.
+  const schema = await runSchemaStep({ tenantCtx, body: ctx.body, senderDid, tier: tier.value.tier });
+  if (schema.kind === 'fail') return recordAndReturn(schema.result);
+
+  // Step 5: Injection classification (pattern match + LLM).
+  const params = (schema.value.params ?? {}) as Record<string, unknown>;
+  const classify = await runClassifyStep({
+    tenantCtx, body: ctx.body, receivedAt, senderDid,
+    tier: tier.value.tier, params,
+  });
+  if (classify.kind === 'fail') return recordAndReturn(classify.result);
+
+  return recordAndReturn({
+    passed: true,
+    decision: 'accepted',
+    ucanJwt: ucanJwt ?? undefined,
+    senderDid: senderDid ?? undefined,
+    trustTier: tier.value.tier,
+    parsedTask: schema.value,
+  });
+}
+
+// ── Step 1: Auth extraction (synchronous, pure) ────────────────────────────
+
+function extractAuth(headers: GateContext['headers']): {
+  ucanJwt: string | null;
+  senderDid: string | null;
+} {
+  const authHeader = headers['authorization'];
   let ucanJwt: string | null = null;
-
   if (authHeader && typeof authHeader === 'string') {
     const match = authHeader.match(/^UCAN\s+(eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)$/);
-    if (match?.[1]) {
-      ucanJwt = match[1];
-    }
+    if (match?.[1]) ucanJwt = match[1];
   }
 
-  // Extract DID from UCAN for trust tier lookup (without full verification yet)
-  let senderDid: string | null = null;
-  if (ucanJwt) {
-    senderDid = extractIssuerDid(ucanJwt);
-  }
+  // Extract DID from UCAN for trust tier lookup (without full verification yet).
+  // Forged or malformed iss values fall through to senderDid=null, which the
+  // tier step treats as tier 0 (quarantine).
+  const senderDid = ucanJwt ? extractIssuerDid(ucanJwt) : null;
+  return { ucanJwt, senderDid };
+}
 
-  // --- STEP 2: Trust Tier Resolution ---
-  const { tier, actorRecord } = await resolveTrustTier(tenantCtx, senderDid);
+// ── Step 2: Trust tier resolution ──────────────────────────────────────────
 
-  if (tier === 0) {
+interface TierStepArgs {
+  tenantCtx: TenantContext;
+  body: unknown;
+  receivedAt: string;
+  senderDid: string | null;
+}
+
+async function runTierStep(args: TierStepArgs): Promise<Step<TierResolutionResult>> {
+  const { tenantCtx, body, receivedAt, senderDid } = args;
+  const resolved = await resolveTrustTier(tenantCtx, senderDid);
+
+  if (resolved.tier === 0) {
     await auditLog(tenantCtx, {
       event: 'actor_unknown',
       senderDid: senderDid ?? undefined,
@@ -96,7 +170,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
-      rawTask: ctx.body,
+      rawTask: body,
       gateStep: 'tier',
       reason: 'actor_unknown',
     });
@@ -107,7 +181,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       await auditLog(tenantCtx, { event: 'task_quarantined', senderDid: senderDid ?? undefined, reason: 'actor_unknown' });
     }
 
-    return await recordAndReturn({
+    return fail({
       passed: false,
       decision: 'quarantined',
       errorCode: 'ACTOR_UNKNOWN',
@@ -121,12 +195,29 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   await auditLog(tenantCtx, {
     event: 'actor_resolved',
     senderDid: senderDid ?? undefined,
-    tier,
+    tier: resolved.tier,
   });
 
-  // --- STEP 3: UCAN Verification (tier >= 1 only) ---
+  return pass(resolved);
+}
+
+// ── Step 3: UCAN verification ──────────────────────────────────────────────
+
+interface UcanStepArgs {
+  tenantCtx: TenantContext;
+  body: unknown;
+  receivedAt: string;
+  senderDid: string | null;
+  tier: TrustTier;
+  ucanJwt: string | null;
+  agentDid: string;
+}
+
+async function runUcanStep(args: UcanStepArgs): Promise<Step<UCANVerificationResult>> {
+  const { tenantCtx, body, receivedAt, senderDid, tier, ucanJwt, agentDid } = args;
+
   if (!ucanJwt) {
-    // Missing UCAN → quarantine (not drop — operator may want to review)
+    // Missing UCAN → quarantine (not drop — operator may want to review).
     await auditLog(tenantCtx, {
       event: 'ucan_failed',
       senderDid: senderDid ?? undefined,
@@ -137,12 +228,12 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
-      rawTask: ctx.body,
+      rawTask: body,
       gateStep: 'ucan',
       reason: 'ucan_missing',
     });
 
-    return await recordAndReturn({
+    return fail({
       passed: false,
       decision: 'quarantined',
       errorCode: 'UCAN_MISSING',
@@ -153,7 +244,6 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
   }
 
-  const agentDid = ctx.agentDid ?? await loadAgentDid();
   // In the sender-signed delegation model the gate is the audience on every
   // invocation (aud = novaDid). The invocation's att must express a capability
   // for this specific destination agent — we allow any sub-scope under
@@ -163,12 +253,11 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   const ucanResult = await verifyUCAN(ucanJwt, tenantCtx, agentDid, requiredScope);
 
   if (!ucanResult.valid) {
-    // chain-walking failures surface a depth (where in the chain we
-    // stopped) and sometimes a partial chainLength — attach both to
-    // metadata so operators can distinguish a failed single-link grant
-    // (chainDepth 1) from a failure deep in a federation chain. The
-    // existing `reason` string still drives alerting; metadata is for
-    // diagnostics.
+    // Chain-walking failures surface a depth (where in the chain we
+    // stopped). Attach it to metadata so operators can distinguish a
+    // failed single-link grant (chainDepth 1) from a failure deep in a
+    // federation chain. The `reason` string still drives alerting;
+    // metadata is for diagnostics.
     const failureMetadata: Record<string, unknown> = {};
     if (ucanResult.chainDepth !== undefined) failureMetadata.chainDepth = ucanResult.chainDepth;
     await auditLog(tenantCtx, {
@@ -182,12 +271,12 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
-      rawTask: ctx.body,
+      rawTask: body,
       gateStep: 'ucan',
       reason: ucanResult.reason ?? 'ucan_invalid',
     });
 
-    return await recordAndReturn({
+    return fail({
       passed: false,
       decision: 'quarantined',
       errorCode: mapReasonToGateErrorCode(ucanResult.reason),
@@ -200,9 +289,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
 
   // Federation context: chainLength=2 is a today-style single-link grant
   // (outer + Nova-signed root). chainLength >= 3 means the invocation came
-  // through a peer Nova — peerDid identifies which. Surfacing both in
-  // audit metadata lets operators filter and attribute federated traffic
-  // distinctly from local traffic without introducing a new event type.
+  // through a peer Nova — peerDid identifies which.
   const verifyMetadata: Record<string, unknown> = {};
   if (ucanResult.chainLength !== undefined) verifyMetadata.chainLength = ucanResult.chainLength;
   if (ucanResult.peerDid !== undefined) verifyMetadata.peerDid = ucanResult.peerDid;
@@ -213,8 +300,21 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     ...(Object.keys(verifyMetadata).length > 0 ? { metadata: verifyMetadata } : {}),
   });
 
-  // --- STEP 4: Schema Validation ---
-  const schemaResult = await validateSchema(ctx.body, tenantCtx);
+  return pass(ucanResult);
+}
+
+// ── Step 4: Schema validation ──────────────────────────────────────────────
+
+interface SchemaStepArgs {
+  tenantCtx: TenantContext;
+  body: unknown;
+  senderDid: string | null;
+  tier: TrustTier;
+}
+
+async function runSchemaStep(args: SchemaStepArgs): Promise<Step<TaskRequest>> {
+  const { tenantCtx, body, senderDid, tier } = args;
+  const schemaResult = await validateSchema(body, tenantCtx);
 
   if (!schemaResult.valid) {
     await auditLog(tenantCtx, {
@@ -224,8 +324,8 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: schemaResult.reason,
     });
 
-    // Schema failures → DROP (not quarantine) — sender bug
-    return await recordAndReturn({
+    // Schema failures → DROP (not quarantine) — sender bug.
+    return fail({
       passed: false,
       decision: 'dropped',
       errorCode: schemaResult.reason?.startsWith('intent_unknown')
@@ -245,8 +345,26 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     tier,
   });
 
-  // --- STEP 5: Injection Classification (Stage A — pattern matching) ---
-  const params = (schemaResult.parsedTask as any)?.params ?? {};
+  // schemaResult.valid === true implies schemaResult.parsedTask is set;
+  // schema-validator's contract is "parsedTask is defined iff valid is true."
+  return pass(schemaResult.parsedTask as TaskRequest);
+}
+
+// ── Step 5: Injection classification (pattern match + LLM) ─────────────────
+
+interface ClassifyStepArgs {
+  tenantCtx: TenantContext;
+  body: unknown;
+  receivedAt: string;
+  senderDid: string | null;
+  tier: TrustTier;
+  params: Record<string, unknown>;
+}
+
+async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
+  const { tenantCtx, body, receivedAt, senderDid, tier, params } = args;
+
+  // Stage A — synchronous pattern matching.
   const strings = extractStrings(params);
   const patternResult = patternMatch(strings);
 
@@ -262,13 +380,13 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     const qId = await writeQuarantine(tenantCtx, {
       receivedAt,
       senderDid,
-      rawTask: ctx.body,
+      rawTask: body,
       gateStep: 'classifier',
       reason: `injection_pattern_match:${patternResult.pattern}`,
     });
 
     classifierResults.inc({ result: 'quarantine', stage: 'pattern' });
-    return await recordAndReturn({
+    return fail({
       passed: false,
       decision: 'quarantined',
       errorCode: 'INJECTION_PATTERN_MATCH',
@@ -286,7 +404,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     tier,
   });
 
-  // --- STEP 5B: LLM Classification ---
+  // Stage B — LLM classification with fail-open/fail-closed switch.
   try {
     const llmResult = await llmClassify(strings, tenantCtx);
     const decision = classifyDecision(llmResult);
@@ -296,9 +414,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       const reason = confidenceHigh
         ? `injection_detected:confidence=${llmResult.confidence}`
         : `injection_suspected:confidence=${llmResult.confidence}`;
-      const errorCode: GateErrorCode = confidenceHigh
-        ? 'INJECTION_DETECTED'
-        : 'INJECTION_SUSPECTED';
+      const errorCode: GateErrorCode = confidenceHigh ? 'INJECTION_DETECTED' : 'INJECTION_SUSPECTED';
 
       await auditLog(tenantCtx, {
         event: confidenceHigh ? 'injection_detected' : 'injection_suspected',
@@ -311,13 +427,13 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       const qId = await writeQuarantine(tenantCtx, {
         receivedAt,
         senderDid,
-        rawTask: ctx.body,
+        rawTask: body,
         gateStep: 'classifier',
         reason,
       });
 
       classifierResults.inc({ result: 'quarantine', stage: 'llm' });
-      return await recordAndReturn({
+      return fail({
         passed: false,
         decision: 'quarantined',
         errorCode,
@@ -335,6 +451,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       tier,
       metadata: { classifierConfidence: llmResult.confidence, fromCache: llmResult.fromCache },
     });
+    return pass(undefined);
   } catch (err: any) {
     if (GATE_LLM_FAIL_CLOSED) {
       await auditLog(tenantCtx, {
@@ -346,12 +463,12 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       const qId = await writeQuarantine(tenantCtx, {
         receivedAt,
         senderDid,
-        rawTask: ctx.body,
+        rawTask: body,
         gateStep: 'classifier',
         reason: `classifier_unavailable:${err.message}`,
       });
       classifierResults.inc({ result: 'quarantine', stage: 'llm_error' });
-      return await recordAndReturn({
+      return fail({
         passed: false,
         decision: 'quarantined',
         errorCode: 'CLASSIFIER_UNAVAILABLE',
@@ -364,7 +481,7 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
 
     // Classifier unavailable + GATE_LLM_FAIL_CLOSED=false → fail-open:
     // skip layer-5 LLM injection detection and let the request through.
-    // Layers 1-4 (tier, UCAN, schema, pattern-match) still run.
+    // Layers 1-4 (tier, UCAN, schema, pattern-match) still ran.
     await auditLog(tenantCtx, {
       event: 'classifier_unavailable',
       senderDid: senderDid ?? undefined,
@@ -377,20 +494,11 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       { err: err.message },
       'LLM classifier unavailable — fail-open enabled (GATE_LLM_FAIL_CLOSED=false), injection detection bypassed'
     );
+    return pass(undefined);
   }
-
-  // All five layers passed
-  return await recordAndReturn({
-    passed: true,
-    decision: 'accepted',
-    ucanJwt,
-    senderDid: senderDid ?? undefined,
-    trustTier: tier,
-    parsedTask: schemaResult.parsedTask,
-  });
 }
 
-// --- Trust Tier Resolution ---
+// ── Trust tier resolution ──────────────────────────────────────────────────
 
 const DID_SAFE_PATTERN = /^did:[a-z]+:[a-zA-Z0-9._-]+$/;
 
@@ -503,39 +611,9 @@ async function loadAgentDid(): Promise<string> {
 // reason to the right code is what makes "UCAN_EXPIRED vs UCAN_INVALID_JWT
 // vs UCAN_WRONG_AUDIENCE" mean what operators expect.
 //
-// Two families of reasons need to be handled:
-//
-//   1. Outer-token failures (`ucan_*`). These map to the corresponding
-//      UCAN_* codes one-to-one and have been stable since v1.
-//
-//   2. Chain-walking failures (`chain_*`). Introduced in Phase 2B-A
-//      (the chain-walker rewrite). Each one represents the same kind of
-//      failure as an outer-token reason but detected at depth ≥ 1 in the
-//      delegation chain. Mapped to the closest semantic match:
-//
-//        chain_no_root              → UCAN_WRONG_AUDIENCE
-//          (the chain doesn't terminate at a link signed by this Nova;
-//           the request isn't authorised for this audience at all)
-//        chain_audience_mismatch    → UCAN_DID_MISMATCH
-//          (a link's aud doesn't equal the previous link's iss)
-//        chain_link_expired         → UCAN_EXPIRED
-//        chain_capability_widened   → UCAN_INSUFFICIENT_CAPABILITY
-//        chain_link_invalid_sig     → UCAN_INVALID_JWT
-//        chain_link_malformed       → UCAN_INVALID_JWT
-//        chain_link_missing_proof   → UCAN_INSUFFICIENT_CAPABILITY
-//        chain_link_too_many_proofs → UCAN_INVALID_JWT
-//        chain_too_deep             → UCAN_INVALID_JWT
-//        chain_root_has_proofs      → UCAN_INVALID_JWT
-//        chain_peer_untrusted       → UCAN_WRONG_AUDIENCE
-//          (peer Nova in the federation chain isn't in trusted-issuers)
-//
-// Unknown reasons fall through to UCAN_INVALID_JWT — the safest default
-// for a code path that shouldn't be reachable in normal operation.
-//
-// Pre-2B-A, this map referenced `grant_*` keys (the old single-link
-// verifier's reason names). Those reasons are no longer emitted by the
-// verifier; removing the stale entries prevents accidentally "matching"
-// them from a future caller that resurrects the names.
+// Outer-token reasons (`ucan_*`) map directly to UCAN_* codes; chain-walk
+// reasons (`chain_*`, introduced in Phase 2B-A) map to the closest
+// semantic match.
 
 const REASON_TO_ERROR_CODE: Record<string, GateErrorCode> = {
   // Outer-token failures
