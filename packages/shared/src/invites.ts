@@ -14,6 +14,22 @@ export interface InvitePayload {
 
 const CONSUMED_PREFIX = 'nova:invite-consumed:';
 
+/**
+ * Load Nova's gateway Ed25519 private key from data/keys/nova.private.pem.
+ *
+ * Canonical format: PKCS8 PEM. Produced by scripts/generate-keys.ts and
+ * accepted directly by Node's crypto.createPrivateKey.
+ *
+ * Backward-compat format: 64-byte libsodium secretKey (seed || pubkey),
+ * base64-encoded — the output `ucans.EdKeypair.export()` produced. Older
+ * installs created by the pre-PEM version of generate-keys.ts have files
+ * in this form. They keep working transparently here; operators who want
+ * to standardise on PEM can run scripts/migrate-keys.ts to convert in
+ * place.
+ *
+ * The .pem filename refers to the canonical form. The legacy branch is
+ * a compatibility shim, not a parallel format.
+ */
 export async function loadNovaPrivateKey(): Promise<crypto.KeyObject> {
   const keyPath = path.join(KEY_ROOT, 'nova.private.pem');
   const content = await fsp.readFile(keyPath, 'utf8').catch(() => {
@@ -21,16 +37,19 @@ export async function loadNovaPrivateKey(): Promise<crypto.KeyObject> {
   });
   const trimmed = content.trim();
 
-  // PEM — use directly.
+  // Canonical: PKCS8 PEM. Recognised by the BEGIN marker.
   if (trimmed.startsWith('-----BEGIN')) {
     return crypto.createPrivateKey(trimmed);
   }
 
-  // ucans EdKeypair.export() — 64-byte libsodium secretKey (seed || pubkey), base64.
-  // Re-import via JWK so Node crypto.sign() works alongside ucans's own usage.
+  // Legacy: 64-byte libsodium secretKey, base64. Re-import via JWK so Node
+  // crypto.sign() works alongside any remaining ucans usage in the calling
+  // process. Operators on this path should run scripts/migrate-keys.ts to
+  // switch to PEM; the dual-load path will be kept for at least one major
+  // release after that migration is documented.
   const raw = Buffer.from(trimmed, 'base64');
   if (raw.length !== 64) {
-    throw new Error(`Nova private key has unexpected length ${raw.length} (expected PEM or 64-byte ucans base64)`);
+    throw new Error(`Nova private key has unexpected length ${raw.length} (expected PKCS8 PEM, or 64-byte libsodium base64 for legacy installs)`);
   }
   const seed = raw.subarray(0, 32);
   const pub = raw.subarray(32, 64);
