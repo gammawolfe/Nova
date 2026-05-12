@@ -134,6 +134,14 @@ export interface PullResult<T> {
 export type RespondOutcome = 'accepted' | 'already_completed' | 'task_not_found';
 
 /**
+ * Cap on per-iteration concurrency inside reclaimAll. Each chunk fires
+ * one reclaim per (tenant, agent) in parallel; the next chunk waits for
+ * the current one to settle. Sized to keep total in-flight Redis
+ * commands bounded even when the participant set grows large.
+ */
+const RECLAIM_ALL_CHUNK = 16;
+
+/**
  * Redis-backed visibility-timeout queue. Each method is a primitive on
  * top of the LPUSH/BLPOP + sorted-set inflight pattern; consumers stitch
  * them together into their own public APIs (e.g. inbox.ts's `enqueue`,
@@ -141,6 +149,18 @@ export type RespondOutcome = 'accepted' | 'already_completed' | 'task_not_found'
  */
 export class VisibilityQueue<T, N> {
   constructor(private readonly config: VisibilityQueueConfig<T, N>) {}
+
+  /**
+   * Parallel index keyed by taskId, value = the same serialized entry
+   * stored in the inflight zset. Lets `peekInflight` and `respond`
+   * resolve a taskId to its raw entry without iterating the zset.
+   * Populated by `pull`, cleared by `respond`/`reclaim`/`forget` —
+   * always in the same MULTI as the zset write so the two structures
+   * cannot drift.
+   */
+  private inflightHashKey(ctx: TenantContext): string {
+    return `${this.config.keys.inflight(ctx)}:by-id`;
+  }
 
   // ── Enqueue ────────────────────────────────────────────────────────────
 
@@ -205,11 +225,14 @@ export class VisibilityQueue<T, N> {
       reclaimCount: entry.reclaimCount,
       ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
     };
-    await redis.zadd(
-      this.config.keys.inflight(ctx),
-      visibleUntilMs,
-      this.config.serializeEntry(inflightEntry),
-    );
+    const serialized = this.config.serializeEntry(inflightEntry);
+    // Claim into the zset AND the by-id hash atomically. Without the
+    // MULTI, a concurrent respond() could see the zset write but miss
+    // the hash, or vice versa, leading to a phantom 'task_not_found'.
+    await redis.multi()
+      .zadd(this.config.keys.inflight(ctx), visibleUntilMs, serialized)
+      .hset(this.inflightHashKey(ctx), entry.taskId, serialized)
+      .exec();
 
     return {
       taskId: entry.taskId,
@@ -240,12 +263,25 @@ export class VisibilityQueue<T, N> {
   // ── In-flight operations (by taskId) ───────────────────────────────────
 
   /**
-   * Find an in-flight entry by taskId without removing it. O(N) over
-   * the in-flight zset; under typical broker workloads N is small
-   * (handful of concurrent tasks). See review item #3 for a proposed
-   * O(1) parallel-hash optimisation if this ever bites.
+   * Find an in-flight entry by taskId without removing it. O(1) via
+   * the parallel by-id hash populated by `pull`. Falls back to a zset
+   * scan if the hash is missing the entry — covers entries written by
+   * pre-hash deploys that may still be in flight during the rollout.
    */
   async peekInflight(ctx: TenantContext, taskId: string): Promise<VisibilityEntry<T> | null> {
+    const redis = getSharedRedis();
+    const raw = await redis.hget(this.inflightHashKey(ctx), taskId);
+    if (raw) {
+      const entry = this.config.parseEntry(raw);
+      if (entry) return entry;
+    }
+    return this.peekInflightViaScan(ctx, taskId);
+  }
+
+  private async peekInflightViaScan(
+    ctx: TenantContext,
+    taskId: string,
+  ): Promise<VisibilityEntry<T> | null> {
     const redis = getSharedRedis();
     const raws = await redis.zrange(this.config.keys.inflight(ctx), 0, -1);
     for (const raw of raws) {
@@ -260,14 +296,41 @@ export class VisibilityQueue<T, N> {
    * removal that wins, 'already_completed' if a concurrent caller (or
    * a reclaim sweep) already removed it, 'task_not_found' if nothing
    * with that taskId is currently in flight.
+   *
+   * Fast path: HGET the by-id hash, then ZREM + HDEL in a MULTI so the
+   * two structures stay in sync. The MULTI also acts as the race
+   * arbiter — only one concurrent caller will see a non-zero ZREM
+   * result. Falls back to a zset scan if the hash misses (pre-deploy
+   * in-flight entries).
    */
   async respond(ctx: TenantContext, taskId: string): Promise<RespondOutcome> {
     const redis = getSharedRedis();
-    const raws = await redis.zrange(this.config.keys.inflight(ctx), 0, -1);
+    const inflightKey = this.config.keys.inflight(ctx);
+    const hashKey = this.inflightHashKey(ctx);
+
+    const raw = await redis.hget(hashKey, taskId);
+    if (raw) {
+      const result = await redis.multi()
+        .zrem(inflightKey, raw)
+        .hdel(hashKey, taskId)
+        .exec();
+      const removed = (result?.[0]?.[1] as number) ?? 0;
+      return removed > 0 ? 'accepted' : 'already_completed';
+    }
+    return this.respondViaScan(ctx, taskId);
+  }
+
+  private async respondViaScan(
+    ctx: TenantContext,
+    taskId: string,
+  ): Promise<RespondOutcome> {
+    const redis = getSharedRedis();
+    const inflightKey = this.config.keys.inflight(ctx);
+    const raws = await redis.zrange(inflightKey, 0, -1);
     for (const raw of raws) {
       const entry = this.config.parseEntry(raw);
       if (entry?.taskId === taskId) {
-        const removed = await redis.zrem(this.config.keys.inflight(ctx), raw);
+        const removed = await redis.zrem(inflightKey, raw);
         return removed > 0 ? 'accepted' : 'already_completed';
       }
     }
@@ -285,20 +348,34 @@ export class VisibilityQueue<T, N> {
   async reclaim(ctx: TenantContext): Promise<{ redelivered: number; deadLettered: number }> {
     const redis = getSharedRedis();
     const now = Date.now();
-    const raws = await redis.zrangebyscore(this.config.keys.inflight(ctx), '-inf', now);
+    const inflightKey = this.config.keys.inflight(ctx);
+    const hashKey = this.inflightHashKey(ctx);
+    const listKey = this.config.keys.list(ctx);
+
+    const raws = await redis.zrangebyscore(inflightKey, '-inf', now);
     let redelivered = 0;
     let deadLettered = 0;
 
     for (const raw of raws) {
       const entry = this.config.parseEntry(raw);
       if (!entry) {
-        await redis.zrem(this.config.keys.inflight(ctx), raw);
+        // Unparseable: just remove from the zset. There's no taskId to
+        // key the hash by, so the hash entry (if any) will outlive
+        // this sweep — but it'll be cleared the next time someone
+        // pulls the same taskId, or it ages out with the agent's
+        // `forget`. Logging is unhelpful here because the payload is
+        // already malformed.
+        await redis.zrem(inflightKey, raw);
         continue;
       }
-      await redis.zrem(this.config.keys.inflight(ctx), raw);
 
       const nextAttempt = entry.reclaimCount + 1;
       if (nextAttempt >= this.config.reclaimCeiling) {
+        // Atomic removal from inflight zset + by-id hash, then DLQ.
+        await redis.pipeline()
+          .zrem(inflightKey, raw)
+          .hdel(hashKey, entry.taskId)
+          .exec();
         const dl = this.config.buildDeadLetter({
           taskId: entry.taskId,
           inner: entry.inner,
@@ -320,7 +397,14 @@ export class VisibilityQueue<T, N> {
           reclaimCount: nextAttempt,
           ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
         };
-        await redis.lpush(this.config.keys.list(ctx), this.config.serializeEntry(updated));
+        // ZREM old inflight + HDEL old hash + LPUSH back to the list,
+        // all in one round-trip. The next pull() will repopulate the
+        // hash when it re-claims this entry.
+        await redis.pipeline()
+          .zrem(inflightKey, raw)
+          .hdel(hashKey, entry.taskId)
+          .lpush(listKey, this.config.serializeEntry(updated))
+          .exec();
         redelivered += 1;
       }
     }
@@ -338,12 +422,25 @@ export class VisibilityQueue<T, N> {
     const members = await redis.smembers(this.config.participantSet);
     let redelivered = 0;
     let deadLettered = 0;
+
+    const contexts: TenantContext[] = [];
     for (const member of members) {
       const [tenantId, agentId] = member.split(':', 2);
       if (!tenantId || !agentId) continue;
-      const r = await this.reclaim({ tenantId, agentId });
-      redelivered += r.redelivered;
-      deadLettered += r.deadLettered;
+      contexts.push({ tenantId, agentId });
+    }
+
+    // Chunked Promise.all: keeps the total in-flight Redis commands
+    // bounded by RECLAIM_ALL_CHUNK while still parallelising across
+    // (tenant, agent) members. Each chunk waits for the previous chunk
+    // to settle before starting the next.
+    for (let i = 0; i < contexts.length; i += RECLAIM_ALL_CHUNK) {
+      const slice = contexts.slice(i, i + RECLAIM_ALL_CHUNK);
+      const results = await Promise.all(slice.map(c => this.reclaim(c)));
+      for (const r of results) {
+        redelivered += r.redelivered;
+        deadLettered += r.deadLettered;
+      }
     }
     return { redelivered, deadLettered };
   }
@@ -360,6 +457,7 @@ export class VisibilityQueue<T, N> {
       .srem(this.config.participantSet, `${ctx.tenantId}:${ctx.agentId}`)
       .del(this.config.keys.list(ctx))
       .del(this.config.keys.inflight(ctx))
+      .del(this.inflightHashKey(ctx))
       .del(this.config.keys.seq(ctx))
       .exec();
   }
