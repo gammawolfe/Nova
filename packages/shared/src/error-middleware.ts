@@ -1,31 +1,30 @@
 // packages/shared/src/error-middleware.ts
 //
-// Express error handler shared between admin-api and a2a-server.
+// Shared Express error handler. Maps every error class the codebase emits
+// (ZodError, NovaError, `{status, message}` shapes, anything else) onto a
+// single response shape:
 //
-// Supports two response shapes via the `shape` option:
+//   { error: <CODE>, message: <human-readable text>, issues?: [...], retryable?: true }
 //
-//   shape: 'detailed' (default) — used by a2a-server. Always includes a
-//     `message` field; ZodError emits structured `issues`; unhandled errors
-//     emit a stable error code 'INTERNAL_ERROR'. This is the shape callers
-//     of a2a-server have grown up with since H2.
+// Where:
+//   - `error`     is a stable, machine-readable code suitable for alerting
+//                 (e.g. 'SCHEMA_INVALID', 'UCAN_EXPIRED', 'INTERNAL_ERROR').
+//   - `message`   is the human-readable text; client UIs prefer this for
+//                 display, falling back to `error` if absent.
+//   - `issues`    is present for ZodError responses, projected to
+//                 `{path, message}` pairs so clients don't need to know
+//                 the Zod error structure.
+//   - `retryable` is present only for NovaError instances where the
+//                 originating throw declared the error retryable.
 //
-//   shape: 'admin'              — used by admin-api. Preserves the wire
-//     format the admin web UI's api.js helper depends on:
-//       err.message ← parsed.error
-//       err.details ← parsed.details
-//     Specifically:
-//       - ZodError → { error: 'Validation failed', issues: <raw zod issues> }
-//       - NovaError → { error: <code>, message: <msg> }
-//       - { status: N, message } → { error: <message> }
-//       - unhandled → { error: 'Internal server error' }
+// Status codes come from `DEFAULT_STATUS_MAP`, with caller overrides
+// merged on top via `statusOverrides`.
 //
-// Maps NovaError codes to HTTP status via DEFAULT_STATUS_MAP, with caller
-// overrides merged on top. Fields not present in the chosen shape are
-// omitted; both shapes always honour the status code lookup.
-//
-// New code should prefer the 'detailed' shape. The 'admin' shape exists
-// solely to preserve backward compatibility with the existing admin web
-// UI; flipping it to 'detailed' is a breaking change for that UI.
+// History: prior versions of this middleware emitted a second shape (the
+// `'admin'` variant) where `error` carried the human message and Zod
+// issues were nested under a non-standard `issues` field at the top level.
+// The admin web UI was updated to read `message` first (api.js), at which
+// point the dual shape became dead weight and was removed.
 
 import type { ErrorRequestHandler, Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
@@ -60,14 +59,7 @@ const DEFAULT_STATUS_MAP: Record<string, number> = {
   CLASSIFIER_UNAVAILABLE: 503,
 };
 
-export type ErrorMiddlewareShape = 'detailed' | 'admin';
-
 export interface ErrorMiddlewareOptions {
-  /**
-   * Wire shape for error responses. Defaults to 'detailed' for new callers;
-   * admin-api passes 'admin' to preserve the existing UI contract.
-   */
-  shape?: ErrorMiddlewareShape;
   /**
    * Override status code for specific NovaError codes. Merged on top of
    * DEFAULT_STATUS_MAP so callers can extend rather than replace.
@@ -82,7 +74,6 @@ export interface ErrorMiddlewareOptions {
 }
 
 export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorRequestHandler {
-  const shape = opts.shape ?? 'detailed';
   const statusMap = { ...DEFAULT_STATUS_MAP, ...(opts.statusOverrides ?? {}) };
   const logTag = opts.logTag ?? 'unhandled-http-error';
 
@@ -98,13 +89,6 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
     }
 
     if (err instanceof ZodError) {
-      if (shape === 'admin') {
-        res.status(400).json({
-          error: 'Validation failed',
-          issues: err.issues,
-        });
-        return;
-      }
       res.status(400).json({
         error: 'SCHEMA_INVALID',
         message: 'Validation failed',
@@ -116,7 +100,7 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
     if (err instanceof NovaError) {
       const status = statusMap[err.code] ?? 500;
       const body: Record<string, unknown> = { error: err.code, message: err.message };
-      if (shape === 'detailed' && err.retryable) body['retryable'] = true;
+      if (err.retryable) body['retryable'] = true;
       res.status(status).json(body);
       return;
     }
@@ -124,11 +108,6 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
     if (err && typeof err === 'object' && typeof (err as any).status === 'number') {
       const status = (err as any).status as number;
       const message = (err as any).message ?? 'Request failed';
-      if (shape === 'admin') {
-        // Preserve admin-api's old shape: error == message, no separate field.
-        res.status(status).json({ error: message });
-        return;
-      }
       res.status(status).json({
         error: (err as any).code ?? `HTTP_${status}`,
         message,
@@ -138,10 +117,6 @@ export function createErrorMiddleware(opts: ErrorMiddlewareOptions = {}): ErrorR
 
     // Unexpected — log full detail server-side, return generic 500 to client.
     logger.error({ err, path: req.path, method: req.method, tag: logTag }, 'Unhandled HTTP error');
-    if (shape === 'admin') {
-      res.status(500).json({ error: 'Internal server error' });
-      return;
-    }
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Internal server error' });
   };
 }

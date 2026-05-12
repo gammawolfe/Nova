@@ -36,9 +36,20 @@ export async function api(method, path, body) {
     const parsed = text ? safeJson(text) : null;
 
     if (!res.ok) {
-      const err = new Error((parsed && parsed.error) || `HTTP ${res.status}`);
+      // Server now emits the `detailed` error shape uniformly:
+      //   { error: <CODE>, message: <human-readable>, issues?: [...] }
+      //
+      // For Error.message we prefer the human-readable `message` so toasts
+      // show "Tenant not found" rather than "HTTP_404". Fall through to
+      // `error` for legacy payloads or hand-rolled responses that only
+      // set the code field. Preserve the code as `err.code` so any
+      // future UI alerting can switch on it without parsing strings.
+      const humanMessage =
+        (parsed && (parsed.message || parsed.error)) || `HTTP ${res.status}`;
+      const err = new Error(humanMessage);
       err.status = res.status;
-      err.details = (parsed && parsed.details) || [];
+      err.code = parsed && parsed.error;
+      err.details = (parsed && (parsed.issues || parsed.details)) || [];
       throw err;
     }
 

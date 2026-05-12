@@ -128,7 +128,7 @@ app.use('/admin/federation', federationRouter);
 app.use('/admin', systemRouter);
 
 // Error handler must be last
-app.use(createErrorMiddleware({ shape: 'admin', logTag: 'admin-api' }));
+app.use(createErrorMiddleware({ logTag: 'admin-api' }));
 
 const server = app.listen(Number(PORT), '0.0.0.0', () => {
   logger.info(`Admin API running on http://127.0.0.1:${PORT}`);
