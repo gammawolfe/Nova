@@ -12,7 +12,7 @@ import { verifyUCAN, extractIssuerDid } from './ucan-verifier';
 import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
-import { gateDecisions, gateLatency, classifierResults, quarantineDepth } from './metrics';
+import { gateDecisions, gateLatency, classifierResults } from './metrics';
 
 // Default fail-closed: when the LLM classifier is unavailable, quarantine
 // the request rather than let it through. Operators can opt in to fail-open
@@ -53,13 +53,15 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   async function recordAndReturn(result: GateResult): Promise<GateResult> {
     endTimer();
     gateDecisions.inc({ decision: result.decision, error_code: result.errorCode ?? 'none' });
-    if (result.decision === 'quarantined') {
-      try {
-        const qDir = tenantDataPath(tenantCtx, 'quarantine');
-        const count = (await fsp.readdir(qDir)).filter(f => f.endsWith('.json')).length;
-        quarantineDepth.set({ tenant_id: tenantCtx.tenantId, agent_id: tenantCtx.agentId }, count);
-      } catch { /* dir may not exist */ }
-    }
+    // Note: prior versions did a fsp.readdir on the quarantine directory
+    // here to update the quarantineDepth gauge. That readdir ran on every
+    // quarantine decision and scaled with the directory's size — under
+    // quarantine pressure (DDoS, broken sender) it could dominate the
+    // gate hot path. Removed in favour of the `nova_gate_decisions_total
+    // {decision="quarantined"}` counter, which gives operators the same
+    // information without disk I/O. Periodic depth-sampling (background
+    // sweep) can be added back later if absolute pending-depth becomes a
+    // first-class signal again.
     return result;
   }
 
@@ -397,8 +399,29 @@ interface TierResolutionResult {
   actorRecord: ActorRecord | null;
 }
 
+/**
+ * Hash a DID for use as a trust-registry filename. We hash rather than
+ * use the DID directly so a `readdir` of the trust-registry directory
+ * doesn't leak the set of trusted senders to anyone with disk read
+ * access — the DIDs are recoverable only by knowing them already and
+ * looking up the file. Salt isn't needed: the threat model is leakage
+ * via directory enumeration, not preimage attacks against the hash.
+ */
 function didHash(did: string): string {
   return crypto.createHash('sha256').update(did).digest('hex');
+}
+
+/**
+ * Clamp a tier value to the valid {0, 1, 2, 3} range. Non-integers and
+ * out-of-range values default to 0 (untrusted) — fail-closed.
+ *
+ * Exported for direct unit testing; the production caller is
+ * `resolveTrustTier`'s explicit-record branch.
+ */
+export function clampTier(tier: unknown): TrustTier {
+  if (typeof tier !== 'number' || !Number.isInteger(tier)) return 0;
+  if (tier < 0 || tier > 3) return 0;
+  return tier as TrustTier;
 }
 
 async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): Promise<TierResolutionResult> {
@@ -411,7 +434,11 @@ async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): P
   const recordPath = tenantDataPath(tenantCtx, 'trust-registry', didHash(did) + '.json');
   try {
     const record = JSON.parse(await fsp.readFile(recordPath, 'utf8')) as ActorRecord;
-    return { tier: record.tier as TrustTier, actorRecord: record };
+    // Defensive: a malformed registry record could carry a tier outside
+    // {0,1,2,3}. Clamp before returning so a hand-edited bad value can't
+    // smuggle elevated trust past the gate.
+    const tier = clampTier(record.tier);
+    return { tier, actorRecord: { ...record, tier } };
   } catch {
     // no explicit record — fall through
   }
@@ -444,7 +471,17 @@ async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): P
   return { tier: 0, actorRecord: null };
 }
 
-/** Read the agent's own DID from the data directory. Cached after first read. */
+/**
+ * Read the agent's own DID from the data directory. Cached after first
+ * read. The cache never invalidates within a process — if `nova.did`
+ * changes (key rotation, did:key → did:web migration), the gate keeps
+ * the old value until the service restarts.
+ *
+ * Production deployments treat DID changes as "restart all services"
+ * events (the same change forces grant reissue across the agent fleet
+ * anyway), so the lack of invalidation is intentional and not a bug.
+ * Tests that mutate `nova.did` mid-run should restart the module.
+ */
 let _cachedAgentDid: string | null = null;
 
 async function loadAgentDid(): Promise<string> {

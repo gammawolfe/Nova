@@ -16,7 +16,7 @@ vi.mock('@nova/shared/src/tenant', async () => {
   };
 });
 
-import { validateSchema } from '../src/schema-validator';
+import { validateSchema, invalidateAgentConfigCache } from '../src/schema-validator';
 
 const ctx = { tenantId: 't1', agentId: 'a1' };
 
@@ -48,8 +48,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   // Wipe any agent-config left by a previous case so each test sets its own.
+  // Also invalidate the in-process config cache so the previous case's
+  // cached entry doesn't bleed into this one.
   const dir = path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', ctx.agentId);
   await fsp.rm(dir, { recursive: true, force: true });
+  invalidateAgentConfigCache(ctx);
 });
 
 describe('validateSchema', () => {
@@ -104,5 +107,63 @@ describe('validateSchema', () => {
     ]);
     const r = await validateSchema({ ...validTask, params: {} }, ctx);
     expect(r.valid).toBe(true);
+  });
+});
+
+describe('validateSchema — agent-config cache', () => {
+  // Validates the 30s in-process TTL cache. After the first call seeds
+  // the cache, deleting the file on disk must NOT cause the next call
+  // (within TTL) to fail — the cached copy wins. Invalidation then
+  // forces a fresh disk read which now misses.
+
+  it('keeps validating after the on-disk file is deleted (cached)', async () => {
+    await writeAgentConfig([
+      { id: 'chat', name: 'Chat', inputSchema: {}, outputSchema: {} },
+    ]);
+
+    const first = await validateSchema(validTask, ctx);
+    expect(first.valid).toBe(true);
+
+    // Wipe the on-disk file. The cached entry should still answer.
+    await fsp.rm(
+      path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', ctx.agentId, 'agent-config.json'),
+    );
+
+    const second = await validateSchema(validTask, ctx);
+    expect(second.valid).toBe(true);
+  });
+
+  it('invalidateAgentConfigCache forces a disk re-read', async () => {
+    await writeAgentConfig([
+      { id: 'chat', name: 'Chat', inputSchema: {}, outputSchema: {} },
+    ]);
+
+    const first = await validateSchema(validTask, ctx);
+    expect(first.valid).toBe(true);
+
+    await fsp.rm(
+      path.join(state.dataRoot, 'tenants', ctx.tenantId, 'agents', ctx.agentId, 'agent-config.json'),
+    );
+    invalidateAgentConfigCache(ctx);
+
+    // After invalidation, the disk-missing path should surface.
+    const second = await validateSchema(validTask, ctx);
+    expect(second.valid).toBe(false);
+    expect(second.reason).toBe('schema_invalid:agent_config_unavailable');
+  });
+
+  it('cache entries are keyed per (tenantId, agentId) — independent', async () => {
+    // Seed t1/a1 with chat skill.
+    await writeAgentConfig([
+      { id: 'chat', name: 'Chat', inputSchema: {}, outputSchema: {} },
+    ]);
+    const r1 = await validateSchema(validTask, ctx);
+    expect(r1.valid).toBe(true);
+
+    // t2/a2 has no config on disk — should fail, regardless of t1/a1's cache.
+    const otherCtx = { tenantId: 't2', agentId: 'a2' };
+    const r2 = await validateSchema(validTask, otherCtx);
+    expect(r2.valid).toBe(false);
+    expect(r2.reason).toBe('schema_invalid:agent_config_unavailable');
   });
 });

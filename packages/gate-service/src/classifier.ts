@@ -109,10 +109,6 @@ function readDelayLadder(key: string, fallback: number[]): number[] {
   return fallback;
 }
 
-function getRedis() {
-  return getSharedRedis();
-}
-
 let _defaultAnthropicClient: Anthropic | null = null;
 function defaultAnthropicClient(): Anthropic {
   if (!_defaultAnthropicClient) {
@@ -173,7 +169,7 @@ export async function llmClassify(
   // Check cache
   const cacheKey = crypto.createHash('sha256').update(content).digest('hex');
   try {
-    const cached = await getRedis().get(redisKey(ctx, 'classifier-cache', cacheKey));
+    const cached = await getSharedRedis().get(redisKey(ctx, 'classifier-cache', cacheKey));
     if (cached) {
       classifierCacheHits.inc();
       return { ...JSON.parse(cached), fromCache: true };
@@ -219,7 +215,7 @@ export async function llmClassify(
 
       // Cache the result
       try {
-        await getRedis().setex(
+        await getSharedRedis().setex(
           redisKey(ctx, 'classifier-cache', cacheKey),
           CLASSIFIER_CACHE_TTL,
           JSON.stringify({ injection: result.injection, confidence: result.confidence, indicators: result.indicators })
