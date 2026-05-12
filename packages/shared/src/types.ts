@@ -40,6 +40,7 @@ export type DeadLetterFailureReason =
   | 'exhausted_retries'
   | 'broker_no_response'
   | 'reply_sender_inactive'
+  | 'reply_webhook_failed'
   | 'broker_reply_no_response';
 
 export interface DeadLetterEntry {
