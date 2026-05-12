@@ -74,6 +74,7 @@ services:
       args:
         SERVICE: agent-connector
         NPM_WORKSPACES: --workspace=packages/shared --workspace=packages/task-queue --workspace=packages/agent-connector
+        ENTRY: dist/bin.js
         PORT: "3003"
     init: true
     volumes:
