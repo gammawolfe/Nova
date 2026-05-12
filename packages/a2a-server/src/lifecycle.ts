@@ -19,6 +19,7 @@ import type { Server } from 'http';
 import { logger } from '@nova/shared/src/logger';
 import { closeSharedRedis } from '@nova/shared/src/redis';
 import { drainSseStreams, liveStreamCount } from './sse-registry';
+import { stopTenantRouterCache } from './tenant-router';
 
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.NOVA_SHUTDOWN_TIMEOUT_MS ?? '15000', 10);
 
@@ -62,7 +63,12 @@ async function shutdown(signal: string, httpServer: Server | null): Promise<void
       await new Promise(r => setTimeout(r, 250));
     }
 
-    // 3. close shared Redis (publishers, queues, indexes used by handlers)
+    // 3. stop the tenant-router's lifecycle subscriber so its duplicated
+    //    Redis connection is released cleanly before we close the shared
+    //    client.
+    await stopTenantRouterCache();
+
+    // 4. close shared Redis (publishers, queues, indexes used by handlers)
     await closeSharedRedis();
 
     logger.info('a2a-server shutdown complete');
