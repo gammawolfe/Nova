@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 /**
@@ -34,8 +35,82 @@ export function redisKey(ctx: TenantContext, ...parts: string[]): string {
   return `t:${ctx.tenantId}:a:${ctx.agentId}:${parts.join(':')}`;
 }
 
-// Resolve data root — accounts for npm workspaces where CWD may be a nested package dir
-export const DATA_ROOT: string = process.env.DATA_ROOT || path.resolve(process.cwd(), '../../data');
+// ── DATA_ROOT resolution ────────────────────────────────────────────────────
+//
+// Precedence:
+//   1. `DATA_ROOT` env var          — production deployments set this
+//      explicitly. Always honoured first.
+//   2. Workspace-root walk-up       — when running anywhere inside the Nova
+//      monorepo (dev, tests, scripts, compiled `dist/` under
+//      `packages/*/`), walk up from this module's own location looking for
+//      a `package.json` declaring `workspaces`. The first such directory is
+//      the workspace root and DATA_ROOT defaults to `<root>/data`.
+//   3. process.cwd() fallback       — last resort, with a stderr warning.
+//      Matches the prior behaviour so existing setups don't break, but the
+//      warning surfaces misconfigured deployments instead of silently
+//      computing a wrong path.
+//
+// The previous default `path.resolve(process.cwd(), '../../data')` only
+// produced a correct path when CWD was a `packages/*/` directory. Tests,
+// CLI invocations, and scripts running from elsewhere computed paths
+// pointing outside the project; the `vi.hoisted` test setup in
+// gate-service papered over this.
+
+interface ResolveDataRootOptions {
+  startDir: string;
+  env: NodeJS.ProcessEnv;
+  /** Override the warning sink (used by tests). */
+  warn?: (msg: string) => void;
+}
+
+export function resolveDataRoot(opts: ResolveDataRootOptions): string {
+  const envValue = opts.env.DATA_ROOT;
+  if (envValue) return envValue;
+
+  const workspaceRoot = findWorkspaceRoot(opts.startDir);
+  if (workspaceRoot) return path.join(workspaceRoot, 'data');
+
+  const fallback = path.resolve(process.cwd(), '../../data');
+  const warn = opts.warn ?? ((msg) => process.stderr.write(msg + '\n'));
+  warn(
+    `[nova/shared] DATA_ROOT env var not set and no npm workspace root found ` +
+    `from ${opts.startDir}; falling back to ${fallback}. Set DATA_ROOT explicitly ` +
+    `to silence this warning.`,
+  );
+  return fallback;
+}
+
+/**
+ * Walk up from `startDir` looking for a `package.json` whose top-level
+ * declares a `workspaces` field. Returns the directory containing that
+ * file, or null if no such ancestor exists. Synchronous because this runs
+ * exactly once at module load — async would force every importer to await
+ * something they don't care about.
+ *
+ * Stops at the filesystem root to avoid infinite-looping on broken FS
+ * states or chroot-style environments.
+ */
+function findWorkspaceRoot(startDir: string): string | null {
+  let current = startDir;
+  while (true) {
+    const pkgPath = path.join(current, 'package.json');
+    try {
+      const raw = fs.readFileSync(pkgPath, 'utf8');
+      const pkg = JSON.parse(raw);
+      if (pkg && pkg.workspaces !== undefined) return current;
+    } catch {
+      // No package.json here, or unparseable — keep walking.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null; // reached FS root
+    current = parent;
+  }
+}
+
+export const DATA_ROOT: string = resolveDataRoot({
+  startDir: __dirname,
+  env: process.env,
+});
 
 export const KEY_ROOT: string = process.env.NOVA_KEY_DIR || path.join(DATA_ROOT, 'keys');
 
