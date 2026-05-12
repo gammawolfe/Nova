@@ -37,6 +37,15 @@ export interface GateResult {
   quarantineId?: string | undefined;
   ucanJwt?: string | undefined;
   senderDid?: string | undefined;
+  /**
+   * When the sender DID resolves to a registered Nova agent, surface
+   * the agent's tenantId/agentId so the ingress handler can route
+   * broker-mode replies without a second Redis hop. Populated only by
+   * the getAgentByDid branch of tier resolution; external (non-Nova)
+   * senders with explicit trust records leave these undefined.
+   */
+  senderTenantId?: string | undefined;
+  senderAgentId?: string | undefined;
   trustTier?: TrustTier | undefined;
   parsedTask?: unknown;
 }
@@ -121,6 +130,12 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     decision: 'accepted',
     ucanJwt: ucanJwt ?? undefined,
     senderDid: senderDid ?? undefined,
+    ...(tier.value.senderAgent
+      ? {
+          senderTenantId: tier.value.senderAgent.tenantId,
+          senderAgentId: tier.value.senderAgent.agentId,
+        }
+      : {}),
     trustTier: tier.value.tier,
     parsedTask: schema.value,
   });
@@ -505,6 +520,13 @@ const DID_SAFE_PATTERN = /^did:[a-z]+:[a-zA-Z0-9._-]+$/;
 interface TierResolutionResult {
   tier: TrustTier;
   actorRecord: ActorRecord | null;
+  /**
+   * Populated when tier resolution went through the getAgentByDid
+   * branch (sender is a registered Nova agent). Lets the ingress
+   * handler route broker-mode replies without re-running the same
+   * Redis lookup.
+   */
+  senderAgent?: { tenantId: string; agentId: string };
 }
 
 /**
@@ -570,6 +592,7 @@ async function resolveTrustTier(tenantCtx: TenantContext, did: string | null): P
           addedBy: 'auto',
           notes: 'Default tier-1 for active Nova-registered agent (no explicit trust record).',
         },
+        senderAgent: { tenantId: agent.tenantId, agentId: agent.agentId },
       };
     }
   } catch {
