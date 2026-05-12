@@ -8,12 +8,13 @@ import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova
 import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent, reclaimAll, recoverOrphansAll } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
+import { deliverReply } from '@nova/task-queue/src/reply-delivery';
+import { replyMetricOutcome } from './reply-metric';
 import { BROKER_RECLAIM_INTERVAL_MS } from '@nova/shared/src/broker-config';
-import { getAgentMeta } from '@nova/shared/src/agent-index';
 import { timedCheck, healthHandler } from '@nova/shared/src/health';
 import { metricsHandler } from '@nova/shared/src/metrics';
 import { getSharedRedis } from '@nova/shared/src/redis';
-import { deliverToOperator, deliverToReplyTo } from './delivery';
+import { deliverToOperator } from './delivery';
 import { getOperatorUrl } from './config';
 import { connectorRegistry, deliveryOutcomes } from './metrics';
 import { requiresConfirmation, createConfirmRequest, checkConfirmation, findPendingConfirmByTaskId } from './confirmation';
@@ -214,77 +215,17 @@ async function processTask(job: Job, ctx: TenantContext): Promise<void> {
 
   logger.info({ taskId: task.taskId }, 'Task completed successfully');
 
-  // Deliver result. Branches on replyTo presence:
-  //   1. replyTo URL set      → POST to URL (existing webhook behavior)
-  //   2. senderAgentId known  → enqueue to sender's broker reply inbox
-  //   3. neither              → log only (ingress should have rejected)
-  if (task.replyTo) {
-    const replyResult = await deliverToReplyTo(task.replyTo, delivery.taskResult);
-    if (!replyResult.success) {
-      deliveryOutcomes.inc({ target: 'replyTo', outcome: 'transient_failure' });
-      logger.warn({ taskId: task.taskId, error: replyResult.error }, 'replyTo delivery failed');
-      await auditLog(taskCtx, {
-        event: 'delivery_transient_failure',
-        taskId: task.taskId,
-        metadata: { url: task.replyTo, error: replyResult.error },
-      });
-    } else {
-      deliveryOutcomes.inc({ target: 'replyTo', outcome: 'success' });
-      await auditLog(taskCtx, { event: 'delivery_success', taskId: task.taskId });
-      await auditLog(taskCtx, { event: 'reply_delivered', taskId: task.taskId, metadata: { target: 'webhook' } });
-    }
-  } else if (task.senderTenantId && task.senderAgentId) {
-    const senderCtx = { tenantId: task.senderTenantId, agentId: task.senderAgentId };
-    const senderMeta = await getAgentMeta(getSharedRedis(), senderCtx.agentId);
-    if (!senderMeta || senderMeta.status !== 'active') {
-      await writeDeadLetter(senderCtx, {
-        taskId: task.taskId,
-        targetUrl: 'broker-reply',
-        taskResult: delivery.taskResult,
-        failureReason: 'reply_sender_inactive',
-        httpStatus: 0,
-        attemptCount: 1,
-      });
-      await auditLog(taskCtx, {
-        event: 'reply_sender_inactive',
-        taskId: task.taskId,
-        metadata: {
-          senderTenantId: senderCtx.tenantId,
-          senderAgentId: senderCtx.agentId,
-          senderStatus: senderMeta?.status ?? 'missing',
-        },
-      });
-      deliveryOutcomes.inc({ target: 'replyTo', outcome: 'permanent_failure' });
-      logger.warn(
-        { taskId: task.taskId, senderAgentId: senderCtx.agentId },
-        'Webhook delivery: sender inactive; result written to dead-letter',
-      );
-    } else {
-      try {
-        await replyInbox.enqueueReply(senderCtx, task.taskId, delivery.taskResult);
-        deliveryOutcomes.inc({ target: 'replyTo', outcome: 'success' });
-        await auditLog(taskCtx, {
-          event: 'reply_broker_queued',
-          taskId: task.taskId,
-          metadata: {
-            senderTenantId: senderCtx.tenantId,
-            senderAgentId: senderCtx.agentId,
-          },
-        });
-      } catch (enqErr: any) {
-        deliveryOutcomes.inc({ target: 'replyTo', outcome: 'transient_failure' });
-        logger.error(
-          { err: enqErr.message, taskId: task.taskId, senderAgentId: senderCtx.agentId },
-          'Webhook delivery: reply-inbox enqueue failed',
-        );
-      }
-    }
-  } else {
-    logger.warn(
-      { taskId: task.taskId },
-      'Webhook delivery: neither replyTo nor senderAgentId — ingress should have rejected',
-    );
-  }
+  // Route the recipient's TaskResult back to the original sender. The matrix
+  // (replyTo webhook / sender broker inbox / no target) and its failure-mode
+  // DLQ handling are owned by deliverReply — same call shape a2a-server uses
+  // for synchronous responses (PR #79). Outcome → metric mapping below.
+  const outcome = await deliverReply(task.taskId, delivery.taskResult, {
+    ...(task.replyTo ? { replyTo: task.replyTo } : {}),
+    ...(task.senderTenantId ? { senderTenantId: task.senderTenantId } : {}),
+    ...(task.senderAgentId ? { senderAgentId: task.senderAgentId } : {}),
+    recipientCtx: taskCtx,
+  });
+  deliveryOutcomes.inc({ target: 'replyTo', outcome: replyMetricOutcome(outcome) });
 
   await publishLifecycle('completed');
 }
