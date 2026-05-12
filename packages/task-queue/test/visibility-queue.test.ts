@@ -12,7 +12,7 @@
 // covered separately as part of the consumer-specific test files where
 // those callbacks live.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // vi.hoisted: pin redis stub + dead-letter spy ahead of imports.
 const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
@@ -25,9 +25,31 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
     sets: new Map<string, Set<string>>(),
     hashes: new Map<string, Map<string, string>>(),
     counters: new Map<string, number>(),
+    /** Raw key-value store for SET/GET/EXISTS (heartbeat keys). */
+    keys: new Map<string, string>(),
     publishes: [] as Array<{ channel: string; payload: string }>,
     expires: [] as Array<{ key: string; ttl: number }>,
   };
+
+  function lpopHead(arr: string[]): string | null {
+    return arr.length === 0 ? null : arr.shift()!;
+  }
+  function lpopTail(arr: string[]): string | null {
+    return arr.length === 0 ? null : arr.pop()!;
+  }
+  function lpushHead(arr: string[], v: string): void { arr.unshift(v); }
+  function lpushTail(arr: string[], v: string): void { arr.push(v); }
+
+  function lmoveImpl(src: string, dst: string, srcDir: string, dstDir: string): string | null {
+    const srcArr = state.lists.get(src) ?? [];
+    const v = srcDir === 'LEFT' ? lpopHead(srcArr) : lpopTail(srcArr);
+    if (v === null) return null;
+    state.lists.set(src, srcArr);
+    const dstArr = state.lists.get(dst) ?? [];
+    if (dstDir === 'LEFT') lpushHead(dstArr, v); else lpushTail(dstArr, v);
+    state.lists.set(dst, dstArr);
+    return v;
+  }
 
   // A chainable pipeline emulation. Each operation captures a thunk
   // that returns its per-op result (matches ioredis exec() return shape:
@@ -128,6 +150,25 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
         });
         return self;
       },
+      lrem(key: string, count: number, value: string) {
+        ops.push(() => {
+          const arr = state.lists.get(key) ?? [];
+          let removed = 0;
+          const target = Math.abs(count) || arr.length;
+          const result: string[] = [];
+          const iter = count >= 0 ? arr : [...arr].reverse();
+          for (const v of iter) {
+            if (v === value && removed < target) {
+              removed += 1;
+            } else {
+              result.push(v);
+            }
+          }
+          state.lists.set(key, count >= 0 ? result : result.reverse());
+          return removed;
+        });
+        return self;
+      },
       async exec() {
         return ops.map(op => [null, op()]);
       },
@@ -163,6 +204,56 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
       // BLPOP pops from the tail of an LPUSH'd list.
       const v = arr.pop()!;
       return [key, v];
+    },
+    async blmove(src: string, dst: string, srcDir: string, dstDir: string, _waitSec: number) {
+      return lmoveImpl(src, dst, srcDir, dstDir);
+    },
+    async lmove(src: string, dst: string, srcDir: string, dstDir: string) {
+      return lmoveImpl(src, dst, srcDir, dstDir);
+    },
+    async lrem(key: string, count: number, value: string) {
+      const arr = state.lists.get(key) ?? [];
+      let removed = 0;
+      const target = Math.abs(count) || arr.length;
+      const result: string[] = [];
+      const iter = count >= 0 ? arr : [...arr].reverse();
+      for (const v of iter) {
+        if (v === value && removed < target) {
+          removed += 1;
+        } else {
+          result.push(v);
+        }
+      }
+      state.lists.set(key, count >= 0 ? result : result.reverse());
+      return removed;
+    },
+    async set(key: string, value: string, ..._args: any[]) {
+      state.keys.set(key, value);
+      return 'OK';
+    },
+    async exists(key: string) {
+      return state.keys.has(key) || state.lists.has(key) || state.sortedSets.has(key) || state.sets.has(key) || state.hashes.has(key) ? 1 : 0;
+    },
+    async sadd(key: string, member: string) {
+      const s = state.sets.get(key) ?? new Set();
+      const added = s.has(member) ? 0 : 1;
+      s.add(member);
+      state.sets.set(key, s);
+      return added;
+    },
+    async srem(key: string, member: string) {
+      const s = state.sets.get(key);
+      if (!s) return 0;
+      return s.delete(member) ? 1 : 0;
+    },
+    async del(key: string) {
+      let removed = 0;
+      if (state.keys.delete(key)) removed++;
+      if (state.lists.delete(key)) removed++;
+      if (state.sortedSets.delete(key)) removed++;
+      if (state.sets.delete(key)) removed++;
+      if (state.hashes.delete(key)) removed++;
+      return removed > 0 ? 1 : 0;
     },
     async zadd(key: string, score: number, member: string) {
       const arr = state.sortedSets.get(key) ?? [];
@@ -228,7 +319,7 @@ vi.mock('../src/dead-letter', () => ({
   }),
 }));
 
-import { VisibilityQueue, KeyBuilder } from '../src/visibility-queue';
+import { VisibilityQueue, KeyBuilder, stopHeartbeat, currentProcessId } from '../src/visibility-queue';
 
 // ── Test-only inbox-style consumer ──────────────────────────────────────────
 
@@ -302,13 +393,33 @@ beforeEach(() => {
   redisStub.state.sets.clear();
   redisStub.state.hashes.clear();
   redisStub.state.counters.clear();
+  redisStub.state.keys.clear();
   redisStub.state.publishes.length = 0;
   redisStub.state.expires.length = 0;
   dlqWrites.length = 0;
 });
 
+afterEach(async () => {
+  // Each test that calls pull() starts the heartbeat interval; stop
+  // it between tests so we don't leak timers (unref'd, but cleaner
+  // teardown for the watcher).
+  await stopHeartbeat();
+});
+
 function inflightHashKeyFor(c: { tenantId: string; agentId: string }) {
   return `${keys.inflight(c)}:by-id`;
+}
+
+function holdingListKeyFor(c: { tenantId: string; agentId: string }, processId: string) {
+  return `${keys.list(c)}:holding:${processId}`;
+}
+
+function processorsKeyFor(c: { tenantId: string; agentId: string }) {
+  return `${keys.inflight(c)}:processors`;
+}
+
+function heartbeatKeyFor(processId: string) {
+  return `nova:vq-heartbeat:${processId}`;
 }
 
 describe('VisibilityQueue.enqueue', () => {
@@ -590,5 +701,149 @@ describe('VisibilityQueue.reclaimAll chunking', () => {
     const r = await q.reclaimAll();
     expect(r.redelivered).toBe(N);
     expect(r.deadLettered).toBe(0);
+  });
+});
+
+describe('VisibilityQueue crash-safety (BLMOVE + orphan sweep)', () => {
+  it('pull writes the heartbeat key and registers the process before claiming', async () => {
+    const q = makeQueue();
+    await q.enqueue(ctx, 'x', { taskId: 'x', payload: 'p' });
+    await q.pull(ctx, 0);
+
+    const me = currentProcessId();
+    // Heartbeat key was written.
+    expect(redisStub.state.keys.has(heartbeatKeyFor(me))).toBe(true);
+    // Process is registered in the per-(tenant, agent) processor set.
+    expect(redisStub.state.sets.get(processorsKeyFor(ctx))?.has(me)).toBe(true);
+    // Holding list is empty on a successful pull — entry promoted to inflight.
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, me))?.length ?? 0).toBe(0);
+  });
+
+  it('drops malformed payloads from the holding list (does not orphan them)', async () => {
+    const q = makeQueue();
+    // Inject a malformed entry directly onto the queue.
+    redisStub.state.lists.set(keys.list(ctx), ['{not json']);
+    const r = await q.pull(ctx, 0);
+    expect(r).toBeNull();
+
+    const me = currentProcessId();
+    // The malformed payload was BLMOVE'd into the holding list, then
+    // LREM'd by the explicit drop. Holding list ends empty so the
+    // orphan sweep won't re-try it.
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, me))?.length ?? 0).toBe(0);
+  });
+
+  it('orphan sweep is a no-op while a process heartbeat is live', async () => {
+    const q = makeQueue();
+    // Simulate a "foreign" live process: it has an entry in its holding
+    // list and a fresh heartbeat key.
+    const otherId = 'other-alive';
+    const payload = JSON.stringify({ taskId: 'fp', payload: { taskId: 'fp', payload: 'p' }, reclaimCount: 0, seq: 1 });
+    redisStub.state.lists.set(holdingListKeyFor(ctx, otherId), [payload]);
+    redisStub.state.sets.set(processorsKeyFor(ctx), new Set([otherId]));
+    redisStub.state.keys.set(heartbeatKeyFor(otherId), '1');
+    // Participant set so reclaimAll/recoverOrphansAll picks ctx up.
+    redisStub.state.sets.set('test:participants', new Set(['t1:a1']));
+
+    const r = await q.recoverOrphans(ctx);
+    expect(r.recovered).toBe(0);
+    expect(r.dropped).toBe(0);
+    // Holding list untouched; queue did not gain the entry.
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, otherId))?.length).toBe(1);
+    expect(redisStub.state.lists.get(keys.list(ctx))?.length ?? 0).toBe(0);
+  });
+
+  it('orphan sweep recovers entries from a dead-process holding list', async () => {
+    const q = makeQueue();
+    const deadId = 'dead-process';
+    const payload = JSON.stringify({ taskId: 'lost', payload: { taskId: 'lost', payload: 'p' }, reclaimCount: 0, seq: 1 });
+    redisStub.state.lists.set(holdingListKeyFor(ctx, deadId), [payload]);
+    redisStub.state.sets.set(processorsKeyFor(ctx), new Set([deadId]));
+    // No heartbeat key for deadId → sweep treats it as dead.
+
+    const r = await q.recoverOrphans(ctx);
+    expect(r.recovered).toBe(1);
+    expect(r.dropped).toBe(0);
+    // Holding list deleted; processor deregistered.
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, deadId))).toBeUndefined();
+    expect(redisStub.state.sets.get(processorsKeyFor(ctx))?.has(deadId) ?? false).toBe(false);
+    // Entry pushed back to the queue, ready for a fresh pull().
+    expect(redisStub.state.lists.get(keys.list(ctx))?.length).toBe(1);
+    expect(redisStub.state.lists.get(keys.list(ctx))![0]).toBe(payload);
+  });
+
+  it('orphan sweep counts but tolerates malformed entries in a dead-process holding list', async () => {
+    const q = makeQueue();
+    const deadId = 'dead-corrupt';
+    redisStub.state.lists.set(holdingListKeyFor(ctx, deadId), ['{garbage']);
+    redisStub.state.sets.set(processorsKeyFor(ctx), new Set([deadId]));
+
+    const r = await q.recoverOrphans(ctx);
+    expect(r.recovered).toBe(0);
+    expect(r.dropped).toBe(1);
+    // The entry still landed on the queue — a subsequent pull will
+    // drop it via the malformed-entry path. We don't try to filter
+    // here because the sweep can't safely parse-and-discard without
+    // owning the visibility model.
+    expect(redisStub.state.lists.get(keys.list(ctx))?.length).toBe(1);
+  });
+
+  it('never sweeps its own holding list', async () => {
+    const q = makeQueue();
+    // Trigger heartbeat init via a pull.
+    await q.enqueue(ctx, 'x', { taskId: 'x', payload: 'p' });
+    await q.pull(ctx, 0);
+
+    const me = currentProcessId();
+    // Plant a (fictional) orphan in our OWN holding list as if we'd
+    // crashed and restarted with the same PROCESS_ID. The sweep must
+    // still skip it — only crashed-with-no-heartbeat owners are fair
+    // game, and our heartbeat is live.
+    const payload = JSON.stringify({ taskId: 'mine', payload: { taskId: 'mine', payload: 'p' }, reclaimCount: 0, seq: 1 });
+    redisStub.state.lists.set(holdingListKeyFor(ctx, me), [payload]);
+
+    const r = await q.recoverOrphans(ctx);
+    expect(r.recovered).toBe(0);
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, me))?.length).toBe(1);
+  });
+
+  it('recoverOrphansAll chunks across many participants', async () => {
+    const q = makeQueue();
+    // 20 dead-process orphans across 20 participants → crosses the
+    // RECLAIM_ALL_CHUNK boundary (16) and exercises the parallel sweep.
+    const N = 20;
+    const deadId = 'dead-many';
+    for (let i = 0; i < N; i++) {
+      const c = { tenantId: `t${i}`, agentId: `a${i}` };
+      const payload = JSON.stringify({ taskId: `lost-${i}`, payload: { taskId: `lost-${i}`, payload: 'p' }, reclaimCount: 0, seq: 1 });
+      redisStub.state.lists.set(holdingListKeyFor(c, deadId), [payload]);
+      redisStub.state.sets.set(processorsKeyFor(c), new Set([deadId]));
+      const ps = redisStub.state.sets.get('test:participants') ?? new Set();
+      ps.add(`${c.tenantId}:${c.agentId}`);
+      redisStub.state.sets.set('test:participants', ps);
+    }
+
+    const r = await q.recoverOrphansAll();
+    expect(r.recovered).toBe(N);
+    expect(r.dropped).toBe(0);
+  });
+
+  it('forget cleans up holding lists and the processor registry', async () => {
+    const q = makeQueue();
+    await q.enqueue(ctx, 'x', { taskId: 'x', payload: 'p' });
+    await q.pull(ctx, 0);
+
+    // Plant a foreign-process holding list for the same ctx.
+    const foreignId = 'foreigner';
+    redisStub.state.lists.set(holdingListKeyFor(ctx, foreignId), ['{}']);
+    const procs = redisStub.state.sets.get(processorsKeyFor(ctx)) ?? new Set();
+    procs.add(foreignId);
+    redisStub.state.sets.set(processorsKeyFor(ctx), procs);
+
+    await q.forget(ctx);
+
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, currentProcessId()))).toBeUndefined();
+    expect(redisStub.state.lists.get(holdingListKeyFor(ctx, foreignId))).toBeUndefined();
+    expect(redisStub.state.sets.get(processorsKeyFor(ctx))).toBeUndefined();
   });
 });

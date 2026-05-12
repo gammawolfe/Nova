@@ -249,6 +249,15 @@ export async function reclaimAllReplies(): Promise<{ redelivered: number; deadLe
   return queue.reclaimAll();
 }
 
+/**
+ * Sweep crashed-process orphans across every reply-inbox agent.
+ * Mirrors `recoverOrphansAll` in inbox.ts but for the reply-inbox
+ * queue. Called by agent-connector's reclaim worker.
+ */
+export async function recoverOrphansAllReplies(): Promise<{ recovered: number; dropped: number }> {
+  return queue.recoverOrphansAll();
+}
+
 /** Remove all reply-inbox state for an agent (called on deregistration). */
 export async function forgetBrokerReplyAgent(ctx: TenantContext): Promise<void> {
   return queue.forget(ctx);

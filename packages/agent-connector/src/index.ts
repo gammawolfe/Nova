@@ -5,7 +5,7 @@ import { auditLog, startAuditLogConsumer } from '@nova/shared/src/audit';
 import { TenantContext, DATA_ROOT } from '@nova/shared/src/tenant';
 import { QueuedTask } from '@nova/shared/src/types';
 import { TASK_LIFECYCLE_CHANNEL, getAgentByDid, TaskLifecycleEvent } from '@nova/shared/src/agent-index';
-import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent, reclaimAll } from '@nova/task-queue/src/index';
+import { updateTaskStatus, publishTaskEvent, enqueue as inboxEnqueue, isBrokerAgent, reclaimAll, recoverOrphansAll } from '@nova/task-queue/src/index';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { BROKER_RECLAIM_INTERVAL_MS } from '@nova/shared/src/broker-config';
@@ -316,9 +316,17 @@ let reclaimTimer: NodeJS.Timeout | null = null;
 
 async function reclaimTick(): Promise<void> {
   try {
-    const [taskSweep, replySweep] = await Promise.all([
+    // Two concerns, same cadence:
+    //  - reclaimAll: redeliver in-flight entries whose visibility
+    //    timeout expired (recipient stopped responding mid-task).
+    //  - recoverOrphansAll: redeliver entries left in per-process
+    //    holding lists by processes whose heartbeat has expired
+    //    (the pull side crashed between BLMOVE and the claim MULTI).
+    const [taskSweep, replySweep, taskOrphans, replyOrphans] = await Promise.all([
       reclaimAll(),
       replyInbox.reclaimAllReplies(),
+      recoverOrphansAll(),
+      replyInbox.recoverOrphansAllReplies(),
     ]);
     if (taskSweep.redelivered > 0 || taskSweep.deadLettered > 0) {
       logger.info(
@@ -330,6 +338,18 @@ async function reclaimTick(): Promise<void> {
       logger.info(
         { redelivered: replySweep.redelivered, deadLettered: replySweep.deadLettered },
         'Broker reply reclaim tick',
+      );
+    }
+    if (taskOrphans.recovered > 0 || taskOrphans.dropped > 0) {
+      logger.info(
+        { recovered: taskOrphans.recovered, dropped: taskOrphans.dropped },
+        'Broker task orphan sweep',
+      );
+    }
+    if (replyOrphans.recovered > 0 || replyOrphans.dropped > 0) {
+      logger.info(
+        { recovered: replyOrphans.recovered, dropped: replyOrphans.dropped },
+        'Broker reply orphan sweep',
       );
     }
   } catch (err: any) {

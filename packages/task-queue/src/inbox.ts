@@ -201,6 +201,16 @@ export async function reclaimAll(): Promise<{ redelivered: number; deadLettered:
   return queue.reclaimAll();
 }
 
+/**
+ * Sweep crashed-process orphans across every broker-mode agent. Moves
+ * any entries left in dead processes' holding lists back onto the
+ * agent's inbox so a live consumer can pull them. Called on the same
+ * interval as reclaimAll by agent-connector's reclaim worker.
+ */
+export async function recoverOrphansAll(): Promise<{ recovered: number; dropped: number }> {
+  return queue.recoverOrphansAll();
+}
+
 // ── Broker-mode detection (cached) ─────────────────────────────────────────
 //
 // `isBrokerAgent` runs on the hot path: agent-connector's processTask
