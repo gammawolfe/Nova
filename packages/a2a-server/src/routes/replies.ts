@@ -21,7 +21,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import { BROKER_MAX_WAIT_MS } from '@nova/shared/src/broker-config';
-import { redis } from '@nova/task-queue/src/index';
+import { getSharedRedis } from '@nova/shared/src/redis';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { authSelfUcan } from '../auth/self-ucan';
 import { activeSseStreams } from '../metrics';
@@ -147,7 +147,7 @@ repliesRouter.get('/:agentId/replies/stream', async (req: Request, res: Response
   }, REPLY_HEARTBEAT_INTERVAL_MS);
 
   try {
-    sub = redis.duplicate();
+    sub = getSharedRedis().duplicate();
     await sub.subscribe(channel);
   } catch (err: any) {
     logger.error({ err: err.message, ctx }, 'Failed to subscribe to reply-inbox notify channel');

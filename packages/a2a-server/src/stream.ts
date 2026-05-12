@@ -3,7 +3,10 @@ import { Router, Request, Response } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { redisKey } from '@nova/shared/src/tenant';
 import { TERMINAL_STATUSES } from '@nova/shared/src/types';
-import { redis, getTaskState } from '@nova/task-queue/src/index';
+import { getTaskState } from '@nova/task-queue/src/index';
+import { getSharedRedis } from '@nova/shared/src/redis';
+
+const redis = getSharedRedis();
 import { activeSseStreams } from './metrics';
 import { registerSseCleanup } from './sse-registry';
 

@@ -6,7 +6,7 @@ import path from 'path';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import { executeGatePipeline, GateContext } from '@nova/gate-service';
-import { enqueueWithIdempotency, setTaskState, getTaskState, redis } from '@nova/task-queue/src/index';
+import { enqueueWithIdempotency, setTaskState, getTaskState } from '@nova/task-queue/src/index';
 import { QueuedTask, TaskState } from '@nova/shared/src/types';
 import { AgentCardSchema } from '@nova/shared/src/schemas';
 import { tenantDataPath, redisKey, DATA_ROOT, KEY_ROOT } from '@nova/shared/src/tenant';
@@ -61,7 +61,7 @@ app.use(express.json({ limit: '64kb' }));
 app.get('/health', healthHandler('a2a-server', startTime, async () => {
   const [redisCheck, keys] = await Promise.all([
     timedCheck(async () => {
-      const pong = await redis.ping();
+      const pong = await getSharedRedis().ping();
       if (pong !== 'PONG') throw new Error('Redis ping failed');
     }),
     timedCheck(async () => {
@@ -208,7 +208,7 @@ agentRouter.post('/tasks', async (req, res) => {
     const senderKey = redisKey(ctx, 'rate', 'sender', senderIp);
     const globalKey = redisKey(ctx, 'rate', 'global');
 
-    const pipe = redis.pipeline();
+    const pipe = getSharedRedis().pipeline();
     pipe.incr(senderKey);
     pipe.expire(senderKey, 60);
     pipe.incr(globalKey);
