@@ -16,16 +16,13 @@
 // handlers must be declared before `/:taskId` so Express matches them
 // exactly instead of interpreting the path as a taskId parameter.
 
-import IORedis from 'ioredis';
 import { Router, Request, Response, NextFunction } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { auditLog } from '@nova/shared/src/audit';
 import { BROKER_MAX_WAIT_MS } from '@nova/shared/src/broker-config';
-import { getSharedRedis } from '@nova/shared/src/redis';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { authSelfUcan } from '../auth/self-ucan';
-import { activeSseStreams } from '../metrics';
-import { registerSseCleanup } from '../sse-registry';
+import { createSseHandler } from '../sse-handler';
 
 export const repliesRouter = Router({ mergeParams: true });
 
@@ -80,136 +77,47 @@ repliesRouter.get('/:agentId/replies/peek', async (req: Request, res: Response, 
 
 // ── GET /agents/:agentId/replies/stream — SSE notifications ─────────────────
 //
-// Subscribe-first-then-snapshot pattern with seq-based dedup, identical to
-// the inbox stream. Last-Event-ID resume skips already-delivered
-// notifications. See docs/superpowers/specs/2026-04-22-mcp-push-subscriptions.md
-// §"The resume gap".
+// Symmetric to inbox/stream — same factory, different channel + replay
+// source. See sse-handler.ts for the resume-gap pattern (subscribe first,
+// replay, drain buffered).
 
-const REPLY_HEARTBEAT_INTERVAL_MS = 15_000;
-
-function writeSSE(
-  res: Response,
-  event: { id?: number | undefined; type: string; data: unknown },
-): void {
-  if (event.id !== undefined) res.write(`id: ${event.id}\n`);
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event.data)}\n\n`);
-  if (typeof (res as any).flush === 'function') (res as any).flush();
-}
-
-repliesRouter.get('/:agentId/replies/stream', async (req: Request, res: Response) => {
-  const paramAgentId = req.params['agentId'];
-  if (!paramAgentId) return void res.status(400).json({ error: 'AGENT_ID_REQUIRED' });
-
-  const ctx = await authSelfUcan(req, res, paramAgentId);
-  if (!ctx) return;
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders();
-
-  const lastEventId = parseInt((req.headers['last-event-id'] as string) ?? '0', 10) || 0;
-  const channel = replyInbox.replyInboxNotifyChannel(ctx);
-
-  let cleaned = false;
-  let sub: IORedis | null = null;
-  activeSseStreams.inc();
-
-  const replayedSeqs = new Set<number>();
-  let replayDone = false;
-  const buffered: string[] = [];
-
-  function cleanup(): void {
-    if (cleaned) return;
-    cleaned = true;
-    activeSseStreams.dec();
-    clearInterval(heartbeat);
-    unregister();
-    if (sub) {
-      sub.unsubscribe().catch(() => {});
-      sub.quit().catch(() => {});
-      sub = null;
-    }
-  }
-
-  // H1 — register cleanup with the global SSE registry so graceful shutdown
-  // tears down reply subscribers along with task-stream + inbox subscribers.
-  const unregister = registerSseCleanup(cleanup);
-
-  const heartbeat = setInterval(() => {
-    try {
-      writeSSE(res, { type: 'heartbeat', data: { at: new Date().toISOString() } });
-    } catch {
-      cleanup();
-    }
-  }, REPLY_HEARTBEAT_INTERVAL_MS);
-
-  try {
-    sub = getSharedRedis().duplicate();
-    await sub.subscribe(channel);
-  } catch (err: any) {
-    logger.error({ err: err.message, ctx }, 'Failed to subscribe to reply-inbox notify channel');
-    cleanup();
-    return void res.end();
-  }
-
-  sub.on('message', (_channel, message) => {
-    if (!replayDone) {
-      buffered.push(message);
-      return;
-    }
-    try {
-      const note = JSON.parse(message) as replyInbox.ReplyInboxNotification;
-      if (replayedSeqs.has(note.seq)) return;
-      if (note.seq <= lastEventId) return;
-      writeSSE(res, { id: note.seq, type: 'enqueued', data: note });
-    } catch (err: any) {
-      logger.warn({ err: err.message, ctx }, 'Malformed reply-inbox-notify message');
-    }
-  });
-
-  sub.on('error', (err) => {
-    logger.error({ err: err.message, ctx }, 'Reply SSE subscriber error');
-    cleanup();
-    res.end();
-  });
-
-  req.on('close', () => cleanup());
-
-  // Snapshot replay. listReplies returns newest-first (LPUSH head); emit
-  // oldest-first so SSE id values are monotonically increasing.
-  try {
-    const entries = await replyInbox.listReplies(ctx);
+const repliesStreamHandler = createSseHandler({
+  logTag: 'reply-stream',
+  channel: (req: Request) => replyInbox.replyInboxNotifyChannel(req.ctx),
+  async *replay(req) {
+    const entries = await replyInbox.listReplies(req.ctx);
     entries.reverse();
     for (const entry of entries) {
       if (typeof entry.seq !== 'number') continue;
-      if (entry.seq <= lastEventId) continue;
       const note: replyInbox.ReplyInboxNotification = {
         seq: entry.seq,
         taskId: entry.taskId,
         enqueuedAt: entry.result.completedAt ?? new Date().toISOString(),
       };
-      writeSSE(res, { id: entry.seq, type: 'enqueued', data: note });
-      replayedSeqs.add(entry.seq);
+      yield { id: entry.seq, type: 'enqueued', data: note };
     }
-  } catch (err: any) {
-    logger.warn({ err: err.message, ctx }, 'Reply SSE replay failed');
-  }
-
-  replayDone = true;
-  for (const message of buffered) {
+  },
+  parseLive(raw) {
     try {
-      const note = JSON.parse(message) as replyInbox.ReplyInboxNotification;
-      if (replayedSeqs.has(note.seq)) continue;
-      if (note.seq <= lastEventId) continue;
-      writeSSE(res, { id: note.seq, type: 'enqueued', data: note });
+      const note = JSON.parse(raw) as replyInbox.ReplyInboxNotification;
+      return { id: note.seq, type: 'enqueued', data: note };
     } catch {
-      // tolerated — same as live-path parse failure
+      return null;
     }
+  },
+});
+
+repliesRouter.get('/:agentId/replies/stream', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const paramAgentId = req.params['agentId'];
+    if (!paramAgentId) return void res.status(400).json({ error: 'AGENT_ID_REQUIRED' });
+    const ctx = await authSelfUcan(req, res, paramAgentId);
+    if (!ctx) return;
+    req.ctx = ctx;
+    await repliesStreamHandler(req, res);
+  } catch (err) {
+    next(err);
   }
-  buffered.length = 0;
 });
 
 // ── GET /agents/:agentId/replies/:taskId — direct lookup by taskId ───────────
