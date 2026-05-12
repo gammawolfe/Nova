@@ -23,18 +23,22 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
     lists: new Map<string, string[]>(),         // LPUSH/BLPOP target
     sortedSets: new Map<string, SortedEntry[]>(),
     sets: new Map<string, Set<string>>(),
+    hashes: new Map<string, Map<string, string>>(),
     counters: new Map<string, number>(),
     publishes: [] as Array<{ channel: string; payload: string }>,
     expires: [] as Array<{ key: string; ttl: number }>,
   };
 
-  // A chainable pipeline emulation. Each operation captures itself; .exec()
-  // applies them in order.
+  // A chainable pipeline emulation. Each operation captures a thunk
+  // that returns its per-op result (matches ioredis exec() return shape:
+  // Array<[Error | null, unknown]>). multi() and pipeline() share the
+  // same builder — Redis-side atomicity doesn't show up in an in-memory
+  // stub.
   function pipelineBuilder(): any {
-    const ops: Array<() => void> = [];
+    const ops: Array<() => unknown> = [];
     const self: any = {
       expire(key: string, ttl: number) {
-        ops.push(() => { state.expires.push({ key, ttl }); });
+        ops.push(() => { state.expires.push({ key, ttl }); return 1; });
         return self;
       },
       lpush(key: string, value: string) {
@@ -42,46 +46,90 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
           const arr = state.lists.get(key) ?? [];
           arr.unshift(value);
           state.lists.set(key, arr);
+          return arr.length;
         });
         return self;
       },
       sadd(key: string, member: string) {
         ops.push(() => {
           const s = state.sets.get(key) ?? new Set();
+          const added = s.has(member) ? 0 : 1;
           s.add(member);
           state.sets.set(key, s);
+          return added;
         });
         return self;
       },
       srem(key: string, member: string) {
         ops.push(() => {
-          state.sets.get(key)?.delete(member);
+          const had = state.sets.get(key)?.delete(member);
+          return had ? 1 : 0;
         });
         return self;
       },
       del(key: string) {
         ops.push(() => {
-          state.lists.delete(key);
-          state.sortedSets.delete(key);
-          state.sets.delete(key);
-          state.counters.delete(key);
+          let removed = 0;
+          if (state.lists.delete(key)) removed++;
+          if (state.sortedSets.delete(key)) removed++;
+          if (state.sets.delete(key)) removed++;
+          if (state.hashes.delete(key)) removed++;
+          if (state.counters.delete(key)) removed++;
+          return removed > 0 ? 1 : 0;
         });
         return self;
       },
       publish(channel: string, payload: string) {
-        ops.push(() => { state.publishes.push({ channel, payload }); });
+        ops.push(() => { state.publishes.push({ channel, payload }); return 0; });
         return self;
       },
       setex(key: string, _ttl: number, value: string) {
         ops.push(() => {
           // Stored as a list-with-one-entry to keep the stub small.
           state.lists.set(key, [value]);
+          return 'OK';
+        });
+        return self;
+      },
+      zadd(key: string, score: number, member: string) {
+        ops.push(() => {
+          const arr = state.sortedSets.get(key) ?? [];
+          arr.push({ score, member });
+          state.sortedSets.set(key, arr);
+          return 1;
+        });
+        return self;
+      },
+      zrem(key: string, member: string) {
+        ops.push(() => {
+          const arr = state.sortedSets.get(key) ?? [];
+          const before = arr.length;
+          const filtered = arr.filter(e => e.member !== member);
+          state.sortedSets.set(key, filtered);
+          return before - filtered.length;
+        });
+        return self;
+      },
+      hset(key: string, field: string, value: string) {
+        ops.push(() => {
+          const h = state.hashes.get(key) ?? new Map();
+          const added = h.has(field) ? 0 : 1;
+          h.set(field, value);
+          state.hashes.set(key, h);
+          return added;
+        });
+        return self;
+      },
+      hdel(key: string, field: string) {
+        ops.push(() => {
+          const h = state.hashes.get(key);
+          if (!h) return 0;
+          return h.delete(field) ? 1 : 0;
         });
         return self;
       },
       async exec() {
-        for (const op of ops) op();
-        return [];
+        return ops.map(op => [null, op()]);
       },
     };
     return self;
@@ -140,7 +188,23 @@ const { redisStub, fakeRedis, dlqWrites } = vi.hoisted(() => {
     async smembers(key: string) {
       return Array.from(state.sets.get(key) ?? []);
     },
+    async hget(key: string, field: string) {
+      return state.hashes.get(key)?.get(field) ?? null;
+    },
+    async hset(key: string, field: string, value: string) {
+      const h = state.hashes.get(key) ?? new Map();
+      const added = h.has(field) ? 0 : 1;
+      h.set(field, value);
+      state.hashes.set(key, h);
+      return added;
+    },
+    async hdel(key: string, field: string) {
+      const h = state.hashes.get(key);
+      if (!h) return 0;
+      return h.delete(field) ? 1 : 0;
+    },
     pipeline() { return pipelineBuilder(); },
+    multi() { return pipelineBuilder(); },
   };
 
   const dlqWrites: Array<unknown> = [];
@@ -236,11 +300,16 @@ beforeEach(() => {
   redisStub.state.lists.clear();
   redisStub.state.sortedSets.clear();
   redisStub.state.sets.clear();
+  redisStub.state.hashes.clear();
   redisStub.state.counters.clear();
   redisStub.state.publishes.length = 0;
   redisStub.state.expires.length = 0;
   dlqWrites.length = 0;
 });
+
+function inflightHashKeyFor(c: { tenantId: string; agentId: string }) {
+  return `${keys.inflight(c)}:by-id`;
+}
 
 describe('VisibilityQueue.enqueue', () => {
   it('writes the entry to the list and publishes a notification', async () => {
@@ -300,6 +369,20 @@ describe('VisibilityQueue.pull', () => {
     expect(redisStub.state.lists.get(keys.list(ctx))?.length).toBe(1);
     expect(redisStub.state.sortedSets.get(keys.inflight(ctx))?.length).toBe(1);
     expect(r!.visibleUntil).toBeInstanceOf(Date);
+  });
+
+  it('populates the by-id hash atomically with the inflight zset', async () => {
+    const q = makeQueue();
+    await q.enqueue(ctx, 'tid', { taskId: 'tid', payload: 'p' });
+    await q.pull(ctx, 0);
+
+    const hashEntry = redisStub.state.hashes.get(inflightHashKeyFor(ctx))?.get('tid');
+    expect(hashEntry).toBeDefined();
+
+    const zsetEntry = redisStub.state.sortedSets.get(keys.inflight(ctx))![0]!.member;
+    // Both structures hold the identical serialised entry so respond()'s
+    // ZREM-by-raw-payload always matches the HGET-derived raw payload.
+    expect(hashEntry).toBe(zsetEntry);
   });
 
   it('preserves reclaimCount and seq when claiming', async () => {
@@ -371,12 +454,35 @@ describe('VisibilityQueue.respond + peekInflight', () => {
     const outcome = await q.respond(ctx, 'x');
     expect(outcome).toBe('accepted');
     expect(redisStub.state.sortedSets.get(keys.inflight(ctx))?.length).toBe(0);
+    // Hash entry is removed in the same MULTI as the zset entry.
+    expect(redisStub.state.hashes.get(inflightHashKeyFor(ctx))?.has('x') ?? false).toBe(false);
   });
 
   it('returns task_not_found when the taskId is not in-flight', async () => {
     const q = makeQueue();
     const outcome = await q.respond(ctx, 'never-existed');
     expect(outcome).toBe('task_not_found');
+  });
+
+  it('respond falls back to zset scan for pre-deploy entries missing from the hash', async () => {
+    const q = makeQueue();
+    // Simulate a pre-hash deploy: entry lives in the zset only.
+    const raw = JSON.stringify({ taskId: 'legacy', payload: { taskId: 'legacy', payload: 'p' }, reclaimCount: 0, seq: 1 });
+    redisStub.state.sortedSets.set(keys.inflight(ctx), [{ score: Date.now() + 60_000, member: raw }]);
+
+    const outcome = await q.respond(ctx, 'legacy');
+    expect(outcome).toBe('accepted');
+    expect(redisStub.state.sortedSets.get(keys.inflight(ctx))?.length).toBe(0);
+  });
+
+  it('peekInflight falls back to zset scan for pre-deploy entries missing from the hash', async () => {
+    const q = makeQueue();
+    const raw = JSON.stringify({ taskId: 'legacy', payload: { taskId: 'legacy', payload: 'p' }, reclaimCount: 0, seq: 1 });
+    redisStub.state.sortedSets.set(keys.inflight(ctx), [{ score: Date.now() + 60_000, member: raw }]);
+
+    const peeked = await q.peekInflight(ctx, 'legacy');
+    expect(peeked).not.toBeNull();
+    expect(peeked!.taskId).toBe('legacy');
   });
 });
 
@@ -399,6 +505,9 @@ describe('VisibilityQueue.reclaim', () => {
     const listed = await q.list(ctx);
     expect(listed[0]!.reclaimCount).toBe(1);
     expect(dlqWrites).toHaveLength(0);
+    // Hash entry for the redelivered task is cleared — the next pull
+    // will repopulate it.
+    expect(redisStub.state.hashes.get(inflightHashKeyFor(ctx))?.has('x') ?? false).toBe(false);
   });
 
   it('writes to DLQ when reclaimCount hits the ceiling', async () => {
@@ -406,6 +515,7 @@ describe('VisibilityQueue.reclaim', () => {
     // Manually inject an entry already at reclaimCount = 2 (ceiling - 1).
     const entry = JSON.stringify({ taskId: 'doomed', payload: { taskId: 'doomed', payload: 'p' }, reclaimCount: 2, seq: 1 });
     redisStub.state.sortedSets.set(keys.inflight(ctx), [{ score: Date.now() - 1_000, member: entry }]);
+    redisStub.state.hashes.set(inflightHashKeyFor(ctx), new Map([['doomed', entry]]));
 
     const r = await q.reclaim(ctx);
     expect(r.redelivered).toBe(0);
@@ -414,6 +524,8 @@ describe('VisibilityQueue.reclaim', () => {
     expect((dlqWrites[0] as any).taskId).toBe('doomed');
     expect((dlqWrites[0] as any).failureReason).toBe('broker_no_response');
     expect((dlqWrites[0] as any).attemptCount).toBe(3);
+    // DLQ path also clears the by-id hash.
+    expect(redisStub.state.hashes.get(inflightHashKeyFor(ctx))?.has('doomed') ?? false).toBe(false);
   });
 
   it('drops unparseable inflight entries without DLQing them', async () => {
@@ -446,7 +558,7 @@ describe('VisibilityQueue.reclaim', () => {
 });
 
 describe('VisibilityQueue.forget', () => {
-  it('removes participant + list + inflight + seq for the (tenant, agent)', async () => {
+  it('removes participant + list + inflight + by-id hash + seq for the (tenant, agent)', async () => {
     const q = makeQueue();
     await q.enqueue(ctx, 'x', { taskId: 'x', payload: 'p' });
     await q.pull(ctx, 0);
@@ -454,7 +566,29 @@ describe('VisibilityQueue.forget', () => {
     await q.forget(ctx);
     expect(redisStub.state.lists.get(keys.list(ctx))).toBeUndefined();
     expect(redisStub.state.sortedSets.get(keys.inflight(ctx))).toBeUndefined();
+    expect(redisStub.state.hashes.get(inflightHashKeyFor(ctx))).toBeUndefined();
     expect(redisStub.state.sets.get('test:participants')?.has('t1:a1') ?? false).toBe(false);
     expect(redisStub.state.counters.get(keys.seq(ctx))).toBeUndefined();
+  });
+});
+
+describe('VisibilityQueue.reclaimAll chunking', () => {
+  it('reclaims across many participants without falling over', async () => {
+    const q = makeQueue();
+    // 40 participants > the internal RECLAIM_ALL_CHUNK (16), so we cross
+    // chunk boundaries. Each one has one expired in-flight entry.
+    const N = 40;
+    for (let i = 0; i < N; i++) {
+      const c = { tenantId: `t${i}`, agentId: `a${i}` };
+      await q.enqueue(c, `tid${i}`, { taskId: `tid${i}`, payload: 'p' });
+      await q.pull(c, 0);
+    }
+    for (const key of redisStub.state.sortedSets.keys()) {
+      for (const e of redisStub.state.sortedSets.get(key)!) e.score = Date.now() - 1_000;
+    }
+
+    const r = await q.reclaimAll();
+    expect(r.redelivered).toBe(N);
+    expect(r.deadLettered).toBe(0);
   });
 });
