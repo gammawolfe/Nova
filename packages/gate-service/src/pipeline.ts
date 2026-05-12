@@ -183,29 +183,10 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
       reason: ucanResult.reason ?? 'ucan_invalid',
     });
 
-    const errorMap: Record<string, GateErrorCode> = {
-      ucan_expired: 'UCAN_EXPIRED',
-      ucan_revoked: 'UCAN_REVOKED',
-      ucan_did_mismatch: 'UCAN_DID_MISMATCH',
-      ucan_wrong_audience: 'UCAN_WRONG_AUDIENCE',
-      ucan_insufficient_capability: 'UCAN_INSUFFICIENT_CAPABILITY',
-      ucan_invalid_jwt: 'UCAN_INVALID_JWT',
-      ucan_invalid_signature: 'UCAN_INVALID_JWT',
-      ucan_malformed: 'UCAN_INVALID_JWT',
-      ucan_no_proof: 'UCAN_INSUFFICIENT_CAPABILITY',
-      grant_expired: 'UCAN_EXPIRED',
-      grant_invalid_signature: 'UCAN_INVALID_JWT',
-      grant_malformed: 'UCAN_INVALID_JWT',
-      grant_not_from_nova: 'UCAN_WRONG_AUDIENCE',
-      grant_wrong_audience: 'UCAN_DID_MISMATCH',
-      grant_does_not_subsume_invocation: 'UCAN_INSUFFICIENT_CAPABILITY',
-      revocation_check_failed: 'UCAN_REVOKED',
-    };
-
     return await recordAndReturn({
       passed: false,
       decision: 'quarantined',
-      errorCode: errorMap[ucanResult.reason ?? ''] ?? 'UCAN_INVALID_JWT',
+      errorCode: mapReasonToGateErrorCode(ucanResult.reason),
       reason: ucanResult.reason,
       quarantineId: qId ?? undefined,
       senderDid: senderDid ?? undefined,
@@ -475,4 +456,77 @@ async function loadAgentDid(): Promise<string> {
   } catch (err: any) {
     throw new Error(`Cannot read agent DID from ${didPath}: ${err.message}`);
   }
+}
+
+// ── UCAN verification reason → external GateErrorCode mapping ──────────────
+//
+// Maps the internal failure-reason strings emitted by `verifyUCAN` (in
+// ucan-verifier.ts) onto the stable GateErrorCode set that the HTTP layer
+// returns to callers. Operators alert on these codes; routing the right
+// reason to the right code is what makes "UCAN_EXPIRED vs UCAN_INVALID_JWT
+// vs UCAN_WRONG_AUDIENCE" mean what operators expect.
+//
+// Two families of reasons need to be handled:
+//
+//   1. Outer-token failures (`ucan_*`). These map to the corresponding
+//      UCAN_* codes one-to-one and have been stable since v1.
+//
+//   2. Chain-walking failures (`chain_*`). Introduced in Phase 2B-A
+//      (the chain-walker rewrite). Each one represents the same kind of
+//      failure as an outer-token reason but detected at depth ≥ 1 in the
+//      delegation chain. Mapped to the closest semantic match:
+//
+//        chain_no_root              → UCAN_WRONG_AUDIENCE
+//          (the chain doesn't terminate at a link signed by this Nova;
+//           the request isn't authorised for this audience at all)
+//        chain_audience_mismatch    → UCAN_DID_MISMATCH
+//          (a link's aud doesn't equal the previous link's iss)
+//        chain_link_expired         → UCAN_EXPIRED
+//        chain_capability_widened   → UCAN_INSUFFICIENT_CAPABILITY
+//        chain_link_invalid_sig     → UCAN_INVALID_JWT
+//        chain_link_malformed       → UCAN_INVALID_JWT
+//        chain_link_missing_proof   → UCAN_INSUFFICIENT_CAPABILITY
+//        chain_link_too_many_proofs → UCAN_INVALID_JWT
+//        chain_too_deep             → UCAN_INVALID_JWT
+//        chain_root_has_proofs      → UCAN_INVALID_JWT
+//        chain_peer_untrusted       → UCAN_WRONG_AUDIENCE
+//          (peer Nova in the federation chain isn't in trusted-issuers)
+//
+// Unknown reasons fall through to UCAN_INVALID_JWT — the safest default
+// for a code path that shouldn't be reachable in normal operation.
+//
+// Pre-2B-A, this map referenced `grant_*` keys (the old single-link
+// verifier's reason names). Those reasons are no longer emitted by the
+// verifier; removing the stale entries prevents accidentally "matching"
+// them from a future caller that resurrects the names.
+
+const REASON_TO_ERROR_CODE: Record<string, GateErrorCode> = {
+  // Outer-token failures
+  ucan_malformed: 'UCAN_INVALID_JWT',
+  ucan_invalid_signature: 'UCAN_INVALID_JWT',
+  ucan_invalid_jwt: 'UCAN_INVALID_JWT',
+  ucan_expired: 'UCAN_EXPIRED',
+  ucan_wrong_audience: 'UCAN_WRONG_AUDIENCE',
+  ucan_did_mismatch: 'UCAN_DID_MISMATCH',
+  ucan_insufficient_capability: 'UCAN_INSUFFICIENT_CAPABILITY',
+  ucan_no_proof: 'UCAN_INSUFFICIENT_CAPABILITY',
+  ucan_revoked: 'UCAN_REVOKED',
+  revocation_check_failed: 'UCAN_REVOKED',
+
+  // Chain-walking failures (Phase 2B-A and later)
+  chain_no_root: 'UCAN_WRONG_AUDIENCE',
+  chain_audience_mismatch: 'UCAN_DID_MISMATCH',
+  chain_link_expired: 'UCAN_EXPIRED',
+  chain_capability_widened: 'UCAN_INSUFFICIENT_CAPABILITY',
+  chain_link_invalid_signature: 'UCAN_INVALID_JWT',
+  chain_link_malformed: 'UCAN_INVALID_JWT',
+  chain_link_missing_proof: 'UCAN_INSUFFICIENT_CAPABILITY',
+  chain_link_too_many_proofs: 'UCAN_INVALID_JWT',
+  chain_too_deep: 'UCAN_INVALID_JWT',
+  chain_root_has_proofs: 'UCAN_INVALID_JWT',
+  chain_peer_untrusted: 'UCAN_WRONG_AUDIENCE',
+};
+
+export function mapReasonToGateErrorCode(reason: string | undefined): GateErrorCode {
+  return REASON_TO_ERROR_CODE[reason ?? ''] ?? 'UCAN_INVALID_JWT';
 }
