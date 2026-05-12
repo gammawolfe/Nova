@@ -75,29 +75,98 @@ const CONFIDENCE_DETECTOR = 0.85;
 const CONFIDENCE_SUSPECTED = 0.60;
 const CLASSIFIER_CACHE_TTL = 600; // 10 minutes
 
+// Per-attempt SDK request timeout. The Anthropic SDK has its own default
+// (~10 minutes for streaming, less for non-streaming) but a 600s upper
+// bound on a gate hot path is operator-hostile. 15s default balances
+// "let Haiku finish a normal classify" against "fail fast under load."
+const CLASSIFIER_REQUEST_TIMEOUT_MS = readPositiveInt(
+  'GATE_CLASSIFIER_REQUEST_TIMEOUT_MS',
+  15_000,
+);
+
+// Number of attempts before failing closed. Backoff between attempts is
+// read from GATE_CLASSIFIER_RETRY_DELAYS_MS — comma-separated milliseconds.
+// Default [2000, 10000, 30000] mirrors the prior hardcoded ladder; the
+// total worst-case stays at 42s but is now visible and tunable.
+const CLASSIFIER_MAX_ATTEMPTS = readPositiveInt('GATE_CLASSIFIER_MAX_ATTEMPTS', 3);
+const CLASSIFIER_RETRY_DELAYS_MS = readDelayLadder(
+  'GATE_CLASSIFIER_RETRY_DELAYS_MS',
+  [2_000, 10_000, 30_000],
+);
+
+function readPositiveInt(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function readDelayLadder(key: string, fallback: number[]): number[] {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const parts = raw.split(',').map(s => parseInt(s.trim(), 10));
+  if (parts.every(n => Number.isFinite(n) && n >= 0)) return parts;
+  return fallback;
+}
+
 function getRedis() {
   return getSharedRedis();
 }
 
-let anthropicClient: Anthropic | null = null;
-function getAnthropic(): Anthropic {
-  if (!anthropicClient) {
+let _defaultAnthropicClient: Anthropic | null = null;
+function defaultAnthropicClient(): Anthropic {
+  if (!_defaultAnthropicClient) {
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error('ANTHROPIC_API_KEY not set — LLM classifier cannot run');
     }
-    anthropicClient = new Anthropic();
+    _defaultAnthropicClient = new Anthropic();
   }
-  return anthropicClient;
+  return _defaultAnthropicClient;
+}
+
+/**
+ * Test-only: reset the lazily-cached default Anthropic client. Production
+ * code uses the injection seam on `llmClassify` instead; this exists so
+ * tests that exercise the no-injection path can reset between cases.
+ */
+export function _resetAnthropicClientForTests(): void {
+  _defaultAnthropicClient = null;
+}
+
+/**
+ * Options accepted by `llmClassify`. All fields are optional — production
+ * callers pass nothing and pick up env-configured defaults plus the
+ * lazily-initialised Anthropic SDK client. Tests pass a stub `client` to
+ * exercise the classifier without hitting the network.
+ */
+export interface LlmClassifyOptions {
+  /** Inject an Anthropic-compatible client. Production omits this. */
+  client?: Pick<Anthropic, 'messages'>;
 }
 
 /**
  * Stage B — LLM-based injection classification with Redis cache.
  *
- * Throws on API failure so the gate can return 503 (fail safe).
+ * Throws on API failure so the gate can return 503 (fail safe). Total
+ * worst-case latency is bounded by:
+ *
+ *   CLASSIFIER_MAX_ATTEMPTS × (CLASSIFIER_REQUEST_TIMEOUT_MS + retry_delay)
+ *
+ * Defaults: 3 × (15s + [2s, 10s, 30s]) ≈ 87s. Operators concerned about
+ * holding the gate open during Anthropic flakiness can tune the env vars:
+ *
+ *   GATE_CLASSIFIER_REQUEST_TIMEOUT_MS  — per-attempt SDK timeout
+ *   GATE_CLASSIFIER_MAX_ATTEMPTS        — number of attempts
+ *   GATE_CLASSIFIER_RETRY_DELAYS_MS     — comma-separated backoff ladder
+ *
+ * Setting GATE_CLASSIFIER_MAX_ATTEMPTS=1 disables retries entirely (the
+ * gate fails closed immediately on the first error, freeing the worker
+ * for the next request).
  */
 export async function llmClassify(
   strings: StringField[],
-  ctx: TenantContext
+  ctx: TenantContext,
+  opts: LlmClassifyOptions = {},
 ): Promise<LLMClassificationResult> {
   const content = strings.map(s => `[${s.path}]: ${s.value}`).join('\n') || '(empty params)';
 
@@ -115,16 +184,27 @@ export async function llmClassify(
   }
 
   const model = process.env.CLASSIFIER_MODEL || 'claude-haiku-4-20250514';
+  const client = opts.client ?? defaultAnthropicClient();
   let lastErr: Error | null = null;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < CLASSIFIER_MAX_ATTEMPTS; attempt++) {
+    // Per-attempt timeout. Anthropic SDK accepts a signal in its second
+    // argument; we abort the request if it hasn't responded within the
+    // configured window. AbortError is caught alongside other failures
+    // below and contributes to the retry loop.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CLASSIFIER_REQUEST_TIMEOUT_MS);
+
     try {
-      const response = await getAnthropic().messages.create({
-        model,
-        max_tokens: 200,
-        system: CLASSIFIER_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content }],
-      });
+      const response = await client.messages.create(
+        {
+          model,
+          max_tokens: 200,
+          system: CLASSIFIER_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content }],
+        },
+        { signal: ctrl.signal },
+      );
 
       const rawText = response.content[0]?.type === 'text' ? response.content[0].text : '{}';
       const result = JSON.parse(rawText.replace(/```json|```/g, '').trim()) as LLMClassificationResult;
@@ -133,6 +213,7 @@ export async function llmClassify(
       if (typeof result.injection !== 'boolean' || typeof result.confidence !== 'number') {
         logger.warn({ rawText }, 'LLM returned malformed classification — retrying');
         lastErr = new Error('Malformed LLM response');
+        await sleepBetweenAttempts(attempt);
         continue;
       }
 
@@ -150,14 +231,35 @@ export async function llmClassify(
       return result;
     } catch (err: any) {
       lastErr = err;
-      const delay = [2000, 10000, 30000][attempt] ?? 30000;
-      logger.warn({ err: err.message, attempt }, 'Classifier API failed, retrying');
-      await new Promise(r => setTimeout(r, delay));
+      const isAbort = err?.name === 'AbortError' || ctrl.signal.aborted;
+      logger.warn(
+        { err: err.message, attempt, timedOut: isAbort },
+        'Classifier API failed, retrying',
+      );
+      await sleepBetweenAttempts(attempt);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  // All retries exhausted — throw so gate returns 503 (fail safe)
-  throw new Error(`LLM classifier failed after 3 attempts: ${lastErr?.message}`);
+  // All retries exhausted — throw so gate returns 503 (fail safe).
+  throw new Error(
+    `LLM classifier failed after ${CLASSIFIER_MAX_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown error'}`,
+  );
+}
+
+/**
+ * Sleep the configured delay before attempt N+1. Skipped after the last
+ * attempt — waiting before throwing the exhaustion error helps nothing
+ * and just holds the request worker open longer.
+ */
+async function sleepBetweenAttempts(attempt: number): Promise<void> {
+  if (attempt >= CLASSIFIER_MAX_ATTEMPTS - 1) return;
+  const delay = CLASSIFIER_RETRY_DELAYS_MS[attempt]
+    ?? CLASSIFIER_RETRY_DELAYS_MS[CLASSIFIER_RETRY_DELAYS_MS.length - 1]
+    ?? 0;
+  if (delay <= 0) return;
+  await new Promise(r => setTimeout(r, delay));
 }
 
 /**
