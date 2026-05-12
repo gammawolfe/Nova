@@ -94,6 +94,79 @@ export async function createInvite(
 }
 
 /**
+ * Pure-parse path for an invite JWT — no signature verification, no Redis
+ * touch, no server-only dependencies. Used by:
+ *
+ *   • `verifyInvite` below — layers signature verification on top.
+ *   • `tenant-config.ts:decodeInvitePayload` — the client-side decoder
+ *     that displays invite details before joining a tenant.
+ *
+ * Both consumers previously hand-rolled their own copy of this logic and
+ * drifted on details like whitespace handling, expired-tolerance, and which
+ * fields are required. Consolidating means a bug fix in one place fixes
+ * the other automatically.
+ *
+ * Throws plain Error on any structural / claim / expiry failure. The
+ * `verifyInvite` caller decorates the throws with HTTP status codes
+ * downstream; callers that only need the parse path (CLI inspect, MCP
+ * decode) get plain errors with no server-shaped status field.
+ *
+ * Whitespace is stripped before parsing — JWTs pasted through terminals
+ * can arrive with embedded newlines from line-wrapping. Stripping up
+ * front makes the parse + signature paths agree byte-for-byte.
+ */
+export interface ParseInvitePayloadOptions {
+  /** If true, expired tokens parse successfully and return `expired: true`. */
+  allowExpired?: boolean;
+}
+
+export interface ParsedInvitePayload extends InvitePayload {
+  /** Only set when allowExpired === true and the token is past its exp. */
+  expired?: boolean;
+  /** Raw parts of the JWT — useful to callers (verifyInvite) that need to
+   *  verify the signature against the original preimage. */
+  parts: { headerB64: string; payloadB64: string; signatureB64: string };
+}
+
+export function parseInviteJwtPayload(
+  token: string,
+  opts: ParseInvitePayloadOptions = {},
+): ParsedInvitePayload {
+  const normalized = token.replace(/\s+/g, '');
+  const parts = normalized.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Malformed invite token');
+  }
+  const [headerB64, payloadB64, signatureB64] = parts as [string, string, string];
+
+  let payload: InvitePayload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('Invite payload malformed');
+  }
+
+  if (payload.typ !== 'invite') {
+    throw new Error('Not an invite token');
+  }
+  if (!payload.tenantId || !payload.jti || typeof payload.exp !== 'number') {
+    throw new Error('Invite missing required claims');
+  }
+
+  const expired = payload.exp < Math.floor(Date.now() / 1000);
+  if (expired && !opts.allowExpired) {
+    throw new Error('Invite expired');
+  }
+
+  const result: ParsedInvitePayload = {
+    ...payload,
+    parts: { headerB64, payloadB64, signatureB64 },
+  };
+  if (expired) result.expired = true;
+  return result;
+}
+
+/**
  * Verify an invite JWT's signature, structure, and expiry. Does NOT consume.
  *
  * Throws on malformed token, invalid signature, wrong typ, missing claims, or
@@ -101,47 +174,36 @@ export async function createInvite(
  * (agentIdHint match, tenant existence, duplicate-agent checks) before the
  * caller decides to consume. See `consumeInvite`.
  *
- * Whitespace is stripped before parsing — JWTs pasted through terminals can
- * arrive with embedded newlines from line-wrapping. Base64url decoding
- * tolerates whitespace silently, but crypto.verify signs the raw preimage
- * byte-for-byte, so embedded newlines would flip an otherwise-valid signature
- * to failure. Stripping up front makes the two paths agree.
+ * Errors are decorated with an HTTP `status` field so the route layer can
+ * map them to a response code without needing a switch statement on the
+ * error message. Structural failures inherit status 400 from this wrapper.
  */
 export async function verifyInvite(token: string): Promise<InvitePayload> {
-  const normalized = token.replace(/\s+/g, '');
-  const parts = normalized.split('.');
-  if (parts.length !== 3) {
-    throw Object.assign(new Error('Malformed invite token'), { status: 400 });
+  let parsed: ParsedInvitePayload;
+  try {
+    parsed = parseInviteJwtPayload(token);
+  } catch (err: any) {
+    const msg: string = err.message ?? '';
+    if (msg.includes('expired')) {
+      throw Object.assign(err, { status: 410 });
+    }
+    throw Object.assign(err, { status: 400 });
   }
-  const [headerB64, payloadB64, signatureB64] = parts;
 
+  const { headerB64, payloadB64, signatureB64 } = parsed.parts;
   const publicKey = await loadNovaPublicKey();
   const valid = crypto.verify(
     null,
     Buffer.from(`${headerB64}.${payloadB64}`),
     publicKey,
-    Buffer.from(signatureB64!, 'base64url')
+    Buffer.from(signatureB64, 'base64url'),
   );
   if (!valid) throw Object.assign(new Error('Invite signature invalid'), { status: 401 });
 
-  let payload: InvitePayload;
-  try {
-    payload = JSON.parse(Buffer.from(payloadB64!, 'base64url').toString('utf8'));
-  } catch {
-    throw Object.assign(new Error('Invite payload malformed'), { status: 400 });
-  }
-
-  if (payload.typ !== 'invite') {
-    throw Object.assign(new Error('Not an invite token'), { status: 400 });
-  }
-  if (!payload.tenantId || !payload.jti || typeof payload.exp !== 'number') {
-    throw Object.assign(new Error('Invite missing required claims'), { status: 400 });
-  }
-  if (payload.exp < Math.floor(Date.now() / 1000)) {
-    throw Object.assign(new Error('Invite expired'), { status: 410 });
-  }
-
-  return payload;
+  // Strip the `parts` helper from the returned payload — callers don't need
+  // it once verification has passed.
+  const { parts: _parts, expired: _expired, ...payload } = parsed;
+  return payload as InvitePayload;
 }
 
 /**
