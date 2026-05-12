@@ -38,3 +38,19 @@ export const BROKER_REPLY_RESULT_TTL_SECONDS = readInt('BROKER_REPLY_RESULT_TTL_
 
 /** Maximum TaskResult payload size accepted by the respond endpoint. Default 1 MB. */
 export const BROKER_RESULT_MAX_BYTES = readInt('BROKER_RESULT_MAX_BYTES', 1024 * 1024);
+
+/**
+ * TTL on per-queue sequence counters. The counter must not outlive the
+ * inbox/reply-inbox data it numbers, or a brand-new task could collide
+ * with a stale (already-delivered) seq for a long-gone SSE consumer.
+ * Default 24 hours.
+ */
+export const BROKER_QUEUE_SEQ_TTL_SECONDS = readInt('BROKER_QUEUE_SEQ_TTL_SECONDS', 24 * 60 * 60);
+
+/**
+ * TTL on Redis hash entries storing TaskState (status, result, intent).
+ * Task records share the 24h lifetime envelope with their queue data;
+ * separate env var so operators can tune historical task lookup
+ * independently of broker semantics.
+ */
+export const BROKER_TASK_STATE_TTL_SECONDS = readInt('BROKER_TASK_STATE_TTL_SECONDS', 24 * 60 * 60);

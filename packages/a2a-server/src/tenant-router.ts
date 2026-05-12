@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
-import { redis } from '@nova/task-queue/src/index';
+import { getSharedRedis } from '@nova/shared/src/redis';
+import { agentIndexKey } from '@nova/shared/src/agent-index';
 
 // Extend Express Request tightly so the compiler knows ctx is always present downstream
 declare global {
@@ -27,8 +28,10 @@ export async function tenantRouter(req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    // Look up tenant from Redis agent index
-    const tenantId = await redis.get(`nova:agent-index:${agentId}`);
+    // Look up tenant from Redis agent index. Uses the canonical key
+    // builder rather than a raw template string so the key format
+    // can't drift from the writer side (agent-index.ts).
+    const tenantId = await getSharedRedis().get(agentIndexKey(agentId));
 
     if (!tenantId) {
       logger.warn({ agentId }, 'Agent not found in Redis index');

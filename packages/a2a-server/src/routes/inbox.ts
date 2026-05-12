@@ -14,7 +14,6 @@ import {
   BROKER_MAX_WAIT_MS,
   BROKER_RESULT_MAX_BYTES,
 } from '@nova/shared/src/broker-config';
-import { redis } from '@nova/task-queue/src/index';
 import * as inbox from '@nova/task-queue/src/inbox';
 import * as replyInbox from '@nova/task-queue/src/reply-inbox';
 import { writeDeadLetter } from '@nova/task-queue/src/dead-letter';
@@ -343,7 +342,7 @@ inboxRouter.get('/:agentId/inbox/stream', async (req: Request, res: Response) =>
   }, INBOX_HEARTBEAT_INTERVAL_MS);
 
   try {
-    sub = redis.duplicate();
+    sub = getSharedRedis().duplicate();
     await sub.subscribe(channel);
   } catch (err: any) {
     logger.error({ err: err.message, ctx }, 'Failed to subscribe to inbox notify channel');

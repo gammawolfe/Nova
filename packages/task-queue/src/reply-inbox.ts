@@ -1,24 +1,42 @@
 // packages/task-queue/src/reply-inbox.ts
 //
-// Broker-mode reply inbox — symmetric to inbox.ts but in the opposite direction.
-// When a broker-mode sender omits `replyTo`, the recipient's respond handler
-// enqueues the TaskResult onto the sender's reply-inbox instead of POSTing to
-// a webhook. The sender then pulls with nova_next_reply (long-poll, at-least-
-// once with visibility timeout) and acks via nova_ack_reply. A separate
-// direct-lookup key stores the TaskResult by taskId for nova_get_task_result.
+// Broker-mode reply inbox — symmetric to inbox.ts but flowing in the
+// opposite direction. When a broker-mode sender (no public webhook)
+// targets an agent without a `replyTo` URL, the recipient's respond
+// handler enqueues the TaskResult here. The sender pulls via
+// nova_next_reply (long-poll, at-least-once with visibility timeout)
+// and acks via nova_ack_reply.
+//
+// Implemented as a thin wrapper over VisibilityQueue (see
+// visibility-queue.ts). Reply-inbox-specific behaviour:
+//
+//   - On-wire inner field name is `result` (not `task`), matching the
+//     existing format so live entries don't need migration.
+//   - Notification shape is { seq, taskId, enqueuedAt } — no intent
+//     field (replies don't carry an intent; they're outputs).
+//   - On reclaim exhaustion, DLQ carries the original TaskResult
+//     unchanged (the receiver already produced it), with failureReason
+//     `broker_reply_no_response`.
+//   - Enqueue atomically writes an extra direct-lookup key
+//     (taskResultKey) via SETEX so GET /replies/:taskId can serve the
+//     stored TaskResult after the queue entry has been popped + acked.
 
-import { redis } from './index';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { TaskResult } from '@nova/shared/src/types';
-import { logger } from '@nova/shared/src/logger';
 import {
   BROKER_VISIBILITY_TIMEOUT_MS,
   BROKER_RECLAIM_CEILING,
   BROKER_REPLY_RESULT_TTL_SECONDS,
+  BROKER_QUEUE_SEQ_TTL_SECONDS,
 } from '@nova/shared/src/broker-config';
-import { writeDeadLetter } from './dead-letter';
+import { getSharedRedis } from '@nova/shared/src/redis';
+import {
+  VisibilityQueue,
+  VisibilityEntry,
+  KeyBuilder,
+} from './visibility-queue';
 
-// ── Key helpers ─────────────────────────────────────────────────────────────
+// ── Key helpers (preserved as public exports for callers) ──────────────────
 
 export function replyInboxKey(ctx: TenantContext): string {
   return `nova:reply-inbox:${ctx.tenantId}:${ctx.agentId}`;
@@ -26,10 +44,6 @@ export function replyInboxKey(ctx: TenantContext): string {
 
 export function replyInflightKey(ctx: TenantContext): string {
   return `nova:reply-inflight:${ctx.tenantId}:${ctx.agentId}`;
-}
-
-export function taskResultKey(ctx: TenantContext, taskId: string): string {
-  return `nova:task-result:${ctx.tenantId}:${ctx.agentId}:${taskId}`;
 }
 
 export function replyInboxNotifyChannel(ctx: TenantContext): string {
@@ -40,27 +54,26 @@ export function replyInboxSeqKey(ctx: TenantContext): string {
   return `nova:reply-inbox-seq:${ctx.tenantId}:${ctx.agentId}`;
 }
 
+export function taskResultKey(ctx: TenantContext, taskId: string): string {
+  return `nova:task-result:${ctx.tenantId}:${ctx.agentId}:${taskId}`;
+}
+
 /** Set of "tenantId:agentId" pairs that have at least one pending reply. */
 export const BROKER_REPLY_AGENTS_SET = 'nova:broker-reply-agents';
 
-// Matches the inbox-seq + task-events TTL. The seq counter must not outlive
-// the reply data it numbers.
-const REPLY_INBOX_SEQ_TTL_SECONDS = 60 * 60 * 24;
+const replyKeys: KeyBuilder = {
+  list: replyInboxKey,
+  inflight: replyInflightKey,
+  notifyChannel: replyInboxNotifyChannel,
+  seq: replyInboxSeqKey,
+};
 
-function memberKey(ctx: TenantContext): string {
-  return `${ctx.tenantId}:${ctx.agentId}`;
-}
-
-// ── Public API ──────────────────────────────────────────────────────────────
+// ── Public types (preserved on-wire field names) ───────────────────────────
 
 export interface ReplyInflightEntry {
   taskId: string;
   result: TaskResult;
   reclaimCount: number;
-  // Monotonic per-(tenant,agent) sequence assigned at enqueue. Used as the
-  // SSE `id:` value so resuming subscribers can skip already-delivered
-  // notifications via Last-Event-ID. Absent on entries enqueued by
-  // pre-push builds; consumers tolerate `undefined`.
   seq?: number;
 }
 
@@ -70,116 +83,131 @@ export interface ReplyInboxNotification {
   enqueuedAt: string;
 }
 
+// ── VisibilityQueue instance ───────────────────────────────────────────────
+
+const queue = new VisibilityQueue<TaskResult, ReplyInboxNotification>({
+  keys: replyKeys,
+  participantSet: BROKER_REPLY_AGENTS_SET,
+  visibilityTimeoutMs: BROKER_VISIBILITY_TIMEOUT_MS,
+  seqTtlSeconds: BROKER_QUEUE_SEQ_TTL_SECONDS,
+  reclaimCeiling: BROKER_RECLAIM_CEILING,
+  logLabel: 'reply-inbox',
+
+  buildNotification: ({ seq, taskId }) => ({
+    seq,
+    taskId,
+    enqueuedAt: new Date().toISOString(),
+  }),
+
+  // Preserve the existing on-wire field name `result` (not `inner`) so
+  // entries written by older code keep deserialising across a deploy.
+  serializeEntry: (entry) => JSON.stringify({
+    taskId: entry.taskId,
+    result: entry.inner,
+    reclaimCount: entry.reclaimCount,
+    ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
+  }),
+  parseEntry: (raw) => {
+    try {
+      const e = JSON.parse(raw);
+      if (!e || typeof e !== 'object' || !e.taskId || !e.result) return null;
+      return {
+        taskId: e.taskId,
+        inner: e.result as TaskResult,
+        reclaimCount: typeof e.reclaimCount === 'number' ? e.reclaimCount : 0,
+        seq: typeof e.seq === 'number' ? e.seq : undefined,
+      };
+    } catch {
+      return null;
+    }
+  },
+
+  // Reply-inbox DLQ carries the original TaskResult — the receiver
+  // already produced it, so there's nothing to synthesise here. The
+  // failure mode is delivery-side: the sender didn't pull within the
+  // reclaim ceiling.
+  buildDeadLetter: ({ inner }) => ({
+    targetUrl: 'broker-reply',
+    failureReason: 'broker_reply_no_response',
+    taskResult: inner,
+  }),
+
+  // Reply-inbox extends the enqueue pipeline with a SETEX for the
+  // direct-lookup TaskResult key. This guarantees that GET
+  // /replies/:taskId can find the result alongside the queue entry,
+  // and the two writes are atomic — a crash between them is
+  // impossible because they ship in the same pipeline.
+  extraEnqueuePipelineOps: ({ pipe, ctx, taskId, inner }) => {
+    pipe.setex(
+      taskResultKey(ctx, taskId),
+      BROKER_REPLY_RESULT_TTL_SECONDS,
+      JSON.stringify(inner),
+    );
+  },
+});
+
+// ── Public API (thin shims over VisibilityQueue) ───────────────────────────
+
 /**
- * Enqueue a TaskResult to the sender's reply inbox AND persist it by taskId
- * for direct lookup. Both writes share the same pipeline so they either both
- * succeed or both fail together.
+ * Enqueue a TaskResult to the sender's reply inbox AND persist it by
+ * taskId for direct lookup. Both writes share the same pipeline so they
+ * either both succeed or both fail — handled by VisibilityQueue's
+ * extraEnqueuePipelineOps hook.
  *
- * The stored-result key lives out its TTL independently of inbox consumption —
- * ack only clears the inbox/in-flight state; the direct-lookup key remains
- * retrievable until TTL expiry so nova_get_task_result keeps working.
+ * The stored-result key lives out its 24h TTL independently of inbox
+ * consumption — ackReply only clears the inbox/in-flight state; the
+ * direct-lookup key remains retrievable until TTL expiry so
+ * nova_get_task_result keeps working.
  */
 export async function enqueueReply(
   senderCtx: TenantContext,
   taskId: string,
   result: TaskResult,
 ): Promise<void> {
-  const seq = await redis.incr(replyInboxSeqKey(senderCtx));
-  const entry: ReplyInflightEntry = { taskId, result, reclaimCount: 0, seq };
-  const notification: ReplyInboxNotification = {
-    seq,
-    taskId,
-    enqueuedAt: new Date().toISOString(),
-  };
-  await redis.pipeline()
-    .expire(replyInboxSeqKey(senderCtx), REPLY_INBOX_SEQ_TTL_SECONDS)
-    .lpush(replyInboxKey(senderCtx), JSON.stringify(entry))
-    .setex(taskResultKey(senderCtx, taskId), BROKER_REPLY_RESULT_TTL_SECONDS, JSON.stringify(result))
-    .sadd(BROKER_REPLY_AGENTS_SET, memberKey(senderCtx))
-    .publish(replyInboxNotifyChannel(senderCtx), JSON.stringify(notification))
-    .exec();
+  return queue.enqueue(senderCtx, taskId, result);
 }
 
 /**
- * Long-poll pull. Blocks up to `waitMs` for a pending reply. When one is
- * popped, it is claimed into the in-flight set with a visibility timeout.
- * Returns null on timeout.
- *
- * Same crash-window trade-off as inbox.pull: BLPOP and ZADD are not atomic.
+ * Long-poll pull. Returns null on timeout. The popped reply is claimed
+ * into the in-flight set with a 5-minute visibility timeout — caller
+ * must ack before it expires or the reply is redelivered.
  */
 export async function pullReply(
   ctx: TenantContext,
   waitMs: number,
 ): Promise<{ taskId: string; result: TaskResult; visibleUntil: Date } | null> {
-  const waitSec = Math.max(0, Math.ceil(waitMs / 1000));
-  const popped = await redis.blpop(replyInboxKey(ctx), waitSec);
-  if (!popped) return null;
+  const r = await queue.pull(ctx, waitMs);
+  if (!r) return null;
+  return { taskId: r.taskId, result: r.inner, visibleUntil: r.visibleUntil };
+}
 
-  const [, payload] = popped;
-  let entry: ReplyInflightEntry;
-  try {
-    entry = JSON.parse(payload);
-    if (!entry.taskId || !entry.result) throw new Error('malformed reply entry');
-  } catch (err) {
-    logger.error({ err, ctx }, 'Reply inbox payload malformed; dropping');
-    return null;
-  }
-
-  const visibleUntilMs = Date.now() + BROKER_VISIBILITY_TIMEOUT_MS;
-  const inflight: ReplyInflightEntry = {
-    ...entry,
-    reclaimCount: entry.reclaimCount ?? 0,
-  };
-  await redis.zadd(replyInflightKey(ctx), visibleUntilMs, JSON.stringify(inflight));
-
-  return {
-    taskId: entry.taskId,
-    result: entry.result,
-    visibleUntil: new Date(visibleUntilMs),
-  };
+/** Non-destructive snapshot of the reply-inbox, newest-first. */
+export async function listReplies(ctx: TenantContext): Promise<ReplyInflightEntry[]> {
+  const entries = await queue.list(ctx);
+  return entries.map(toPublicEntry);
 }
 
 /**
- * Non-destructive snapshot of the reply inbox, newest-first (LPUSH head).
- * Used by the peek endpoint and by the SSE stream's replay path. Does not
- * claim replies — visibility state is unchanged.
+ * Wire-level outcome names for the ack endpoint. Preserved as
+ * reply-inbox-specific values so HTTP responses don't have to rename
+ * from 'reply_not_found' / 'already_acked' (which a2a-server's route
+ * already exposes to clients). Maps from the queue's generic
+ * RespondOutcome under the hood.
  */
-export async function listReplies(ctx: TenantContext): Promise<ReplyInflightEntry[]> {
-  const raws = await redis.lrange(replyInboxKey(ctx), 0, -1);
-  const entries: ReplyInflightEntry[] = [];
-  for (const raw of raws) {
-    try {
-      const entry: ReplyInflightEntry = JSON.parse(raw);
-      if (entry.taskId && entry.result) entries.push(entry);
-    } catch {
-      continue;
-    }
-  }
-  return entries;
-}
-
-/** Result of calling ackReply. */
 export type AckReplyOutcome = 'accepted' | 'already_acked' | 'reply_not_found';
 
 /**
- * Ack a pulled reply, clearing in-flight state. Idempotent — a second ack for
- * the same taskId returns `already_acked`. The stored-result key is untouched
- * so direct-lookup still works until TTL expiry.
+ * Ack a pulled reply, clearing in-flight state. Idempotent — a second
+ * call returns 'already_acked'. The stored-result key is untouched so
+ * direct-lookup keeps working until TTL expiry.
  */
 export async function ackReply(ctx: TenantContext, taskId: string): Promise<AckReplyOutcome> {
-  const raws = await redis.zrange(replyInflightKey(ctx), 0, -1);
-  for (const raw of raws) {
-    try {
-      const entry: ReplyInflightEntry = JSON.parse(raw);
-      if (entry.taskId === taskId) {
-        const removed = await redis.zrem(replyInflightKey(ctx), raw);
-        return removed > 0 ? 'accepted' : 'already_acked';
-      }
-    } catch {
-      continue;
-    }
+  const outcome = await queue.respond(ctx, taskId);
+  switch (outcome) {
+    case 'accepted': return 'accepted';
+    case 'already_completed': return 'already_acked';
+    case 'task_not_found': return 'reply_not_found';
   }
-  return 'reply_not_found';
 }
 
 /** Peek at an in-flight reply entry by taskId without removing it. */
@@ -187,27 +215,21 @@ export async function peekInflightReply(
   ctx: TenantContext,
   taskId: string,
 ): Promise<ReplyInflightEntry | null> {
-  const raws = await redis.zrange(replyInflightKey(ctx), 0, -1);
-  for (const raw of raws) {
-    try {
-      const entry: ReplyInflightEntry = JSON.parse(raw);
-      if (entry.taskId === taskId) return entry;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  const entry = await queue.peekInflight(ctx, taskId);
+  return entry ? toPublicEntry(entry) : null;
 }
 
 /**
- * Direct lookup of a stored TaskResult by taskId. Returns null if the key has
- * expired or was never written. Used by GET /agents/:agentId/replies/:taskId
- * and, transitively, by MCP's nova_get_task_result fall-through.
+ * Direct lookup of a stored TaskResult by taskId. Returns null if the
+ * 24h TTL has expired or the key was never written. Used by
+ * GET /agents/:agentId/replies/:taskId and by MCP's
+ * nova_get_task_result fall-through.
  */
 export async function getStoredResult(
   ctx: TenantContext,
   taskId: string,
 ): Promise<TaskResult | null> {
+  const redis = getSharedRedis();
   const raw = await redis.get(taskResultKey(ctx, taskId));
   if (!raw) return null;
   try {
@@ -217,72 +239,28 @@ export async function getStoredResult(
   }
 }
 
-/**
- * Sweep in-flight reply sets for expired entries. Redeliver up to the reclaim
- * ceiling; DLQ past that with `broker_reply_no_response`. Idempotent.
- */
 export async function reclaimReplies(
   ctx: TenantContext,
 ): Promise<{ redelivered: number; deadLettered: number }> {
-  const now = Date.now();
-  const raws = await redis.zrangebyscore(replyInflightKey(ctx), '-inf', now);
-  let redelivered = 0;
-  let deadLettered = 0;
-
-  for (const raw of raws) {
-    let entry: ReplyInflightEntry;
-    try {
-      entry = JSON.parse(raw);
-    } catch {
-      await redis.zrem(replyInflightKey(ctx), raw);
-      continue;
-    }
-    await redis.zrem(replyInflightKey(ctx), raw);
-
-    if (entry.reclaimCount + 1 >= BROKER_RECLAIM_CEILING) {
-      await writeDeadLetter(ctx, {
-        taskId: entry.taskId,
-        targetUrl: 'broker-reply',
-        taskResult: entry.result,
-        failureReason: 'broker_reply_no_response',
-        httpStatus: 0,
-        attemptCount: entry.reclaimCount + 1,
-      });
-      deadLettered += 1;
-    } else {
-      const updated: ReplyInflightEntry = { ...entry, reclaimCount: entry.reclaimCount + 1 };
-      await redis.lpush(replyInboxKey(ctx), JSON.stringify(updated));
-      redelivered += 1;
-    }
-  }
-
-  return { redelivered, deadLettered };
+  return queue.reclaim(ctx);
 }
 
-/**
- * Iterate every broker-reply participant and run reclaimReplies. Called by
- * the reclaim worker every BROKER_RECLAIM_INTERVAL_MS.
- */
 export async function reclaimAllReplies(): Promise<{ redelivered: number; deadLettered: number }> {
-  const members = await redis.smembers(BROKER_REPLY_AGENTS_SET);
-  let redelivered = 0;
-  let deadLettered = 0;
-  for (const member of members) {
-    const [tenantId, agentId] = member.split(':', 2);
-    if (!tenantId || !agentId) continue;
-    const r = await reclaimReplies({ tenantId, agentId });
-    redelivered += r.redelivered;
-    deadLettered += r.deadLettered;
-  }
-  return { redelivered, deadLettered };
+  return queue.reclaimAll();
 }
 
-/** Remove an agent from the broker-reply participant set (on deregistration). */
+/** Remove all reply-inbox state for an agent (called on deregistration). */
 export async function forgetBrokerReplyAgent(ctx: TenantContext): Promise<void> {
-  await redis.pipeline()
-    .srem(BROKER_REPLY_AGENTS_SET, memberKey(ctx))
-    .del(replyInboxKey(ctx))
-    .del(replyInflightKey(ctx))
-    .del(replyInboxSeqKey(ctx))
-    .exec();
+  return queue.forget(ctx);
+}
+
+// ── Internal helpers ───────────────────────────────────────────────────────
+
+function toPublicEntry(entry: VisibilityEntry<TaskResult>): ReplyInflightEntry {
+  return {
+    taskId: entry.taskId,
+    result: entry.inner,
+    reclaimCount: entry.reclaimCount,
+    ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
+  };
 }
