@@ -159,11 +159,20 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
   const ucanResult = await verifyUCAN(ucanJwt, tenantCtx, agentDid, requiredScope);
 
   if (!ucanResult.valid) {
+    // chain-walking failures surface a depth (where in the chain we
+    // stopped) and sometimes a partial chainLength — attach both to
+    // metadata so operators can distinguish a failed single-link grant
+    // (chainDepth 1) from a failure deep in a federation chain. The
+    // existing `reason` string still drives alerting; metadata is for
+    // diagnostics.
+    const failureMetadata: Record<string, unknown> = {};
+    if (ucanResult.chainDepth !== undefined) failureMetadata.chainDepth = ucanResult.chainDepth;
     await auditLog(tenantCtx, {
       event: 'ucan_failed',
       senderDid: senderDid ?? undefined,
       tier,
       reason: ucanResult.reason,
+      ...(Object.keys(failureMetadata).length > 0 ? { metadata: failureMetadata } : {}),
     });
 
     const qId = await writeQuarantine(tenantCtx, {
@@ -204,10 +213,19 @@ export async function executeGatePipeline(ctx: GateContext): Promise<GateResult>
     });
   }
 
+  // Federation context: chainLength=2 is a today-style single-link grant
+  // (outer + Nova-signed root). chainLength >= 3 means the invocation came
+  // through a peer Nova — peerDid identifies which. Surfacing both in
+  // audit metadata lets operators filter and attribute federated traffic
+  // distinctly from local traffic without introducing a new event type.
+  const verifyMetadata: Record<string, unknown> = {};
+  if (ucanResult.chainLength !== undefined) verifyMetadata.chainLength = ucanResult.chainLength;
+  if (ucanResult.peerDid !== undefined) verifyMetadata.peerDid = ucanResult.peerDid;
   await auditLog(tenantCtx, {
     event: 'ucan_verified',
     senderDid: senderDid ?? undefined,
     tier,
+    ...(Object.keys(verifyMetadata).length > 0 ? { metadata: verifyMetadata } : {}),
   });
 
   // --- STEP 4: Schema Validation ---
