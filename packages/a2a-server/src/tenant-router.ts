@@ -16,7 +16,7 @@ declare global {
 /**
  * Middleware resolving the agent URL parameter into a TenantContext.
  * Queries the Redis agent index (populated by admin-api on agent creation).
- * Falls back to legacy seed tenant for backwards compatibility.
+ * Returns 404 when the agent isn't registered on this Nova.
  */
 export async function tenantRouter(req: Request, res: Response, next: NextFunction) {
   const { agentId } = req.params;

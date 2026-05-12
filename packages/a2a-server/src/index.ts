@@ -65,7 +65,7 @@ app.get('/health', healthHandler('a2a-server', startTime, async () => {
   return { redis: redisCheck, keys };
 }) as any);
 
-app.get('/metrics', metricsHandler(a2aRegistry) as any);
+app.get('/metrics', metricsHandler(a2aRegistry));
 
 app.use('/', discoverRouter);
 app.use('/', wellKnownRouter);

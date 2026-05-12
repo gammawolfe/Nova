@@ -403,7 +403,7 @@ healthApp.get('/health', (healthHandler('agent-connector', connectorStartTime, a
   return { redis, heartbeat };
 })) as any);
 
-healthApp.get('/metrics', metricsHandler(connectorRegistry) as any);
+healthApp.get('/metrics', metricsHandler(connectorRegistry));
 
 const healthServer = healthApp.listen(Number(HEALTH_PORT), () => {
   logger.info(`Agent Connector health/metrics on port ${HEALTH_PORT}`);

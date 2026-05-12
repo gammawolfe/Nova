@@ -1,81 +1,55 @@
+// packages/a2a-server/src/key-manager.ts
+//
+// Module-level singleton owning Nova's notary keypair. Loaded once at
+// process start by index.ts#start; downstream code reads via getDid()
+// and getKeypair().
+//
+// First-time setup is intentionally out of scope here: operators run
+// `pnpm run generate:keys` to mint and persist the root keypair. The
+// previous NOVA_BOOTSTRAP_FRESH_IDENTITY=1 auto-bootstrap path was
+// removed because two ways to bootstrap is one too many — and a
+// silently-rotated notary DID destroys every UCAN and trust-registry
+// entry that referenced the old one.
+
 import fsp from 'fs/promises';
-import path from 'path';
 import * as ucans from '@ucans/ucans';
 import { logger } from '@nova/shared/src/logger';
 
-export class KeyManager {
-  private static instance: KeyManager;
-  private keypair: ucans.EdKeypair | null = null;
-  private did: string | null = null;
+let keypair: ucans.EdKeypair | null = null;
+let did: string | null = null;
 
-  private constructor() {}
-
-  public static getInstance(): KeyManager {
-    if (!KeyManager.instance) {
-      KeyManager.instance = new KeyManager();
+async function initialize(privateKeyPath: string): Promise<void> {
+  try {
+    const exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
+    keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
+    if (!keypair) throw new Error('KeyManager: EdKeypair.fromSecretKey returned null');
+    did = keypair.did();
+    logger.info({ did }, 'KeyManager initialized successfully');
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      // Distinguish "missing key file" from generic load failures so the
+      // operator sees the right remediation in the logs. Don't auto-
+      // generate: that would silently rotate the notary DID and orphan
+      // every previously-issued UCAN and trust-registry entry.
+      const msg =
+        `Nova private key not found at ${privateKeyPath}. ` +
+        `Run "pnpm run generate:keys" for first-time setup.`;
+      logger.error({ path: privateKeyPath }, msg);
+      throw new Error(msg);
     }
-    return KeyManager.instance;
-  }
-
-  public async initialize(privateKeyPath: string): Promise<void> {
-    try {
-      let exportedKey: string;
-      try {
-        exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
-      } catch (err: any) {
-        if (err.code !== 'ENOENT') throw err;
-
-        // Auto-generating a fresh root keypair rotates Nova's notary DID. Any
-        // UCAN previously issued — along with every trust-registry entry that
-        // references the old DID — becomes unverifiable. A transient ENOENT
-        // (e.g. Docker bind-mount not ready at boot) would silently destroy
-        // the trust root. Refuse unless the operator has explicitly opted in.
-        if (process.env.NOVA_BOOTSTRAP_FRESH_IDENTITY !== '1') {
-          throw new Error(
-            `Nova private key not found at ${privateKeyPath}. ` +
-            `Run "pnpm run generate:keys" for first-time setup, or set ` +
-            `NOVA_BOOTSTRAP_FRESH_IDENTITY=1 to auto-generate. ` +
-            `Auto-generation is disabled by default because it rotates the ` +
-            `notary DID and orphans all existing UCANs and trust-registry entries.`,
-          );
-        }
-
-        logger.warn(
-          { path: privateKeyPath },
-          'NOVA_BOOTSTRAP_FRESH_IDENTITY=1 — generating new root identity. ' +
-            'This invalidates any pre-existing UCANs and trust-registry entries.',
-        );
-        const keypair = await ucans.EdKeypair.create({ exportable: true });
-        exportedKey = await keypair.export();
-        await fsp.mkdir(path.dirname(privateKeyPath), { recursive: true });
-        await fsp.writeFile(privateKeyPath, exportedKey, { encoding: 'utf8', mode: 0o600 });
-        await fsp.writeFile(
-          path.join(path.dirname(privateKeyPath), 'nova.did'),
-          keypair.did(),
-          'utf8',
-        );
-        logger.info({ did: keypair.did() }, 'Generated new identity keypair');
-      }
-      this.keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
-      if (!this.keypair) throw new Error('KeyManager initialization failed natively');
-      this.did = this.keypair.did();
-
-      logger.info({ did: this.did }, 'KeyManager initialized successfully');
-    } catch (error) {
-      logger.error({ err: error, path: privateKeyPath }, 'Failed to initialize KeyManager');
-      throw error;
-    }
-  }
-
-  public getKeypair(): ucans.EdKeypair {
-    if (!this.keypair) throw new Error('KeyManager not initialized');
-    return this.keypair;
-  }
-
-  public getDid(): string {
-    if (!this.did) throw new Error('KeyManager not initialized');
-    return this.did;
+    logger.error({ err, path: privateKeyPath }, 'Failed to initialize KeyManager');
+    throw err;
   }
 }
 
-export const keyManager = KeyManager.getInstance();
+function getKeypair(): ucans.EdKeypair {
+  if (!keypair) throw new Error('KeyManager not initialized');
+  return keypair;
+}
+
+function getDid(): string {
+  if (!did) throw new Error('KeyManager not initialized');
+  return did;
+}
+
+export const keyManager = { initialize, getKeypair, getDid };
