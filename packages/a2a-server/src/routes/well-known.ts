@@ -26,8 +26,41 @@ const wellKnownHelmet = helmet({
   crossOriginEmbedderPolicy: false,
 });
 
-wellKnownRouter.get('/.well-known/did.json', wellKnownHelmet, async (_req: Request, res: Response) => {
+// ── /.well-known/did.json — cached read of nova.did + nova.private.pem ─────
+//
+// The endpoint sets `Cache-Control: public, max-age=60`, telling clients
+// they may treat the response as fresh for 60s. Doing two disk reads on
+// every request behind that header was leaving free perf on the table.
+//
+// Match the in-process key cache to the same TTL so the disk reads
+// happen at most once per minute regardless of request rate. On rotation
+// the operator already has to restart the process (private-key path is
+// loaded once at boot in key-manager too), so a 60s window of stale-on-
+// disk reads is consistent with the rest of the deployment model.
+
+const DID_DOC_CACHE_TTL_MS = 60_000;
+
+interface DidDocCache {
+  novaDid: string;
+  pubKey: ReturnType<typeof createPublicKey>;
+  expiresAt: number;
+}
+
+let didDocCache: DidDocCache | null = null;
+
+async function loadDidDocSources(): Promise<{ novaDid: string | null; pubKey: ReturnType<typeof createPublicKey> | null }> {
+  if (didDocCache && didDocCache.expiresAt > Date.now()) {
+    return { novaDid: didDocCache.novaDid, pubKey: didDocCache.pubKey };
+  }
   const novaDid = await loadNovaDid();
+  if (!novaDid) return { novaDid: null, pubKey: null };
+  const pubKey = createPublicKey(await loadNovaPrivateKey());
+  didDocCache = { novaDid, pubKey, expiresAt: Date.now() + DID_DOC_CACHE_TTL_MS };
+  return { novaDid, pubKey };
+}
+
+wellKnownRouter.get('/.well-known/did.json', wellKnownHelmet, async (_req: Request, res: Response) => {
+  const { novaDid, pubKey } = await loadDidDocSources();
   if (!novaDid) {
     return res.status(404).json({
       error: 'NO_DID',
@@ -45,8 +78,6 @@ wellKnownRouter.get('/.well-known/did.json', wellKnownHelmet, async (_req: Reque
   }
 
   try {
-    const pubKey = createPublicKey(await loadNovaPrivateKey());
-
     // Optional service entries describing where peers can reach Nova. The
     // A2A entrypoint is the host this DID document was served from; we
     // reconstruct it from the DID rather than the request to avoid leaking
@@ -58,7 +89,7 @@ wellKnownRouter.get('/.well-known/did.json', wellKnownHelmet, async (_req: Reque
 
     const doc = buildDidDocument({
       did: novaDid,
-      publicKey: pubKey,
+      publicKey: pubKey!,
       services,
     });
 

@@ -134,30 +134,59 @@ registerRouter.post('/', async (req: Request, res: Response) => {
     });
   }
 
-  // Step 3: tenant must still exist.
-  const tenantConfigPath = path.join(DATA_ROOT, 'tenants', tenantId, 'tenant.json');
-  try {
-    await fsp.access(tenantConfigPath);
-  } catch {
-    return res.status(404).json({
-      error: 'TENANT_NOT_FOUND',
-      message: `Tenant ${tenantId} no longer exists`,
-    });
-  }
-
   const ctx: TenantContext = { tenantId, agentId };
 
   try {
-    // Step 4: agent must not already exist. Optimistic check; the Redis NX in
-    // consumeInvite below is the authoritative arbiter for two concurrent
-    // registrations that race past this point with the same invite.
-    // A record in 'deregistered' state is treated as absent — the agentId is
-    // free for re-registration, which will overwrite the stale config.
+    // Step 3: Redis cross-tenant guard runs first — agentId is global
+    // within a Nova (URLs are /agents/:agentId/...), so reject pre-flight
+    // if another tenant already owns it. indexAgentMeta also enforces this
+    // defensively, but checking before consumeInvite avoids burning the
+    // invite on a doomed registration. Cheap to run before any disk I/O
+    // so the obvious-conflict path takes no disk reads.
+    const claimedBy = await getSharedRedis().get(agentIndexKey(agentId));
+    if (claimedBy && claimedBy !== tenantId) {
+      return res.status(409).json({
+        error: 'AGENT_EXISTS_OTHER_TENANT',
+        message: `Agent '${agentId}' is already registered in tenant '${claimedBy}'. agentId must be unique within a Nova; pick a different one.`,
+      });
+    }
+
+    // Step 4: agent must not already exist; tenant must exist.
+    //
+    // Optimistic check on the agent — the Redis NX in consumeInvite below
+    // is the authoritative arbiter for two concurrent registrations
+    // racing past this point with the same invite. A record in
+    // 'deregistered' state is treated as absent — the agentId is free
+    // for re-registration, which will overwrite the stale config.
+    //
+    // Tenant existence is checked lazily: the agent-config path includes
+    // the tenant dir, so an ENOENT on agent-config either means "tenant
+    // exists, agent doesn't" (proceed) or "tenant doesn't exist either"
+    // (404). Only the rare ENOENT path takes the extra tenant.json
+    // access; the common-case fresh registration and the agent-exists
+    // path each take a single disk read.
     const configPath = path.join(DATA_ROOT, 'tenants', tenantId, 'agents', agentId, 'agent-config.json');
     let priorDeregistered = false;
+    let priorRaw: string | null = null;
     try {
-      const raw = await fsp.readFile(configPath, 'utf8');
-      const prior = JSON.parse(raw);
+      priorRaw = await fsp.readFile(configPath, 'utf8');
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') throw err;
+      // agent-config missing — could be "agent fresh" OR "tenant gone".
+      // Distinguish via tenant.json existence; only this rare path
+      // pays the second disk hit.
+      const tenantConfigPath = path.join(DATA_ROOT, 'tenants', tenantId, 'tenant.json');
+      try {
+        await fsp.access(tenantConfigPath);
+      } catch {
+        return res.status(404).json({
+          error: 'TENANT_NOT_FOUND',
+          message: `Tenant ${tenantId} no longer exists`,
+        });
+      }
+    }
+    if (priorRaw) {
+      const prior = JSON.parse(priorRaw);
       if (prior.status === 'deregistered') {
         priorDeregistered = true;
       } else {
@@ -167,18 +196,6 @@ registerRouter.post('/', async (req: Request, res: Response) => {
           statusUrl: `/register/status/${tenantId}/${agentId}`,
         });
       }
-    } catch { /* agent doesn't exist — proceed */ }
-
-    // Step 4b: agentId is global within a Nova (URLs are /agents/:agentId/...),
-    // so reject pre-flight if another tenant already owns it. indexAgentMeta
-    // also enforces this defensively, but checking before consumeInvite avoids
-    // burning the invite on a doomed registration.
-    const claimedBy = await getSharedRedis().get(agentIndexKey(agentId));
-    if (claimedBy && claimedBy !== tenantId) {
-      return res.status(409).json({
-        error: 'AGENT_EXISTS_OTHER_TENANT',
-        message: `Agent '${agentId}' is already registered in tenant '${claimedBy}'. agentId must be unique within a Nova; pick a different one.`,
-      });
     }
 
     // Step 5: consume the invite atomically. All reversible validation is done;
