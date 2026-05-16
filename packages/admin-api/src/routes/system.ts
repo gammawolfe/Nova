@@ -4,6 +4,13 @@ import { DATA_ROOT } from '@nova/shared/src/tenant';
 import { timedCheck, healthHandler, HealthCheck } from '@nova/shared/src/health';
 import { createMetricsRegistry, metricsHandler } from '@nova/shared/src/metrics';
 import { getSharedRedis } from '@nova/shared/src/redis';
+import {
+  ClassifierConfigUpdateSchema,
+  loadEffectiveClassifierConfig,
+  loadStoredClassifierConfig,
+  publicClassifierConfig,
+  saveClassifierConfigUpdate,
+} from '@nova/shared/src/classifier-config';
 
 export const systemRouter = Router();
 export const adminRegistry = createMetricsRegistry('admin-api');
@@ -42,3 +49,26 @@ systemRouter.get('/health', healthHandler('admin-api', startTime, async () => {
 }) as any);
 
 systemRouter.get('/metrics', metricsHandler(adminRegistry));
+
+systemRouter.get('/classifier', async (_req, res, next) => {
+  try {
+    const [stored, effective] = await Promise.all([
+      loadStoredClassifierConfig(),
+      loadEffectiveClassifierConfig(),
+    ]);
+    res.json(publicClassifierConfig(effective, stored));
+  } catch (err) {
+    next(err);
+  }
+});
+
+systemRouter.put('/classifier', async (req, res, next) => {
+  try {
+    const update = ClassifierConfigUpdateSchema.parse(req.body ?? {});
+    const stored = await saveClassifierConfigUpdate(update);
+    const effective = await loadEffectiveClassifierConfig();
+    res.json(publicClassifierConfig(effective, stored));
+  } catch (err) {
+    next(err);
+  }
+});

@@ -13,12 +13,7 @@ import { validateSchema } from './schema-validator';
 import { extractStrings, patternMatch, llmClassify, classifyDecision } from './classifier';
 import { writeQuarantine } from './quarantine';
 import { gateDecisions, gateLatency, classifierResults } from './metrics';
-
-// Default fail-closed: when the LLM classifier is unavailable, quarantine
-// the request rather than let it through. Operators can opt in to fail-open
-// by setting GATE_LLM_FAIL_CLOSED=false, but this leaves layer-5 injection
-// detection offline during outages.
-const GATE_LLM_FAIL_CLOSED = process.env.GATE_LLM_FAIL_CLOSED !== 'false';
+import { loadEffectiveClassifierConfig } from '@nova/shared/src/classifier-config';
 
 export interface GateContext {
   tenantCtx: TenantContext;
@@ -420,8 +415,28 @@ async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
   });
 
   // Stage B — LLM classification with fail-open/fail-closed switch.
+  const classifierConfig = await loadEffectiveClassifierConfig();
+  if (!classifierConfig.aiEnabled) {
+    const reason = classifierConfig.mode === 'pattern_only'
+      ? 'LLM classifier disabled by mode=pattern_only'
+      : 'No classifier API key configured; LLM classifier skipped';
+    await auditLog(tenantCtx, {
+      event: 'classifier_unavailable',
+      senderDid: senderDid ?? undefined,
+      tier,
+      reason,
+      metadata: {
+        failMode: 'disabled',
+        mode: classifierConfig.mode,
+        apiKeySource: classifierConfig.apiKeySource,
+      },
+    });
+    classifierResults.inc({ result: 'disabled', stage: 'llm' });
+    return pass(undefined);
+  }
+
   try {
-    const llmResult = await llmClassify(strings, tenantCtx);
+    const llmResult = await llmClassify(strings, tenantCtx, { config: classifierConfig });
     const decision = classifyDecision(llmResult);
 
     if (decision === 'quarantine') {
@@ -468,7 +483,7 @@ async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
     });
     return pass(undefined);
   } catch (err: any) {
-    if (GATE_LLM_FAIL_CLOSED) {
+    if (classifierConfig.failClosed) {
       await auditLog(tenantCtx, {
         event: 'classifier_unavailable',
         senderDid: senderDid ?? undefined,
@@ -494,7 +509,7 @@ async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
       });
     }
 
-    // Classifier unavailable + GATE_LLM_FAIL_CLOSED=false → fail-open:
+    // Classifier unavailable + failClosed=false → fail-open:
     // skip layer-5 LLM injection detection and let the request through.
     // Layers 1-4 (tier, UCAN, schema, pattern-match) still ran.
     await auditLog(tenantCtx, {
@@ -502,12 +517,12 @@ async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
       senderDid: senderDid ?? undefined,
       tier,
       reason: err.message,
-      metadata: { failMode: 'open' },
+      metadata: { failMode: 'open', mode: classifierConfig.mode, apiKeySource: classifierConfig.apiKeySource },
     });
     classifierResults.inc({ result: 'fail_open', stage: 'llm_error' });
     logger.warn(
       { err: err.message },
-      'LLM classifier unavailable — fail-open enabled (GATE_LLM_FAIL_CLOSED=false), injection detection bypassed'
+      'LLM classifier unavailable — fail-open enabled, injection detection bypassed'
     );
     return pass(undefined);
   }

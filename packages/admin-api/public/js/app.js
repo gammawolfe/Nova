@@ -42,6 +42,10 @@ window.novaApp = function () {
     auditError: null,
     auditFilters: { event: '', taskId: '', tenantId: '' },
     auditExpanded: null,
+    classifierSettings: null,
+    classifierLoading: false,
+    classifierError: null,
+    classifierSaving: false,
     selectedAgent: null,
     sidebarCollapsed: readSidebarState(),
 
@@ -52,6 +56,7 @@ window.novaApp = function () {
         case 'agents':  return 'agents';
         case 'live':    return 'live';
         case 'audit':   return 'audit';
+        case 'settings': return 'settings';
         default:        return 'galaxies';
       }
     },
@@ -126,6 +131,7 @@ window.novaApp = function () {
       if (this.route.name === 'agents') await this.loadAllAgents();
       if (this.route.name === 'live')   await this.loadAllAgents();
       if (this.route.name === 'audit')  await this.loadAuditEvents();
+      if (this.route.name === 'settings') await this.loadClassifierSettings();
     },
 
     async loadGalaxies() {
@@ -245,6 +251,47 @@ window.novaApp = function () {
 
     toggleAuditRow(eventId) {
       this.auditExpanded = this.auditExpanded === eventId ? null : eventId;
+    },
+
+    async loadClassifierSettings() {
+      this.classifierLoading = true;
+      this.classifierError = null;
+      try {
+        this.classifierSettings = await api('GET', '/admin/classifier');
+      } catch (e) {
+        this.classifierError = e.message || 'Load failed';
+        this.pushToast(this.classifierError, 'err');
+      } finally {
+        this.classifierLoading = false;
+      }
+    },
+
+    classifierKeyLabel(settings = this.classifierSettings) {
+      if (!settings) return 'Unknown';
+      if (settings.apiKeySource === 'env') return 'Configured via environment';
+      if (settings.apiKeySource === 'stored') return 'Configured in Nova';
+      return 'Not configured';
+    },
+
+    async saveClassifierSettings(form) {
+      this.classifierSaving = true;
+      try {
+        const payload = {
+          mode: form.mode,
+          provider: 'anthropic',
+          model: form.model,
+          failClosed: form.failClosed,
+          ...(form.apiKey ? { apiKey: form.apiKey } : {}),
+          ...(form.clearApiKey ? { clearApiKey: true } : {}),
+        };
+        this.classifierSettings = await api('PUT', '/admin/classifier', payload);
+        this.pushToast('Classifier settings saved', 'ok');
+      } catch (e) {
+        this.pushToast(e.message || 'Save failed', 'err');
+        throw e;
+      } finally {
+        this.classifierSaving = false;
+      }
     },
 
     openAgentDetail(agentId) {
@@ -575,5 +622,6 @@ function parseRoute() {
   if (h === '/agents') return { name: 'agents' };
   if (h === '/live')   return { name: 'live' };
   if (h === '/audit')  return { name: 'audit' };
+  if (h === '/settings') return { name: 'settings' };
   return { name: 'home' };
 }

@@ -58,6 +58,7 @@
           <a href="#/agents"  class="nova-nav-item" :class="activeTab === 'agents'   && 'is-active'">Agents</a>
           <a href="#/live"    class="nova-nav-item" :class="activeTab === 'live'     && 'is-active'">Live</a>
           <a href="#/audit"   class="nova-nav-item" :class="activeTab === 'audit'    && 'is-active'">Audit</a>
+          <a href="#/settings" class="nova-nav-item" :class="activeTab === 'settings' && 'is-active'">Settings</a>
         </nav>
         <div class="nova-sidebar-spacer"></div>
         <button class="nova-sidebar-logout" @click="logout()">Log out</button>
@@ -415,6 +416,120 @@
           <p x-show="!auditLoading && !auditError && visibleAuditEvents.length >= 50" class="nova-subtitle" style="margin-top:12px;text-align:center">
             Showing 50 most recent · refine filters for older events
           </p>
+        </div>
+      </template>
+
+      <!-- SETTINGS -->
+      <template x-if="route.name === 'settings'">
+        <div>
+          <div class="nova-eyebrow">◉ SETTINGS</div>
+          <h1 class="nova-display" style="font-size:40px;margin:6px 0">Settings</h1>
+          <p class="nova-subtitle" style="margin-bottom:24px">Security controls for the gate pipeline.</p>
+
+          <div x-show="classifierLoading" class="nova-glass" style="text-align:center;color:var(--text-secondary)">
+            Loading classifier settings…
+          </div>
+
+          <div x-show="classifierError" class="nova-glass" style="text-align:center;color:var(--status-error)" x-text="classifierError"></div>
+
+          <template x-if="classifierSettings && !classifierLoading">
+            <div class="nova-settings-grid" x-data="{
+              mode: classifierSettings.mode,
+              model: classifierSettings.model,
+              failClosed: classifierSettings.failClosed,
+              apiKey: '',
+              clearApiKey: false,
+              err: ''
+            }" x-effect="
+              mode = classifierSettings.mode;
+              model = classifierSettings.model;
+              failClosed = classifierSettings.failClosed;
+              apiKey = '';
+              clearApiKey = false;
+            ">
+              <section class="nova-settings-panel">
+                <div class="nova-row" style="justify-content:space-between;align-items:flex-start;margin-bottom:18px">
+                  <div>
+                    <h2 style="margin:0 0 6px;font-size:22px;font-weight:500">Injection Classifier</h2>
+                    <p class="nova-subtitle" style="margin:0">Pattern checks always run. AI classification runs only when enabled and a key is available.</p>
+                  </div>
+                  <span class="nova-pill"
+                        :class="classifierSettings.aiEnabled ? 'nova-pill-active' : ''"
+                        :style="!classifierSettings.aiEnabled ? 'color:var(--text-muted);border-color:var(--border)' : ''"
+                        x-text="classifierSettings.aiEnabled ? 'AI on' : 'Pattern only'"></span>
+                </div>
+
+                <div class="nova-form-grid">
+                  <div>
+                    <label class="nova-label" for="classifier-mode">mode</label>
+                    <select id="classifier-mode" class="nova-input" x-model="mode">
+                      <option value="pattern_ai">Pattern + AI when key exists</option>
+                      <option value="pattern_only">Pattern only</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label class="nova-label" for="classifier-fail">AI failure behavior</label>
+                    <select id="classifier-fail" class="nova-input" x-model="failClosed">
+                      <option :value="true">Fail closed</option>
+                      <option :value="false">Fail open</option>
+                    </select>
+                  </div>
+                </div>
+
+                <label class="nova-label" for="classifier-model" style="margin-top:16px">model</label>
+                <input id="classifier-model" class="nova-input nova-mono" x-model="model" placeholder="claude-haiku-4-20250514">
+
+                <div class="nova-settings-keybox">
+                  <div>
+                    <div class="nova-label">api key</div>
+                    <div class="nova-row" style="gap:8px;flex-wrap:wrap">
+                      <span class="nova-pill" :class="classifierSettings.apiKeySource !== 'none' ? 'nova-pill-active' : ''"
+                            :style="classifierSettings.apiKeySource === 'none' ? 'color:var(--text-muted);border-color:var(--border)' : ''"
+                            x-text="classifierKeyLabel()"></span>
+                      <span class="nova-mono" x-show="classifierSettings.envKeyConfigured">Env key takes precedence over stored key.</span>
+                    </div>
+                  </div>
+
+                  <label class="nova-label" for="classifier-key" style="margin-top:14px">replace stored key</label>
+                  <input id="classifier-key" class="nova-input" type="password" autocomplete="off"
+                         x-model="apiKey" :disabled="clearApiKey"
+                         placeholder="sk-ant-…">
+
+                  <label class="nova-check" style="margin-top:12px">
+                    <input type="checkbox" x-model="clearApiKey" :disabled="classifierSettings.apiKeySource === 'env' && !classifierSettings.storedKeyConfigured">
+                    <span>Clear stored key</span>
+                  </label>
+                </div>
+
+                <p class="nova-error" x-show="err" x-text="err" style="margin-top:12px"></p>
+
+                <div class="nova-row" style="margin-top:22px;justify-content:flex-end;gap:10px">
+                  <button class="nova-input" style="width:auto;padding:10px 16px" @click="loadClassifierSettings()" :disabled="classifierSaving">Reset</button>
+                  <button class="nova-cta" @click="(async () => {
+                    err = '';
+                    try { await saveClassifierSettings({ mode, model, failClosed: failClosed === true || failClosed === 'true', apiKey, clearApiKey }); }
+                    catch (e) { err = e.message || 'Save failed'; }
+                  })()" :disabled="classifierSaving || !model">
+                    <span x-text="classifierSaving ? 'Saving…' : 'Save settings'"></span><span>→</span>
+                  </button>
+                </div>
+              </section>
+
+              <aside class="nova-settings-panel is-compact">
+                <div class="nova-label">effective state</div>
+                <div class="nova-settings-facts">
+                  <div><span>Mode</span><strong x-text="classifierSettings.mode === 'pattern_ai' ? 'Pattern + AI' : 'Pattern only'"></strong></div>
+                  <div><span>Provider</span><strong x-text="classifierSettings.provider"></strong></div>
+                  <div><span>Model</span><strong class="nova-mono" x-text="classifierSettings.model"></strong></div>
+                  <div><span>AI enabled</span><strong x-text="classifierSettings.aiEnabled ? 'yes' : 'no'"></strong></div>
+                  <div><span>Failure</span><strong x-text="classifierSettings.failClosed ? 'fail closed' : 'fail open'"></strong></div>
+                  <div><span>Key source</span><strong x-text="classifierSettings.apiKeySource"></strong></div>
+                  <div><span>Updated</span><strong class="nova-mono" x-text="classifierSettings.updatedAt ? new Date(classifierSettings.updatedAt).toLocaleString() : 'not saved'"></strong></div>
+                </div>
+              </aside>
+            </div>
+          </template>
         </div>
       </template>
 
