@@ -104,7 +104,6 @@ const CLASSIFICATION_TOOL = {
   },
 };
 
-const CONFIDENCE_DETECTOR = 0.85;
 const CONFIDENCE_SUSPECTED = 0.60;
 const CLASSIFIER_CACHE_TTL = 600; // 10 minutes
 
