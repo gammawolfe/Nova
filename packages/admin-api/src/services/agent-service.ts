@@ -195,16 +195,25 @@ export async function listAgents(tenantId: string): Promise<AgentConfig[]> {
   try { dirs = await fsp.readdir(agentsDir); }
   catch { return []; }
 
-  const configs = await Promise.all(
-    dirs
-      .filter(d => ID_RE.test(d))
-      .map(async d => {
+  const validDirs = dirs.filter(d => ID_RE.test(d));
+  const configs: Array<AgentConfig | null> = [];
+  const batchSize = 32;
+
+  for (let i = 0; i < validDirs.length; i += batchSize) {
+    const batch = validDirs.slice(i, i + batchSize);
+    const loaded = await Promise.all(
+      batch.map(async d => {
         try {
           const raw = await fsp.readFile(path.join(agentsDir, d, 'agent-config.json'), 'utf8');
           return JSON.parse(raw) as AgentConfig;
-        } catch { return null; }
+        } catch {
+          return null;
+        }
       })
-  );
+    );
+    configs.push(...loaded);
+  }
+
   return configs.filter((a): a is AgentConfig => a !== null && a.status !== 'deregistered');
 }
 
