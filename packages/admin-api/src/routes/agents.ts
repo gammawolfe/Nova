@@ -72,7 +72,7 @@ agentsRouter.post('/:agentId/approve', async (req, res, next) => {
     const data = AgentApprovalSchema.parse(req.body);
 
     // Flip status to active
-    const agent = await agentService.approveAgent(tenantId, agentId, data.notes);
+    const agent = await agentService.approveAgent(tenantId, agentId);
 
     // Create trust registry entry for the agent itself
     if (agent.did) {
