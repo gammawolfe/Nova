@@ -11,6 +11,10 @@ import { redisKey } from '@nova/shared/src/tenant';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
+import {
+  DEFAULT_CLASSIFIER_MODEL,
+  type EffectiveClassifierConfig,
+} from '@nova/shared/src/classifier-config';
 
 // Re-export shared types for backwards compatibility
 export { extractStrings, StringField, PatternMatchResult } from '@nova/shared/src/classifier';
@@ -141,15 +145,12 @@ function readDelayLadder(key: string, fallback: number[]): number[] {
   return fallback;
 }
 
-let _defaultAnthropicClient: Anthropic | null = null;
-function defaultAnthropicClient(): Anthropic {
-  if (!_defaultAnthropicClient) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error('ANTHROPIC_API_KEY not set — LLM classifier cannot run');
-    }
-    _defaultAnthropicClient = new Anthropic();
+let _defaultAnthropicClient: { apiKey: string; client: Anthropic } | null = null;
+function defaultAnthropicClient(apiKey: string): Anthropic {
+  if (!_defaultAnthropicClient || _defaultAnthropicClient.apiKey !== apiKey) {
+    _defaultAnthropicClient = { apiKey, client: new Anthropic({ apiKey }) };
   }
-  return _defaultAnthropicClient;
+  return _defaultAnthropicClient.client;
 }
 
 /**
@@ -170,6 +171,8 @@ export function _resetAnthropicClientForTests(): void {
 export interface LlmClassifyOptions {
   /** Inject an Anthropic-compatible client. Production omits this. */
   client?: Pick<Anthropic, 'messages'>;
+  /** Effective runtime config from env + admin UI. Production passes this. */
+  config?: Pick<EffectiveClassifierConfig, 'apiKey' | 'model'>;
 }
 
 /**
@@ -198,8 +201,11 @@ export async function llmClassify(
 ): Promise<LLMClassificationResult> {
   const content = strings.map(s => `[${s.path}]: ${s.value}`).join('\n') || '(empty params)';
 
-  // Check cache
-  const cacheKey = crypto.createHash('sha256').update(content).digest('hex');
+  const model = opts.config?.model || process.env.CLASSIFIER_MODEL || DEFAULT_CLASSIFIER_MODEL;
+
+  // Check cache. Include the model so changing classifier models doesn't
+  // reuse a prior model's judgement for the same text.
+  const cacheKey = crypto.createHash('sha256').update(`${model}\0${content}`).digest('hex');
   try {
     const cached = await getSharedRedis().get(redisKey(ctx, 'classifier-cache', cacheKey));
     if (cached) {
@@ -211,8 +217,11 @@ export async function llmClassify(
     logger.warn({ err: err.message }, 'Classifier cache read failed — proceeding to LLM');
   }
 
-  const model = process.env.CLASSIFIER_MODEL || 'claude-haiku-4-20250514';
-  const client = opts.client ?? defaultAnthropicClient();
+  const apiKey = opts.config?.apiKey ?? process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey && !opts.client) {
+    throw new Error('ANTHROPIC_API_KEY not set — LLM classifier cannot run');
+  }
+  const client = opts.client ?? defaultAnthropicClient(apiKey!);
   let lastErr: Error | null = null;
 
   for (let attempt = 0; attempt < CLASSIFIER_MAX_ATTEMPTS; attempt++) {
