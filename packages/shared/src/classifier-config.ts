@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { DATA_ROOT } from './tenant';
 import { writeAtomicallyAsync } from './fs-utils';
 
-export const DEFAULT_CLASSIFIER_MODEL = 'claude-haiku-4-20250514';
+export const DEFAULT_CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL;
 
 export const ClassifierModeSchema = z.enum(['pattern_ai', 'pattern_only']);
 
