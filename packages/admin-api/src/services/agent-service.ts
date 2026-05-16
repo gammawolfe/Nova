@@ -154,7 +154,7 @@ export async function createAgentPending(tenantId: string, data: {
 /**
  * Approve a pending agent: flip status to active, return config for approval caller.
  */
-export async function approveAgent(tenantId: string, agentId: string, notes?: string): Promise<AgentConfig> {
+export async function approveAgent(tenantId: string, agentId: string): Promise<AgentConfig> {
   validateId(tenantId, 'tenantId');
   validateId(agentId, 'agentId');
   const agent = await getAgent(tenantId, agentId);
