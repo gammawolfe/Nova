@@ -419,7 +419,7 @@ async function runClassifyStep(args: ClassifyStepArgs): Promise<Step<void>> {
   if (!classifierConfig.aiEnabled) {
     const reason = classifierConfig.mode === 'pattern_only'
       ? 'LLM classifier disabled by mode=pattern_only'
-      : 'No classifier API key configured; LLM classifier skipped';
+      : (!classifierConfig.apiKey ? 'No classifier API key configured; LLM classifier skipped' : 'No classifier model configured; LLM classifier skipped');
     await auditLog(tenantCtx, {
       event: 'classifier_unavailable',
       senderDid: senderDid ?? undefined,

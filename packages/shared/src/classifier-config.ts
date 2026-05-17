@@ -4,13 +4,7 @@ import { z } from 'zod';
 import { DATA_ROOT } from './tenant';
 import { writeAtomicallyAsync } from './fs-utils';
 
-const CLASSIFIER_MODEL_FALLBACK = 'claude-haiku-4-20250514';
 
-export const DEFAULT_CLASSIFIER_MODEL: string = CLASSIFIER_MODEL_FALLBACK;
-
-export function defaultClassifierModel(): string {
-  return CLASSIFIER_MODEL_FALLBACK;
-}
 
 export const ClassifierModeSchema = z.enum(['pattern_ai', 'pattern_only']);
 
@@ -32,7 +26,7 @@ export type ClassifierConfigUpdate = z.infer<typeof ClassifierConfigUpdateSchema
 export interface StoredClassifierConfig {
   mode: ClassifierMode;
   provider: 'anthropic';
-  model: string;
+  model?: string;
   apiKey?: string;
   failClosed: boolean;
   updatedAt: string;
@@ -41,7 +35,7 @@ export interface StoredClassifierConfig {
 export interface EffectiveClassifierConfig {
   mode: ClassifierMode;
   provider: 'anthropic';
-  model: string;
+  model?: string;
   apiKey?: string;
   apiKeySource: 'env' | 'stored' | 'none';
   failClosed: boolean;
@@ -53,7 +47,7 @@ export interface EffectiveClassifierConfig {
 const StoredClassifierConfigSchema = z.object({
   mode: ClassifierModeSchema.default('pattern_ai'),
   provider: z.literal('anthropic').default('anthropic'),
-  model: z.string().trim().min(1).default(defaultClassifierModel),
+  model: z.string().trim().min(1).optional(),
   apiKey: z.string().trim().min(1).optional(),
   failClosed: z.boolean().default(true),
   updatedAt: z.string().datetime().default(() => new Date().toISOString()),
@@ -82,7 +76,7 @@ export async function loadStoredClassifierConfig(): Promise<StoredClassifierConf
     return {
       mode: parsed.mode,
       provider: parsed.provider,
-      model: parsed.model,
+      ...(parsed.model !== undefined ? { model: parsed.model } : {}),
       failClosed: parsed.failClosed,
       updatedAt: parsed.updatedAt,
       ...(parsed.apiKey ? { apiKey: parsed.apiKey } : {}),
@@ -95,10 +89,11 @@ export async function loadStoredClassifierConfig(): Promise<StoredClassifierConf
 
 export async function saveClassifierConfigUpdate(update: ClassifierConfigUpdate): Promise<StoredClassifierConfig> {
   const current = await loadStoredClassifierConfig();
+  const modelValue = update.model ?? current?.model;
   const next: StoredClassifierConfig = {
     mode: update.mode ?? current?.mode ?? 'pattern_ai',
     provider: 'anthropic',
-    model: update.model ?? current?.model ?? defaultClassifierModel(),
+    ...(modelValue !== undefined ? { model: modelValue } : {}),
     failClosed: update.failClosed ?? current?.failClosed ?? true,
     updatedAt: new Date().toISOString(),
     ...(current?.apiKey && !update.clearApiKey ? { apiKey: current.apiKey } : {}),
@@ -116,17 +111,17 @@ export async function loadEffectiveClassifierConfig(env: NodeJS.ProcessEnv = pro
   const storedKey = stored?.apiKey?.trim();
   const apiKey = envKey || storedKey || undefined;
   const mode = parseModeEnv(env.GATE_LLM_CLASSIFIER_MODE) ?? stored?.mode ?? 'pattern_ai';
-  const model = env.CLASSIFIER_MODEL?.trim() || stored?.model || defaultClassifierModel();
+  const model = env.CLASSIFIER_MODEL?.trim() || stored?.model;
   const failClosed = parseBooleanEnv(env.GATE_LLM_FAIL_CLOSED) ?? stored?.failClosed ?? true;
 
   return {
     mode,
     provider: 'anthropic',
-    model,
+    ...(model !== undefined ? { model } : {}),
     ...(apiKey ? { apiKey } : {}),
     apiKeySource: envKey ? 'env' : storedKey ? 'stored' : 'none',
     failClosed,
-    aiEnabled: mode === 'pattern_ai' && !!apiKey,
+    aiEnabled: mode === 'pattern_ai' && !!apiKey && !!model,
     storedKeyConfigured: !!storedKey,
     envKeyConfigured: !!envKey,
   };
