@@ -4,7 +4,13 @@ import { z } from 'zod';
 import { DATA_ROOT } from './tenant';
 import { writeAtomicallyAsync } from './fs-utils';
 
-export const DEFAULT_CLASSIFIER_MODEL = 'claude-haiku-4-20250514';
+const CLASSIFIER_MODEL_FALLBACK = 'claude-haiku-4-20250514';
+
+export const DEFAULT_CLASSIFIER_MODEL: string = CLASSIFIER_MODEL_FALLBACK;
+
+export function defaultClassifierModel(): string {
+  return CLASSIFIER_MODEL_FALLBACK;
+}
 
 export const ClassifierModeSchema = z.enum(['pattern_ai', 'pattern_only']);
 
@@ -47,7 +53,7 @@ export interface EffectiveClassifierConfig {
 const StoredClassifierConfigSchema = z.object({
   mode: ClassifierModeSchema.default('pattern_ai'),
   provider: z.literal('anthropic').default('anthropic'),
-  model: z.string().trim().min(1).default(DEFAULT_CLASSIFIER_MODEL),
+  model: z.string().trim().min(1).default(defaultClassifierModel),
   apiKey: z.string().trim().min(1).optional(),
   failClosed: z.boolean().default(true),
   updatedAt: z.string().datetime().default(() => new Date().toISOString()),
@@ -92,7 +98,7 @@ export async function saveClassifierConfigUpdate(update: ClassifierConfigUpdate)
   const next: StoredClassifierConfig = {
     mode: update.mode ?? current?.mode ?? 'pattern_ai',
     provider: 'anthropic',
-    model: update.model ?? current?.model ?? DEFAULT_CLASSIFIER_MODEL,
+    model: update.model ?? current?.model ?? defaultClassifierModel(),
     failClosed: update.failClosed ?? current?.failClosed ?? true,
     updatedAt: new Date().toISOString(),
     ...(current?.apiKey && !update.clearApiKey ? { apiKey: current.apiKey } : {}),
@@ -110,7 +116,7 @@ export async function loadEffectiveClassifierConfig(env: NodeJS.ProcessEnv = pro
   const storedKey = stored?.apiKey?.trim();
   const apiKey = envKey || storedKey || undefined;
   const mode = parseModeEnv(env.GATE_LLM_CLASSIFIER_MODE) ?? stored?.mode ?? 'pattern_ai';
-  const model = env.CLASSIFIER_MODEL?.trim() || stored?.model || DEFAULT_CLASSIFIER_MODEL;
+  const model = env.CLASSIFIER_MODEL?.trim() || stored?.model || defaultClassifierModel();
   const failClosed = parseBooleanEnv(env.GATE_LLM_FAIL_CLOSED) ?? stored?.failClosed ?? true;
 
   return {
