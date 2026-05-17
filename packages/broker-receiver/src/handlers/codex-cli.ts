@@ -198,8 +198,6 @@ async function runCodexExec(opts: {
   try {
     const args = [
       'exec',
-      '--ask-for-approval',
-      'never',
       '--sandbox',
       opts.cfg.sandbox,
       '--cd',
