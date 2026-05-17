@@ -1,11 +1,21 @@
 import fs from 'fs';
 import path from 'path';
-import * as ucans from '@ucans/ucans';
+import crypto from 'crypto';
+import bs58 from 'bs58';
 import { KEY_ROOT } from '../packages/shared/src/tenant';
 
 const keysDir = KEY_ROOT;
 const privateKeyPath = path.join(keysDir, 'nova.private.pem');
 const didPath = path.join(keysDir, 'nova.did');
+const ED25519_MULTICODEC_PREFIX = Uint8Array.of(0xed, 0x01);
+
+function deriveDidKey(publicKey: crypto.KeyObject): string {
+  const jwk = publicKey.export({ format: 'jwk' }) as { x?: string };
+  if (!jwk.x) throw new Error('Generated public key missing x coordinate');
+  const rawPublicKey = Buffer.from(jwk.x, 'base64url');
+  const prefixed = Buffer.concat([ED25519_MULTICODEC_PREFIX, rawPublicKey]);
+  return `did:key:z${bs58.encode(prefixed)}`;
+}
 
 async function main() {
   const isCleanup = process.argv.includes('--cleanup');
@@ -35,10 +45,10 @@ async function main() {
   fs.renameSync(didPath, didPath + '.old');
   console.log('Moved current keys to *.old');
 
-  // Step 3: Generate new keypair
-  const keypair = await ucans.EdKeypair.create({ exportable: true });
-  const exported = await keypair.export();
-  const newDid = keypair.did();
+  // Step 3: Generate new keypair in the canonical PKCS8 PEM format.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const exported = privateKey.export({ format: 'pem', type: 'pkcs8' }) as string;
+  const newDid = deriveDidKey(publicKey);
 
   fs.writeFileSync(privateKeyPath, exported, { encoding: 'utf8', mode: 0o600 });
   fs.writeFileSync(didPath, newDid, 'utf8');

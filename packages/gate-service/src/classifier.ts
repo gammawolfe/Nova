@@ -12,7 +12,7 @@ import { TenantContext } from '@nova/shared/src/tenant';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import {
-  DEFAULT_CLASSIFIER_MODEL,
+  defaultClassifierModel,
   type EffectiveClassifierConfig,
 } from '@nova/shared/src/classifier-config';
 
@@ -201,7 +201,7 @@ export async function llmClassify(
 ): Promise<LLMClassificationResult> {
   const content = strings.map(s => `[${s.path}]: ${s.value}`).join('\n') || '(empty params)';
 
-  const model = opts.config?.model || process.env.CLASSIFIER_MODEL || DEFAULT_CLASSIFIER_MODEL;
+  const model = opts.config?.model || process.env.CLASSIFIER_MODEL || defaultClassifierModel();
 
   // Check cache. Include the model so changing classifier models doesn't
   // reuse a prior model's judgement for the same text.
