@@ -39,7 +39,11 @@ export async function createHandler(cfg: ReceiverConfig): Promise<Handler> {
 // Built-in handlers register on import. Callers that want a trimmed set
 // can import from the specific handler module instead of this index.
 import { echoHandlerFactory } from './echo.js';
+import { codexCliHandlerFactory } from './codex-cli.js';
+import { codexSmokeHandlerFactory } from './codex-smoke.js';
 import { claudeApiHandlerFactory } from './claude-api.js';
 
 registerHandler('echo', echoHandlerFactory);
+registerHandler('codex-cli', codexCliHandlerFactory);
+registerHandler('codex-smoke', codexSmokeHandlerFactory);
 registerHandler('claude-api', claudeApiHandlerFactory);

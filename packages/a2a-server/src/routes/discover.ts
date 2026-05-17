@@ -9,6 +9,7 @@ import { Router, Request, Response } from 'express';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { listActiveAgentMeta, getAgentMeta } from '@nova/shared/src/agent-index';
+import { getBrokerPresence } from '@nova/shared/src/broker-presence';
 
 export const discoverRouter = Router();
 
@@ -32,7 +33,16 @@ discoverRouter.get('/discover', async (req: Request, res: Response) => {
         )
       );
     }
-    res.json(agents);
+    const withPresence = await Promise.all(
+      agents.map(async agent => ({
+        ...agent,
+        brokerPresence: await getBrokerPresence(
+          { tenantId: agent.tenantId, agentId: agent.agentId },
+          redis,
+        ),
+      })),
+    );
+    res.json(withPresence);
   } catch (err) {
     logger.error({ err }, 'Failed to list agents for discovery');
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve agent list' });
@@ -48,7 +58,13 @@ discoverRouter.get('/discover/:agentId', async (req: Request, res: Response) => 
     if (!agent) {
       return res.status(404).json({ error: 'AGENT_NOT_FOUND', message: `Agent ${agentId} not found` });
     }
-    res.json(agent);
+    res.json({
+      ...agent,
+      brokerPresence: await getBrokerPresence(
+        { tenantId: agent.tenantId, agentId: agent.agentId },
+        redis,
+      ),
+    });
   } catch (err) {
     logger.error({ err }, `Failed to retrieve agent ${agentId}`);
     res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to retrieve agent details' });

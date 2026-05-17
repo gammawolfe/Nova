@@ -5,10 +5,16 @@ Claude Code, Cursor, Hermes, OpenClaw, custom agents — joins a Nova network
 and can then discover peers and send tasks through a hardened capability-based
 pipeline instead of unauthenticated JSON APIs.
 
-Nova implements the **A2A** (Agent-to-Agent) wire protocol with UCAN-based
+Nova implements a native brokered agent-communication protocol with UCAN-based
 capabilities, a five-layer gate for auth and injection defense, and an
 **MCP on-ramp** (`@nova/mcp-server`) so any MCP-native AI runtime can onboard
-without learning A2A directly.
+without learning Nova HTTP, Redis, or UCAN internals.
+
+Nova borrows useful A2A concepts such as agent cards, skills, task lifecycle,
+streaming, and push notifications, but it is **not currently an A2A-compliant
+wire implementation**. Nova's native model is brokered, capability-scoped, and
+supports inbox-based receivers behind NAT or on personal devices. A future A2A
+adapter can sit beside the native protocol for ecosystem interop.
 
 ---
 
@@ -47,7 +53,7 @@ There are three kinds of agents:
 | Role | What they do | How they connect |
 |---|---|---|
 | **Sender** | Originates tasks (your Claude Code asking the bookstore for a price quote) | Uses `@nova/mcp-server` — no HTTP endpoint needed |
-| **Webhook receiver** | Accepts tasks via push to a hosted endpoint (the bookstore's order agent) | Hosts an A2A operator webhook per `nova-protocol-spec.md §7` |
+| **Webhook receiver** | Accepts tasks via push to a hosted endpoint (the bookstore's order agent) | Hosts a Nova operator webhook per `nova-protocol-spec.md §7` |
 | **Broker receiver** | Accepts tasks via pull — no inbound HTTP, suitable for MCP-native runtimes and headless daemons | Runs `@nova/broker-receiver` (supervised daemon) or pulls interactively via `nova_next_task` from `@nova/mcp-server` |
 
 Most runtimes are senders. Webhook receivers are services with a public HTTP
@@ -64,12 +70,13 @@ notifications over SSE so latency is ~100ms, not a poll cycle.
 ```bash
 npm install
 npm run generate:keys        # Ed25519 keypair for the gateway
+export ADMIN_TOKEN="$(openssl rand -hex 32)"  # or put this in .env
 docker compose up -d         # redis :6379, a2a-server :3001, gate-service, agent-connector, admin-api :3005, caddy :80/:8443
 ```
 
 ### 2. Create your galaxy and mint an invite
 
-Via admin UI at `http://localhost:3005/` once wired up, or directly:
+Via the admin UI at `http://localhost:3005/`, or directly:
 
 ```bash
 # Create tenant
@@ -92,13 +99,28 @@ curl -X POST http://localhost:3005/admin/tenants/TENANT_ID/invites \
 
 Short version: point any MCP-native runtime at `@nova/mcp-server` and run the `/nova_onboard` prompt. See [MCP integration](#mcp-integration) below for per-runtime config snippets.
 
+Codex-specific note: when a Codex session is asked to onboard itself, it should
+register as a **broker-mode sender + receiver** by default, with real skills
+such as `answer_code_question` and `review_code`. Do not register Codex as
+`__sender_only` unless the operator explicitly asks for a send-only agent. The
+exact Codex recipe is in
+[`docs/agent-onboarding.md#9-codex-broker-mode-onboarding-recipe`](docs/agent-onboarding.md#9-codex-broker-mode-onboarding-recipe).
+
 ---
 
 ## MCP integration
 
 `@nova/mcp-server` is the universal on-ramp. It turns every Nova operation
 into a typed MCP tool so your existing AI runtime can register, discover, and
-send tasks without speaking A2A directly.
+send tasks without speaking the native Nova HTTP protocol directly.
+
+Build the MCP server before pointing an MCP client at `dist/index.js`:
+
+```bash
+npm run build
+# or just:
+npx tsc --build packages/mcp-server
+```
 
 ### Tools exposed
 
@@ -118,7 +140,7 @@ nova_ucan_status           approval-grant cache inspection
 nova_list_agents           discovery across all galaxies
 nova_get_agent_card        skill schemas for a specific agent
 nova_send_task             mint invocation token locally + POST task to destination
-nova_get_task_result       poll task state
+nova_get_task_result       return broker reply result if stored; otherwise fall back to task state
 
 # Broker-mode receive (no webhook)
 nova_next_task             long-poll for a task; claims with 5-min visibility
@@ -145,7 +167,7 @@ nova_reissue_ucan          regenerate an approval grant after the claim window l
 Resources: `nova://agents`, `nova://agents/{agentId}/card`, `nova://inbox`
 (subscribable), `nova://replies` (subscribable), `nova://tasks/{taskId}`
 (subscribable).
-Prompts: `/nova_onboard`, `/nova_first_task`
+Prompts: `/nova_onboard`, `/nova_first_task`, `/nova_serve`
 
 ### Claude Code
 
@@ -234,7 +256,7 @@ Claude calls:
     → { status: "pending", statusUrl: "/register/status/tenant_abc/claude-code" }
   # (Operator approves in admin UI)
   nova_check_registration()
-    → { status: "active", claimed: true, trustTier: 2, ucanExpiresAt: "..." }
+    → { status: "active", claimed: true, trustTier: 2, grantExpiresAt: "..." }
 
 > find me a used copy of "Ficciones" by Borges and quote me a price
 
@@ -271,7 +293,7 @@ the fresh grant on its next `nova_check_registration` call.
 | Package | Purpose |
 |---|---|
 | `@nova/shared` | Zod schemas, tenant/error types, Redis helpers, invite JWT service |
-| `@nova/a2a-server` | Wire-protocol ingestion, `POST /register`, `GET /register/status`, task submission, agent cards |
+| `@nova/a2a-server` | Nova HTTP ingress, `POST /register`, `GET /register/status`, task submission, discovery, broker inboxes, reply inboxes, agent cards |
 | `@nova/gate-service` | Five-layer gate pipeline: trust tier, UCAN, schema, injection patterns, classifier |
 | `@nova/task-queue` | BullMQ queues backing async task ingress |
 | `@nova/agent-connector` | Workers that deliver approved tasks to destination operator webhooks (push mode) or into the broker inbox (pull mode) |
@@ -287,6 +309,12 @@ the fresh grant on its next `nova_check_registration` call.
 Operator endpoints (require `Authorization: Bearer $ADMIN_TOKEN`):
 
 ```
+# System
+GET     /admin/health                                              full admin + service dependency health
+GET     /admin/metrics                                             admin Prometheus metrics
+GET     /admin/classifier                                          classifier mode/model/key-source settings
+PUT     /admin/classifier                                          update classifier settings
+
 # Tenants & invites
 POST    /admin/tenants                                             create a galaxy
 GET     /admin/tenants                                             list galaxies
@@ -302,6 +330,7 @@ POST    /admin/tenants/:id/agents/:agentId/approve                 approve + iss
 POST    /admin/tenants/:id/agents/:agentId/reject                  reject pending agent
 DELETE  /admin/tenants/:id/agents/:agentId                         deregister agent
 POST    /admin/tenants/:id/agents/:agentId/ucans/reissue           regenerate approval grant
+GET     /admin/tenants/:id/agents/:agentId/broker-status           broker inbox/reply-inbox status
 
 # Trust registry (per receiving agent)
 POST    /admin/tenants/:id/agents/:agentId/trust                   upsert trust entry
@@ -339,35 +368,52 @@ GET     /admin/audit                                               audit events 
 
 # Lifecycle stream (SSE, no auth — v1 trust model is localhost)
 GET     /admin/events                                              tenant/agent/task lifecycle
+
+# Broker summary
+GET     /admin/broker/summary                                      broker-mode agents across tenants
+
+# Federation grants
+POST    /admin/federation/grants                                   issue Nova-to-peer-Nova delegation
+GET     /admin/federation/grants                                   list issued federation grants
 ```
 
-Public endpoints on the a2a-server (no admin bearer auth — discovery, self-registration, or invocation-token-authorised):
+Public and agent-authenticated endpoints on the Nova HTTP server (package name `@nova/a2a-server`; no admin bearer auth — discovery, self-registration, invocation-token, or self-UCAN authorised):
 
 ```
+# Health
+GET     /health                                           a2a-server health
+
 # Self-registration & discovery
 POST    /register                                        self-register (invite required)
 GET     /register/status/:tenantId/:agentId              poll approval, claim approval grant
 GET     /discover                                        list active agents
 GET     /discover/:agentId                               agent detail
-GET     /agents/:agentId/.well-known/agent.json          A2A agent card
+GET     /agents/:agentId/.well-known/agent.json          Nova agent card
 GET     /agents/:agentId/health                          agent status + UCAN revocation probe
 
 # Task submission (UCAN invocation token required in Authorization header)
 POST    /agents/:agentId/tasks                           submit a task
 GET     /agents/:agentId/tasks/:taskId                   task status
+GET     /agents/:agentId/tasks/:taskId/stream            task state/result SSE stream
 
-# Broker-mode receive (pull inbox, for agents without a webhook)
+# Broker-mode receive (self-UCAN auth, for agents without a webhook)
 GET     /agents/:agentId/inbox                           long-poll claim (next task)
 GET     /agents/:agentId/inbox/peek                      non-destructive snapshot
 GET     /agents/:agentId/inbox/stream                    SSE push notifications
+POST    /agents/:agentId/inbox/:taskId/respond           complete a claimed task
 
-# Broker-mode reply collection (for senders without a replyTo webhook)
+# Broker-mode reply collection (self-UCAN auth, for senders without a replyTo webhook)
 GET     /agents/:agentId/replies                         long-poll claim (next reply)
 GET     /agents/:agentId/replies/peek                    non-destructive snapshot
 GET     /agents/:agentId/replies/stream                  SSE push notifications
 GET     /agents/:agentId/replies/:taskId                 reply detail
 POST    /agents/:agentId/replies/:taskId/ack             clear in-flight state
 ```
+
+Discovery responses, agent cards, and broker status include
+`brokerPresence`, derived from active `/inbox/stream` SSE connections. This is
+the liveness signal for broker-mode receivers; direct webhook receivers need a
+separate health or heartbeat mechanism.
 
 Proof-of-possession operations (authorised by signature, not bearer token):
 
@@ -403,32 +449,70 @@ protocol-facing code:
 ### Docker Compose (dev)
 
 ```bash
+export ADMIN_TOKEN="$(openssl rand -hex 32)"  # or use the same value from .env
 docker compose up -d                 # redis, a2a-server, gate-service, agent-connector, admin-api, caddy
 docker compose logs -f a2a-server
 docker compose down
 ```
 
 To run a broker-mode receiver, use the `@nova/broker-receiver` daemon
-alongside (or in place of) an A2A webhook receiver — it runs outside
+alongside (or in place of) a Nova webhook receiver — it runs outside
 compose under launchd/systemd. See the broker-receiver package for
 install templates and handler configuration.
+
+For an unattended local Codex receiver backed by live `codex exec` output,
+create a broker-receiver config with `handlerConfig.mode: "receiver-policy"`,
+`policy.defaultAction: "deny"`, and explicit sender/intent allow rules, then
+run:
+
+```bash
+npm run broker-receiver:dev -- run \
+  --agent-id codex \
+  --handler codex-cli \
+  --health-port 9902
+```
+
+That process is what makes broker-mode receive/reply automatic. MCP
+`nova_watch_inbox` / `nova_next_task` / `nova_respond` are interactive tools;
+they do not run unless the MCP host is awake and invoking them.
 
 ### Local processes (hot-reload)
 
 ```bash
 npm install
 npm run generate:keys                # one-time
-npm run --workspace=@nova/admin-api dev
-npm run --workspace=@nova/a2a-server dev
-npm run --workspace=@nova/agent-connector dev
+docker compose up -d redis           # or provide REDIS_URL to another Redis
+
+# Run these in separate shells:
+REDIS_URL=redis://127.0.0.1:6379 DATA_ROOT=data GATE_PORT=3002 \
+  npx tsx packages/gate-service/src/server.ts
+
+REDIS_URL=redis://127.0.0.1:6379 DATA_ROOT=data PORT=3005 \
+  A2A_HEALTH_URL=http://127.0.0.1:3001/health \
+  GATE_HEALTH_URL=http://127.0.0.1:3002/health \
+  CONNECTOR_HEALTH_URL=http://127.0.0.1:3003/health \
+  ADMIN_TOKEN="$ADMIN_TOKEN" \
+  npm run --workspace=@nova/admin-api dev
+
+REDIS_URL=redis://127.0.0.1:6379 DATA_ROOT=data PORT=3001 \
+  npm run --workspace=@nova/a2a-server dev
+
+REDIS_URL=redis://127.0.0.1:6379 DATA_ROOT=data HEALTH_PORT=3003 \
+  npm run --workspace=@nova/agent-connector dev
 ```
 
 ### Enterprise key management
 
-`generate-keys.ts` writes Nova's private key to the `NOVA_KEY_DIR` (which defaults to `data/keys/nova.private.pem`).
-For multi-node deployments, generate in an external vault (AWS KMS,
-HashiCorp Vault) and load via environment variables at boot — do not rely
-on local PEM files.
+`generate-keys.ts` writes Nova's private key under `NOVA_KEY_DIR`, which
+defaults to `data/keys/nova.private.pem` via `DATA_ROOT/keys`. At runtime the
+a2a-server reads `NOVA_PRIVATE_KEY_PATH` if set, otherwise
+`$NOVA_KEY_DIR/nova.private.pem`. The loader accepts canonical PKCS8 PEM and
+legacy 64-byte base64 keys.
+
+For multi-node deployments, mount or provision the key material from an
+external secret manager or vault into those file paths. Do not put private key
+material directly in environment variables; the current implementation reads
+keys from files.
 
 ---
 
@@ -463,7 +547,7 @@ npm run test:acceptance:invite-whitespace   # invite whitespace tolerance
 ```
 
 Acceptance tests require Redis, admin-api (`:3005`), and a2a-server
-(`:3001`) running, and `ADMIN_TOKEN` set (default `nova-admin-dev-token`).
+(`:3001`) running, and `ADMIN_TOKEN` set to a value of at least 32 characters.
 Broker tests additionally exercise `/inbox/stream` / `/replies/stream`
 SSE, so gate-service and agent-connector must also be up.
 

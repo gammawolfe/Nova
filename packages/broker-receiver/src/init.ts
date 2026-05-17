@@ -23,13 +23,18 @@ import { request } from 'undici';
 import { generateIdentity, saveIdentity, loadIdentity } from '@nova/shared/src/identity.js';
 import { decodeInvitePayload, saveTenantConfig } from '@nova/shared/src/tenant-config.js';
 import { loadCache, saveCache, withCacheLock } from '@nova/shared/src/ucan-store.js';
+import type { HandlerName } from './config.js';
 import { DEFAULT_CONFIG_PATH } from './config.js';
 
 export interface InitOptions {
   agentId: string;
   invite: string;
   novaUrl: string;
+  profile?: ReceiverProfile;
+  handler?: HandlerName;
 }
+
+export type ReceiverProfile = 'default' | 'codex';
 
 export async function runInit(opts: InitOptions): Promise<void> {
   stderrLine({ step: 'init_start', agentId: opts.agentId, novaUrl: opts.novaUrl });
@@ -55,9 +60,9 @@ export async function runInit(opts: InitOptions): Promise<void> {
     stderrLine({ step: 'identity_reused', did: identity.did });
   }
 
-  // 3. Register. The receiver declares a single 'chat' skill by default —
-  // operators who need more granular intent routing can update the
-  // agent card via admin-api after approval.
+  // 3. Register. The default profile declares a single 'chat' skill. Named
+  // profiles declare concrete skills so senders can target the real intents
+  // the daemon is prepared to answer.
   await saveTenantConfig({
     novaUrl: opts.novaUrl,
     tenantId: payload.tenantId,
@@ -73,14 +78,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
     description: 'Supervised broker-mode receiver. Pulls tasks from Nova and dispatches to a configured handler.',
     publicKey: identity.publicKey,
     did: identity.did,
-    skills: [
-      {
-        id: 'chat',
-        name: 'Chat',
-        description: 'Accept a text prompt and return a text response.',
-        tags: ['chat', 'general'],
-      },
-    ],
+    skills: skillsForProfile(opts.profile ?? 'default'),
   };
 
   const regRes = await request(join(opts.novaUrl, '/register'), {
@@ -135,9 +133,11 @@ export async function runInit(opts: InitOptions): Promise<void> {
   const defaultConfig = {
     agentId: opts.agentId,
     novaUrl: opts.novaUrl,
-    handler: 'echo',
-    handlerConfig: {},
-    pollWaitMs: 30_000,
+    handler: opts.handler ?? defaultHandlerForProfile(opts.profile ?? 'default'),
+    handlerConfig: defaultHandlerConfigForProfile(opts.profile ?? 'default'),
+    policy: defaultPolicyForProfile(opts.profile ?? 'default'),
+    inboxStrategy: 'push',
+    pollFallbackMs: 30_000,
     maxConcurrentTasks: 1,
     healthPort: 0,
     shutdownGraceSeconds: 30,
@@ -172,3 +172,105 @@ function sleep(ms: number): Promise<void> {
 function stderrLine(obj: Record<string, unknown>): void {
   process.stderr.write(JSON.stringify({ ts: new Date().toISOString(), level: 'info', ...obj }) + '\n');
 }
+
+function defaultHandlerForProfile(profile: ReceiverProfile): HandlerName {
+  return profile === 'codex' ? 'codex-cli' : 'echo';
+}
+
+function defaultHandlerConfigForProfile(profile: ReceiverProfile): Record<string, unknown> {
+  return profile === 'codex' ? { mode: 'approval-required', sandbox: 'read-only' } : {};
+}
+
+function defaultPolicyForProfile(profile: ReceiverProfile): Record<string, unknown> {
+  return profile === 'codex'
+    ? { defaultAction: 'deny', rules: [] }
+    : { defaultAction: 'allow', rules: [] };
+}
+
+function skillsForProfile(profile: ReceiverProfile): Array<Record<string, unknown>> {
+  if (profile === 'codex') return CODEX_SKILLS;
+  return [
+    {
+      id: 'chat',
+      name: 'Chat',
+      description: 'Accept a text prompt and return a text response.',
+      tags: ['chat', 'general'],
+    },
+  ];
+}
+
+const CODEX_SKILLS: Array<Record<string, unknown>> = [
+  {
+    id: 'answer_code_question',
+    name: 'Answer code question',
+    description: 'Answer a programming, software architecture, or tooling question in natural language. Optional repoPath scopes the answer to a local codebase.',
+    tags: ['code', 'qa', 'assistant'],
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['question'],
+      properties: {
+        question: {
+          type: 'string',
+          minLength: 1,
+          description: 'The question to answer.',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Optional absolute path to a repo that should ground the answer.',
+        },
+      },
+    },
+    outputSchema: {
+      type: 'object',
+      required: ['answer'],
+      properties: {
+        answer: { type: 'string' },
+      },
+    },
+  },
+  {
+    id: 'review_code',
+    name: 'Review code',
+    description: 'Review a source file and return findings. Focuses on correctness, security, clarity, and idiom. Provide an absolute filePath readable by this agent host.',
+    tags: ['code', 'review'],
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['filePath'],
+      properties: {
+        filePath: {
+          type: 'string',
+          minLength: 1,
+          description: 'Absolute path to the file on the agent host.',
+        },
+        concern: {
+          type: 'string',
+          description: 'Optional focus area such as security or performance.',
+        },
+      },
+    },
+    outputSchema: {
+      type: 'object',
+      required: ['findings'],
+      properties: {
+        findings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['severity', 'message'],
+            properties: {
+              severity: {
+                type: 'string',
+                enum: ['info', 'warn', 'error'],
+              },
+              line: { type: 'integer' },
+              message: { type: 'string' },
+            },
+          },
+        },
+        summary: { type: 'string' },
+      },
+    },
+  },
+];

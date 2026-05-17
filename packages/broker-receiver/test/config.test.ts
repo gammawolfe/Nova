@@ -55,6 +55,22 @@ describe('resolveConfig', () => {
     ).rejects.toThrow();
   });
 
+  it('accepts the codex handlers', async () => {
+    const live = await resolveConfig({
+      cli: { agentId: 'codex', handler: 'codex-cli' as const },
+      env: {},
+      configPath: '/nonexistent/broker-receiver.json',
+    });
+    expect(live.handler).toBe('codex-cli');
+
+    const cfg = await resolveConfig({
+      cli: { agentId: 'codex', handler: 'codex-smoke' as const },
+      env: {},
+      configPath: '/nonexistent/broker-receiver.json',
+    });
+    expect(cfg.handler).toBe('codex-smoke');
+  });
+
   it('pollFallbackMs bounded to [1000, 60000]', async () => {
     await expect(
       resolveConfig({
@@ -137,6 +153,35 @@ describe('resolveConfig', () => {
         configPath: '/nonexistent/broker-receiver.json',
       }),
     ).rejects.toThrow();
+  });
+
+  it('parses receiver policy rules', async () => {
+    const cfg = await resolveConfig({
+      cli: {
+        agentId: 'codex',
+        policy: {
+          defaultAction: 'deny',
+          rules: [
+            {
+              senderAgentId: 'claude-code',
+              intent: 'answer_code_question',
+              action: 'allow',
+              maxTasksPerHour: 5,
+            },
+          ],
+        },
+      },
+      env: {},
+      configPath: '/nonexistent/broker-receiver.json',
+    });
+
+    expect(cfg.policy.defaultAction).toBe('deny');
+    expect(cfg.policy.rules[0]).toMatchObject({
+      senderAgentId: 'claude-code',
+      intent: 'answer_code_question',
+      action: 'allow',
+      maxTasksPerHour: 5,
+    });
   });
 
   it('cli undefined does not wipe earlier tiers', async () => {

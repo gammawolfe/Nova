@@ -39,9 +39,11 @@ import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared/src/broker-config';
 function makeRedis(state: {
   lists?: Record<string, string[]>;
   zsets?: Record<string, Array<{ member: string; score: number }>>;
+  hashes?: Record<string, Record<string, string>>;
 }): IORedis {
   const lists = state.lists ?? {};
   const zsets = state.zsets ?? {};
+  const hashes = state.hashes ?? {};
   return {
     llen: vi.fn(async (key: string) => (lists[key] ?? []).length),
     zcard: vi.fn(async (key: string) => (zsets[key] ?? []).length),
@@ -53,6 +55,7 @@ function makeRedis(state: {
       }
       return slice.map(e => e.member);
     }),
+    hgetall: vi.fn(async (key: string) => hashes[key] ?? {}),
   } as unknown as IORedis;
 }
 
@@ -70,6 +73,12 @@ describe('broker-service.getBrokerStatus', () => {
     expect(status.mode).toBe('broker');
     expect(status.inbox).toEqual({ depth: 0, inflightCount: 0, oldestInflightAgeMs: null });
     expect(status.replyInbox).toEqual({ depth: 0, inflightCount: 0, oldestInflightAgeMs: null });
+    expect(status.brokerPresence).toEqual({
+      status: 'offline',
+      activeConnections: 0,
+      lastSeenAt: null,
+      updatedAt: null,
+    });
   });
 
   it('reports direct mode when isBrokerAgent returns false', async () => {
@@ -80,6 +89,7 @@ describe('broker-service.getBrokerStatus', () => {
       redis,
     );
     expect(status.mode).toBe('direct');
+    expect(status.brokerPresence.status).toBe('offline');
   });
 
   it('computes depth, inflight count, and oldest-inflight age', async () => {
@@ -99,6 +109,14 @@ describe('broker-service.getBrokerStatus', () => {
           { member: 'entry-b', score: oldestVisibleUntil },
         ],
       },
+      hashes: {
+        'nova:broker-presence:t1:a1': {
+          status: 'online',
+          activeConnections: '1',
+          lastSeenAt: '2026-05-17T12:00:00.000Z',
+          updatedAt: '2026-05-17T12:00:15.000Z',
+        },
+      },
     });
 
     const status = await brokerService.getBrokerStatus(
@@ -115,6 +133,12 @@ describe('broker-service.getBrokerStatus', () => {
     expect(status.replyInbox.depth).toBe(1);
     expect(status.replyInbox.inflightCount).toBe(0);
     expect(status.replyInbox.oldestInflightAgeMs).toBeNull();
+    expect(status.brokerPresence).toEqual({
+      status: 'online',
+      activeConnections: 1,
+      lastSeenAt: '2026-05-17T12:00:00.000Z',
+      updatedAt: '2026-05-17T12:00:15.000Z',
+    });
   });
 
   it('clamps a past-visibility score to age 0', async () => {
@@ -156,6 +180,7 @@ describe('broker-service.getBrokerSummary', () => {
     expect(entries[0]?.agentId).toBe('a1');
     expect(entries[0]?.name).toBe('Alpha');
     expect(entries[0]?.mode).toBe('broker');
+    expect(entries[0]?.brokerPresence.status).toBe('offline');
   });
 
   it('returns empty list when no active agents', async () => {

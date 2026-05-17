@@ -13,6 +13,7 @@ import { ClaimLoop } from './claim-loop.js';
 import { HealthServer } from './health-server.js';
 import { createHandler } from './handlers/index.js';
 import { createLogger } from './logger.js';
+import { ReceiverPolicyEvaluator } from './receiver-policy.js';
 
 export interface RunResult {
   stop: () => Promise<void>;
@@ -63,6 +64,7 @@ export async function runDaemon(config: ReceiverConfig): Promise<RunResult> {
     agentId: config.agentId,
     handler,
     client,
+    policy: new ReceiverPolicyEvaluator(config.policy),
     mintSelfUcan,
     maxConcurrentTasks: config.maxConcurrentTasks,
     logger,

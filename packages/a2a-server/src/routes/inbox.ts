@@ -12,6 +12,11 @@ import {
   BROKER_MAX_WAIT_MS,
   BROKER_RESULT_MAX_BYTES,
 } from '@nova/shared/src/broker-config';
+import {
+  markBrokerPresenceOffline,
+  markBrokerPresenceOnline,
+  refreshBrokerPresence,
+} from '@nova/shared/src/broker-presence';
 import * as inbox from '@nova/task-queue/src/inbox';
 import { deliverReply } from '@nova/task-queue/src/reply-delivery';
 import { authSelfUcan } from '../auth/self-ucan';
@@ -209,6 +214,9 @@ inboxRouter.get('/:agentId/inbox/peek', async (req: Request, res: Response, next
 const inboxStreamHandler = createSseHandler({
   logTag: 'inbox-stream',
   channel: (req: Request) => inbox.inboxNotifyChannel(req.ctx),
+  onOpen: (req: Request, connectionId: string) => markBrokerPresenceOnline(req.ctx, connectionId),
+  onHeartbeat: (req: Request, connectionId: string) => refreshBrokerPresence(req.ctx, connectionId),
+  onClose: (req: Request, connectionId: string) => markBrokerPresenceOffline(req.ctx, connectionId),
   async *replay(req) {
     // list() returns newest-first (LPUSH head); emit oldest-first so SSE
     // `id:` values are monotonically increasing, matching what a resumable

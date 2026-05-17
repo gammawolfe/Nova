@@ -22,6 +22,7 @@
 
 import type IORedis from 'ioredis';
 import type { Request, Response } from 'express';
+import crypto from 'crypto';
 import { logger } from '@nova/shared/src/logger';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { activeSseStreams } from './metrics';
@@ -66,6 +67,12 @@ export interface SseHandlerConfig {
     req: Request,
     write: (event: SseEvent) => void,
   ): Promise<boolean>;
+  /** Optional connection lifecycle hook for endpoint-specific presence. */
+  onOpen?(req: Request, connectionId: string): Promise<void>;
+  /** Optional heartbeat hook. Runs after the SSE heartbeat is written. */
+  onHeartbeat?(req: Request, connectionId: string): Promise<void>;
+  /** Optional cleanup hook. Called exactly once when the connection closes. */
+  onClose?(req: Request, connectionId: string): Promise<void>;
 }
 
 const DEFAULT_HEARTBEAT_MS = 15_000;
@@ -75,6 +82,7 @@ export function createSseHandler(config: SseHandlerConfig) {
 
   return async function sseHandler(req: Request, res: Response): Promise<void> {
     const lastEventId = parseInt((req.headers['last-event-id'] as string) ?? '0', 10) || 0;
+    const connectionId = crypto.randomUUID();
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -117,6 +125,9 @@ export function createSseHandler(config: SseHandlerConfig) {
         sub.quit().catch(() => {});
         sub = null;
       }
+      config.onClose?.(req, connectionId).catch((err: any) => {
+        logger.warn({ err: err.message, tag: config.logTag }, 'SSE close hook failed');
+      });
     }
 
     unregister = registerSseCleanup(cleanup);
@@ -138,6 +149,9 @@ export function createSseHandler(config: SseHandlerConfig) {
       cleanup();
       return void res.end();
     }
+    config.onOpen?.(req, connectionId).catch((err: any) => {
+      logger.warn({ err: err.message, tag: config.logTag }, 'SSE open hook failed');
+    });
 
     function closeWith(event?: SseEvent): void {
       if (closed) return;
@@ -175,6 +189,9 @@ export function createSseHandler(config: SseHandlerConfig) {
       if (closed) return;
       try {
         write({ type: 'heartbeat', data: { at: new Date().toISOString() } });
+        config.onHeartbeat?.(req, connectionId).catch((err: any) => {
+          logger.warn({ err: err.message, tag: config.logTag }, 'SSE heartbeat hook failed');
+        });
       } catch {
         cleanup();
       }

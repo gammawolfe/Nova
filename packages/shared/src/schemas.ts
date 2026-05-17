@@ -135,6 +135,12 @@ export const AgentCardSchema = z.object({
     schemes: z.array(z.string()),
     ucapabilityPrefix: z.string()
   }),
+  brokerPresence: z.object({
+    status: z.enum(['online', 'offline']),
+    activeConnections: z.number().int().min(0),
+    lastSeenAt: z.string().datetime().nullable(),
+    updatedAt: z.string().datetime().nullable()
+  }).optional(),
   skills: z.array(z.object({
     id: z.string(),
     name: z.string(),

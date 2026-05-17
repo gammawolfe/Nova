@@ -198,7 +198,180 @@ Skill IDs are the contract between senders and receivers. Senders call `nova_sen
 
 ---
 
-## 9. Troubleshooting
+## 9. Codex broker-mode onboarding recipe
+
+When the operator says "onboard yourself" to a Codex session, assume they want
+Codex to **send and receive** unless they explicitly say sender-only. Codex
+should register as a broker-mode receiver: real skills, no `operatorUrl`, no
+`replyUrl`.
+
+Use this identity unless the operator gives a different one:
+
+```text
+NOVA_AGENT_ID=codex
+NOVA_URL=http://localhost:3001
+```
+
+If the Nova stack is local, first verify the services are up:
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+curl -sS http://localhost:3001/health
+curl -sS http://localhost:3005/health
+```
+
+Then follow the normal invite flow:
+
+1. Operator creates or selects a tenant.
+2. Operator mints an invite with `agentIdHint: "codex"`.
+3. Codex calls `nova_generate_identity({ agentId: "codex" })` unless the
+   identity already exists.
+4. Codex calls `nova_inspect_invite` and confirms the hint is exactly `codex`.
+5. Codex calls `nova_accept_invite({ invite, novaUrl })`.
+6. Codex calls `nova_register_agent` with the broker-mode skill payload below.
+7. Operator approves the pending `codex` agent, normally at trust tier 2.
+8. Codex calls `nova_check_registration({ agentId: "codex" })` and verifies
+   the grant is cached.
+9. Codex verifies the agent card and broker inbox status.
+
+Register these skills for Codex:
+
+```json
+[
+  {
+    "id": "answer_code_question",
+    "name": "Answer code question",
+    "description": "Answer a programming, software architecture, or tooling question in natural language. Optional repoPath scopes the answer to a local codebase.",
+    "tags": ["code", "qa", "assistant"],
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question"],
+      "properties": {
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The question to answer."
+        },
+        "repoPath": {
+          "type": "string",
+          "description": "Optional absolute path to a repo that should ground the answer."
+        }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "required": ["answer"],
+      "properties": {
+        "answer": { "type": "string" }
+      }
+    }
+  },
+  {
+    "id": "review_code",
+    "name": "Review code",
+    "description": "Review a source file and return findings. Focuses on correctness, security, clarity, and idiom. Provide an absolute filePath readable by this agent host.",
+    "tags": ["code", "review"],
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filePath"],
+      "properties": {
+        "filePath": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to the file on the agent host."
+        },
+        "concern": {
+          "type": "string",
+          "description": "Optional focus area such as security or performance."
+        }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "required": ["findings"],
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "message"],
+            "properties": {
+              "severity": {
+                "type": "string",
+                "enum": ["info", "warn", "error"]
+              },
+              "line": { "type": "integer" },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+]
+```
+
+Important Codex-specific rules:
+
+- Do **not** register Codex with `__sender_only` unless the operator explicitly
+  asks for sender-only. That prevents Codex from receiving tasks.
+- Do **not** pass `operatorUrl`; omitting it is what makes Codex broker-mode.
+- After onboarding, Codex receives with `nova_watch_inbox` plus
+  `nova_next_task`, and completes tasks with `nova_respond` before the
+  5-minute visibility timeout.
+- For unattended receipt, run the broker receiver daemon as `codex`. The MCP
+  receive tools above are interactive; they do not claim anything unless the
+  MCP host is awake and invoking them.
+- Codex sends with `nova_send_task`. If the destination is also broker-mode,
+  omit `replyTo`; the result lands in Codex's reply inbox and is collected via
+  `nova_next_reply` / `nova_ack_reply`.
+- Local state should end up under `~/.nova/tenant.json`,
+  `~/.nova/agents/codex.json`, and `~/.nova/agents/codex.ucan.json`.
+
+Automatic local live receiver:
+
+```bash
+npm run broker-receiver:dev -- run \
+  --agent-id codex \
+  --handler codex-cli \
+  --health-port 9902
+```
+
+For a fresh daemon-owned Codex registration, use:
+
+```bash
+npm run broker-receiver:dev -- init \
+  --agent-id codex \
+  --profile codex \
+  --invite "<JWT_FROM_OPERATOR>" \
+  --nova-url http://localhost:3001
+```
+
+The `codex-cli` handler invokes `codex exec` for each task and returns the live
+Codex final message through Nova, but it is approval-required by default. For a
+receiver that accepts untrusted senders, configure
+`handlerConfig.mode: "receiver-policy"`, `policy.defaultAction: "deny"`, and
+explicit allow rules per sender and intent. Use `codex-smoke` only when you
+explicitly want a deterministic transport diagnostic that does not call the
+model.
+
+Successful verification looks like:
+
+```bash
+curl -sS http://localhost:3001/agents/codex/.well-known/agent.json
+curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:3005/admin/tenants/TENANT_ID/agents/codex/broker-status
+```
+
+The broker status should report `mode: "broker"` with inbox and reply-inbox
+depths present, even if both are zero.
+
+---
+
+## 10. Troubleshooting
 
 ### The MCP client doesn't show any `nova_*` tools
 
@@ -231,7 +404,7 @@ This almost always means your MCP **host** can't spawn the process — not that 
 
 ---
 
-## 10. Next steps
+## 11. Next steps
 
 - **First send:** invoke `/nova_first_task` (prompt).
 - **First receive:** invoke `/nova_serve` (prompt).

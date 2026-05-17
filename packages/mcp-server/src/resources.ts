@@ -27,7 +27,7 @@ export function registerResources(_server: McpServer): void {
     'nova-agent-card',
     new ResourceTemplate('nova://agents/{agentId}/card', { list: undefined }),
     {
-      title: 'A2A agent card',
+      title: 'Nova agent card',
       description: 'The public agent card (skills, schemas, capabilities) for a specific agent.',
       mimeType: 'application/json',
     },

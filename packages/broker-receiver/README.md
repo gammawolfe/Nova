@@ -39,6 +39,51 @@ npm run broker-receiver:dev -- run
 
 Once registered + approved, identity and grant land at `~/.nova/agents/my-receiver.json` and the grant cache at `~/.nova/ucan-cache/my-receiver.json`. Default config is written to `~/.nova/broker-receiver.json` only if that file does not already exist — re-running `init` is non-destructive.
 
+For a local Codex receiver, use the Codex profile. It advertises
+`answer_code_question` and `review_code` instead of generic `chat`, and writes
+`codex-cli` as the default handler. The live handler is approval-required by
+default; enable `receiver-policy` only with a deny-by-default receiver policy:
+
+```bash
+npm run broker-receiver:dev -- init \
+  --agent-id codex \
+  --profile codex \
+  --invite "<JWT_FROM_OPERATOR>" \
+  --nova-url http://localhost:3001
+
+npm run broker-receiver:dev -- run \
+  --agent-id codex \
+  --handler codex-cli \
+  --health-port 9902
+```
+
+Untrusted-sender live Codex config:
+
+```json
+{
+  "agentId": "codex",
+  "novaUrl": "http://localhost:3001",
+  "handler": "codex-cli",
+  "handlerConfig": {
+    "mode": "receiver-policy",
+    "sandbox": "read-only",
+    "timeoutMs": 240000
+  },
+  "policy": {
+    "defaultAction": "deny",
+    "rules": [
+      {
+        "senderAgentId": "claude-code",
+        "intent": "answer_code_question",
+        "action": "allow",
+        "maxTasksPerHour": 10
+      }
+    ]
+  },
+  "healthPort": 9902
+}
+```
+
 ## Subcommands
 
 ```
@@ -57,10 +102,12 @@ All commands respect config precedence: **CLI flags > environment variables > `~
 |---|---|---|---|---|
 | `agentId` | `--agent-id` | `NOVA_AGENT_ID` | — | Required. |
 | `novaUrl` | `--nova-url` | `NOVA_URL` | `http://localhost:3001` | |
-| `handler` | `--handler` | `BROKER_RECEIVER_HANDLER` | `echo` | `echo` or `claude-api`. |
+| `handler` | `--handler` | `BROKER_RECEIVER_HANDLER` | `echo` | `echo`, `codex-cli`, `codex-smoke`, or `claude-api`. |
 | `handlerConfig` | (file only) | — | `{}` | Handler-specific. See §Handlers. |
-| `pollWaitMs` | `--poll-wait-ms` | `BROKER_RECEIVER_POLL_WAIT_MS` | `30000` | Server caps at 60s. |
+| `inboxStrategy` | — | `BROKER_RECEIVER_INBOX_STRATEGY` | `push` | `push` subscribes to `/inbox/stream`; `poll` skips SSE. |
+| `pollFallbackMs` | — | `BROKER_RECEIVER_POLL_FALLBACK_MS` | `30000` | Safety-net tick in push mode. Legacy `pollWaitMs` still works as an alias. |
 | `maxConcurrentTasks` | `--max-concurrent-tasks` | `BROKER_RECEIVER_MAX_CONCURRENT` | `1` | Sequential is the v1 recommendation. |
+| `policy` | (file only) | — | `{ "defaultAction": "allow", "rules": [] }` | Receiver-side execution policy. For untrusted senders, set `defaultAction` to `deny` and add explicit allow rules. |
 | `healthPort` | `--health-port` | `BROKER_RECEIVER_HEALTH_PORT` | `0` | Loopback-only. `0` disables. |
 | `shutdownGraceSeconds` | `--shutdown-grace-seconds` | `BROKER_RECEIVER_SHUTDOWN_GRACE` | `30` | In-flight handler drain budget. |
 | `logLevel` | `--log-level` | `BROKER_RECEIVER_LOG_LEVEL` | `info` | `debug | info | warn | error`. |
@@ -87,6 +134,43 @@ Example `~/.nova/broker-receiver.json`:
 ### `echo` (test / default)
 
 Deterministic. Returns `{ echoed: true, intent, params, handledAt }`. No configuration. Intended for daemon smoke tests and verifying the full pull → dispatch → respond loop without a real AI dependency.
+
+### `codex-cli` (live Codex)
+
+Invokes `codex exec` for each task and returns the final Codex message through
+Nova. Handles the Codex profile's `answer_code_question` and `review_code`
+intents. It returns `LLM_REQUIRES_APPROVAL` unless `handlerConfig.mode` is
+explicitly set to `receiver-policy` or `trusted-local`; this prevents untrusted
+peers from automatically spending tokens or exercising local machine
+privileges.
+
+Default sandbox is `read-only` and Codex CLI approvals are disabled once the
+handler is enabled, so untrusted deployments must pair `receiver-policy` with
+deny-by-default rules, sender/intent allowlists, rate limits, and stronger
+sandboxing before accepting untrusted traffic.
+
+Config:
+
+```jsonc
+{
+  "handler": "codex-cli",
+  "handlerConfig": {
+    "command": "codex",             // default; override with an absolute path if needed
+    "mode": "receiver-policy",      // required for live execution under receiver policy
+    "model": "gpt-5.4",             // optional
+    "profile": "default",           // optional Codex CLI profile
+    "sandbox": "read-only",         // default; use workspace-write only for trusted tasks
+    "timeoutMs": 300000
+  }
+}
+```
+
+### `codex-smoke` (Codex local smoke tests)
+
+Deterministic. Handles the Codex profile's `answer_code_question` and
+`review_code` intents and returns payloads shaped to those output schemas. It
+does not run the interactive Codex model; use it to prove that unattended
+claiming and replying works end to end.
 
 ### `claude-api`
 

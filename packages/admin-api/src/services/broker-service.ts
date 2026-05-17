@@ -2,6 +2,7 @@ import type IORedis from 'ioredis';
 import { TenantContext } from '@nova/shared/src/tenant';
 import { getSharedRedis } from '@nova/shared/src/redis';
 import { BROKER_VISIBILITY_TIMEOUT_MS } from '@nova/shared/src/broker-config';
+import { BrokerPresence, getBrokerPresence } from '@nova/shared/src/broker-presence';
 import {
   inboxKey,
   inflightKey,
@@ -34,6 +35,8 @@ export interface BrokerStatus {
   inbox: QueueStats;
   /** Outgoing reply queue (sender pulls via nova_next_reply). */
   replyInbox: QueueStats;
+  /** Derived from active broker inbox SSE connections. */
+  brokerPresence: BrokerPresence;
 }
 
 export interface BrokerSummaryEntry extends BrokerStatus {
@@ -66,11 +69,12 @@ export async function getBrokerStatus(
   redis: IORedis = getSharedRedis(),
 ): Promise<BrokerStatus> {
   const broker = await isBrokerAgent(ctx);
-  const [inbox, replyInbox] = await Promise.all([
+  const [inbox, replyInbox, brokerPresence] = await Promise.all([
     queueStats(redis, inboxKey(ctx), inflightKey(ctx)),
     queueStats(redis, replyInboxKey(ctx), replyInflightKey(ctx)),
+    getBrokerPresence(ctx, redis),
   ]);
-  return { mode: broker ? 'broker' : 'direct', inbox, replyInbox };
+  return { mode: broker ? 'broker' : 'direct', inbox, replyInbox, brokerPresence };
 }
 
 /**

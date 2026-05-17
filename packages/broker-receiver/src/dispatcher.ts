@@ -12,6 +12,7 @@
 import type { QueuedTask } from '@nova/shared/src/types';
 import type { Handler, HandlerContext, Logger } from './handlers/index.js';
 import type { NovaBrokerClient } from './nova-client.js';
+import { ReceiverPolicyEvaluator, policyDenyResult } from './receiver-policy.js';
 
 /** How long before visibleUntil we fire the handler AbortSignal, in ms. */
 const ABORT_LEAD_MS = 30_000;
@@ -20,6 +21,7 @@ export interface DispatcherOptions {
   agentId: string;
   handler: Handler;
   client: NovaBrokerClient;
+  policy?: ReceiverPolicyEvaluator | undefined;
   /** Returns a fresh self-UCAN; called once per respond. */
   mintSelfUcan: () => string;
   maxConcurrentTasks: number;
@@ -102,7 +104,16 @@ export class Dispatcher {
     try {
       let result;
       try {
-        result = await this.opts.handler.handle(task, ctx);
+        const decision = this.opts.policy?.evaluate(task);
+        if (decision && !decision.allowed) {
+          this.opts.logger.warn(
+            { taskId: task.taskId, code: decision.code, senderAgentId: task.senderAgentId, intent: task.intent },
+            'receiver policy denied task',
+          );
+          result = policyDenyResult(decision);
+        } else {
+          result = await this.opts.handler.handle(task, ctx);
+        }
       } catch (err: any) {
         this.stats.totalHandlerErrors += 1;
         this.opts.logger.error(

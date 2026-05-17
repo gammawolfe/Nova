@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { Dispatcher } from '../src/dispatcher';
 import type { Handler, HandlerResult, Logger } from '../src/handlers/index';
 import type { QueuedTask } from '@nova/shared/src/types';
+import { ReceiverPolicyEvaluator } from '../src/receiver-policy';
 
 function mkTask(taskId: string, intent = 'chat'): QueuedTask {
   return {
@@ -83,6 +84,35 @@ describe('Dispatcher', () => {
     expect(calls[0]!.body.error.code).toBe('HANDLER_EXCEPTION');
     expect(d.getStats().totalHandlerErrors).toBe(1);
     expect(d.getStats().totalResponded).toBe(1);
+  });
+
+  it('responds with receiver policy denial without running handler', async () => {
+    const { respond, calls } = mkFakeClient();
+    const handle = vi.fn(async () => ({ status: 'ok', result: {} }) as HandlerResult);
+    const handler: Handler = {
+      name: 'blocked',
+      handle,
+    };
+    const d = new Dispatcher({
+      agentId: 'a',
+      handler,
+      client: { respond } as any,
+      policy: new ReceiverPolicyEvaluator({ defaultAction: 'deny', rules: [] }),
+      mintSelfUcan: () => 'ucan',
+      maxConcurrentTasks: 1,
+      logger: nullLogger,
+    });
+
+    await d.dispatch(mkTask('t1'), new Date(Date.now() + 60_000).toISOString());
+
+    expect(handle).not.toHaveBeenCalled();
+    expect(calls[0]!.body).toMatchObject({
+      status: 'error',
+      error: {
+        code: 'RECEIVER_POLICY_DENIED',
+        retryable: false,
+      },
+    });
   });
 
   it('counts transport error on respond failure and does not crash', async () => {

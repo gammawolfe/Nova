@@ -6,7 +6,8 @@
 // syntax intentionally mirrors kebab-case conventions used elsewhere in
 // Nova (e.g. --agent-id, --nova-url).
 
-import { resolveConfig } from './config.js';
+import { HANDLER_NAMES, resolveConfig } from './config.js';
+import type { HandlerName } from './config.js';
 import { runDaemon } from './run.js';
 import { runInit } from './init.js';
 import { generateLaunchdPlist } from './supervision/launchd.js';
@@ -79,7 +80,7 @@ Subcommands:
 Common options (all subcommands):
   --agent-id <id>          Agent ID (required; also accepts NOVA_AGENT_ID env).
   --nova-url <url>         a2a-server base URL. Default http://localhost:3001.
-  --handler <name>         Handler to dispatch to. 'echo' or 'claude-api'.
+  --handler <name>         Handler to dispatch to. 'echo', 'codex-cli', 'codex-smoke', or 'claude-api'.
   --config <path>          Config file path. Default ~/.nova/broker-receiver.json.
   --log-level <level>      debug | info | warn | error. Default info.
 
@@ -91,6 +92,8 @@ run options:
 
 init options:
   --invite <jwt>           Invite token minted by the tenant operator.
+  --profile <default|codex>
+                           Registration profile. 'codex' advertises answer_code_question and review_code.
   --admin-token <token>    Optional — NOVA_ADMIN_TOKEN required for reissue flows.
 
 install options:
@@ -157,7 +160,29 @@ async function cmdInit(cli: Record<string, unknown>): Promise<void> {
     process.exit(1);
   }
   const novaUrl = typeof cli.novaUrl === 'string' ? cli.novaUrl : (process.env.NOVA_URL ?? 'http://localhost:3001');
-  await runInit({ agentId, invite, novaUrl });
+  let profile: 'default' | 'codex' = 'default';
+  if (typeof cli.profile === 'string') {
+    if (cli.profile !== 'default' && cli.profile !== 'codex') {
+      process.stderr.write(`init: unknown profile '${cli.profile}'. Expected default or codex.\n`);
+      process.exit(1);
+    }
+    profile = cli.profile;
+  }
+  let handler: HandlerName | undefined;
+  if (typeof cli.handler === 'string') {
+    if (!(HANDLER_NAMES as readonly string[]).includes(cli.handler)) {
+      process.stderr.write(`init: unknown handler '${cli.handler}'. Expected one of ${HANDLER_NAMES.join(', ')}.\n`);
+      process.exit(1);
+    }
+    handler = cli.handler as HandlerName;
+  }
+  await runInit({
+    agentId,
+    invite,
+    novaUrl,
+    profile,
+    ...(handler ? { handler } : {}),
+  });
 }
 
 async function cmdInstall(cli: Record<string, unknown>): Promise<void> {

@@ -481,7 +481,7 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
   server.registerTool(
     'nova_get_agent_card',
     {
-      title: 'Fetch a specific agent\'s A2A agent card',
+      title: 'Fetch a specific agent\'s Nova agent card',
       description: 'Returns full skill definitions including inputSchema/outputSchema. Use this before nova_send_task to shape the params correctly.',
       inputSchema: { agentId: z.string().min(1) },
     },

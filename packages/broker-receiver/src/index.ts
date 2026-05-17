@@ -17,3 +17,5 @@ export type { HealthSnapshot } from './health-server.js';
 export type { Handler, HandlerContext, HandlerFactory, HandlerResult, Logger } from './handlers/index.js';
 export { registerHandler, createHandler } from './handlers/index.js';
 export { createLogger } from './logger.js';
+export { ReceiverPolicyEvaluator, ReceiverPolicySchema, policyDenyResult } from './receiver-policy.js';
+export type { ReceiverPolicy, ReceiverPolicyRule, PolicyDecision } from './receiver-policy.js';

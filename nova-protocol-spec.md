@@ -10,7 +10,7 @@
 
 ## Overview
 
-Nova implements the A2A (Agent-to-Agent) protocol as its wire protocol, extended with a UCAN-based capability model and a multi-layer security pipeline. This document specifies everything a developer needs to build a conforming client or server that interoperates with Nova.
+Nova implements a native brokered agent-communication protocol with a UCAN-based capability model and a multi-layer security pipeline. It is inspired by A2A concepts such as agent cards, skills, task lifecycle, streaming, and push notifications, but the current Nova wire protocol is not A2A-compliant. This document specifies everything a developer needs to build a Nova-native client or receiver that interoperates with Nova.
 
 If you are building an agent that wants to **send tasks to** a Nova-protected agent, read Sections 1–6.
 
@@ -22,16 +22,22 @@ If you just want to understand what Nova accepts and rejects, and why, read Sect
 
 ## 1. Foundations
 
-### 1.1 A2A Compliance
+### 1.1 Relationship to A2A
 
-Nova is a conforming A2A server. It implements the A2A specification with the following extensions:
+Nova is not currently a conforming A2A server. It deliberately diverges from the A2A wire model in several places:
+
+- Nova routes through a broker/inbox model so receivers can be offline, behind NAT, or running as local daemons.
+- Nova dispatches closed, schema-backed intents instead of requiring every receiver to infer skills from natural language.
+- Nova requires UCAN invocation tokens for capability-scoped delegation between agents and tenants.
+
+The native Nova protocol keeps several A2A-inspired ideas:
 
 - **UCAN capability delegation** — required on all task submissions (Section 3)
 - **Trust tier model** — sender trust is tiered, not binary (Section 4)
 - **Closed intent model** — the receiving agent's skill set is a fixed enum, not open (Section 2.3)
 - **Injection resistance requirements** — task parameters must be structured data, not instruction text (Section 6)
 
-Any A2A-compatible client can discover and submit tasks to a Nova endpoint. Without a valid UCAN token and sufficient trust tier, submissions will be quarantined rather than delivered.
+A2A-compatible clients need a translation adapter before they can talk to Nova. Without a valid UCAN token and sufficient trust tier, Nova-native submissions will be quarantined or rejected rather than delivered.
 
 ### 1.2 Protocol Stack
 
@@ -40,7 +46,7 @@ Any A2A-compatible client can discover and submit tasks to a Nova endpoint. With
 │         Your Agent              │
 └──────────────┬──────────────────┘
                │
-               │  A2A over HTTPS
+               │  Nova over HTTPS
                │  + UCAN credential
                │
 ┌──────────────▼──────────────────┐
@@ -71,7 +77,7 @@ All endpoints described in this specification are relative to this base URL. The
 
 ### 1.4 Protocol Version
 
-Nova uses the A2A protocol version declared in the `X-A2A-Version` request header. Current supported version: `1.0`.
+Nova uses the protocol version declared in the legacy `X-A2A-Version` request header. Current supported version: `1.0`.
 
 ```
 X-A2A-Version: 1.0
@@ -79,7 +85,7 @@ X-A2A-Version: 1.0
 
 If the header is absent, Nova assumes `1.0`. If the declared version is unsupported, Nova returns `400` with error code `PROTOCOL_VERSION_UNSUPPORTED`.
 
-Version negotiation on first contact: fetch the agent card (Section 2.1). The `protocolVersions` field lists all versions the agent supports. Use the highest version both parties support.
+Version negotiation on first contact: fetch the agent card (Section 2.1). The `protocolVersions` field lists all Nova-native protocol versions the agent supports. Use the highest version both parties support.
 
 ---
 
@@ -127,6 +133,12 @@ Accept: application/json
   "authentication": {
     "schemes": ["ucan"],
     "ucapabilityPrefix": "nova:task"
+  },
+  "brokerPresence": {
+    "status": "offline",
+    "activeConnections": 0,
+    "lastSeenAt": null,
+    "updatedAt": null
   },
   "skills": [
     {
@@ -210,6 +222,7 @@ Accept: application/json
 | `capabilities.stateTransitionHistory` | boolean | Yes | Whether historical state transitions are available |
 | `authentication.schemes` | string[] | Yes | Always `["ucan"]` for Nova endpoints |
 | `authentication.ucapabilityPrefix` | string | Yes | Always `"nova:task"` — prefix for capability strings |
+| `brokerPresence` | object | No | Broker-mode liveness derived from active inbox SSE connections |
 | `skills` | object[] | Yes | Declared skills (the closed intent set) |
 
 ### 2.3 Skills and the Closed Intent Model
@@ -375,7 +388,7 @@ Trust tiers are assigned by the receiving agent's operator via the Nova Admin AP
 
 If your agent is unknown (Tier 0), your message is quarantined — not dropped, not rejected with an error. The receiving agent's operator can review quarantined messages via their Admin API and promote your tier if appropriate.
 
-You will receive a `202 Accepted` response from the A2A endpoint regardless of gate outcome — this is required by the A2A specification and prevents information leakage about gate decisions. The task result, when it eventually arrives (if the operator releases the quarantined message), will carry the full status.
+You will receive a `202 Accepted` response from the Nova endpoint regardless of quarantine outcome. This prevents information leakage about gate decisions. The task result, when it eventually arrives (if the operator releases the quarantined message), will carry the full status.
 
 If your message is quarantined, there is nothing automated you can do. Contact the operator.
 
@@ -394,7 +407,7 @@ Every inbound message passes through five validation layers before reaching the 
 Understanding this pipeline helps you write well-behaved senders and diagnose rejections.
 
 ### Layer 1 — Transport Verification
-Nova verifies the request came from a legitimate A2A sender. Failure: `401`, message dropped.
+Nova verifies the request came from a legitimate Nova sender. Failure: `401`, message dropped.
 
 ### Layer 2 — Trust Tier Resolution
 Nova looks up the sender in the receiving agent's trust registry. If unknown: quarantine with `ACTOR_UNKNOWN`. If known: tier is attached to the message for downstream enforcement.
@@ -486,7 +499,7 @@ X-A2A-Version: 1.0
 }
 ```
 
-Nova returns `202 Accepted` for all syntactically valid submissions, regardless of gate outcome. This is required by the A2A specification — gate decisions are not exposed in the HTTP response. The task result carries the outcome.
+Nova returns `202 Accepted` for all syntactically valid submissions, regardless of quarantine outcome. Gate decisions are not exposed in the HTTP response. The task result carries the outcome.
 
 ### 6.2 Task TTL
 

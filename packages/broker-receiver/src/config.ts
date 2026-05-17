@@ -12,6 +12,7 @@ import fsp from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { z } from 'zod';
+import { ReceiverPolicySchema } from './receiver-policy.js';
 
 export const DEFAULT_NOVA_URL = 'http://localhost:3001';
 export const DEFAULT_POLL_FALLBACK_MS = 30_000;
@@ -22,7 +23,7 @@ export const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30;
 // extending this enum (and registering it in handlers/index.ts). Rejecting
 // unknown handler strings at config parse time catches typos early instead
 // of producing a confusing runtime "handler not found" error.
-export const HANDLER_NAMES = ['echo', 'claude-api'] as const;
+export const HANDLER_NAMES = ['echo', 'codex-cli', 'codex-smoke', 'claude-api'] as const;
 export type HandlerName = (typeof HANDLER_NAMES)[number];
 
 // Reception strategy. `push` (default) subscribes to /inbox/stream for
@@ -42,6 +43,7 @@ export const ReceiverConfigSchema = z.object({
   inboxStrategy: z.enum(INBOX_STRATEGIES).default('push'),
   pollFallbackMs: z.number().int().min(1_000).max(60_000).default(DEFAULT_POLL_FALLBACK_MS),
   maxConcurrentTasks: z.number().int().min(1).max(32).default(DEFAULT_MAX_CONCURRENT_TASKS),
+  policy: ReceiverPolicySchema.default({ defaultAction: 'allow', rules: [] }),
   healthPort: z.number().int().min(0).max(65_535).default(0),
   shutdownGraceSeconds: z.number().int().min(1).max(300).default(DEFAULT_SHUTDOWN_GRACE_SECONDS),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),

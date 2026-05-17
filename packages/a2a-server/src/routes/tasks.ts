@@ -19,6 +19,7 @@ import { QueuedTask, TaskState } from '@nova/shared/src/types';
 import { AgentCardSchema } from '@nova/shared/src/schemas';
 import { tenantDataPath } from '@nova/shared/src/tenant';
 import { GateErrorCode } from '@nova/shared/src/errors';
+import { getBrokerPresence } from '@nova/shared/src/broker-presence';
 import { keyManager } from '../key-manager';
 import { createRateLimitMiddleware } from '../middleware/rate-limit';
 
@@ -76,6 +77,7 @@ tasksRouter.get('/.well-known/agent.json', wellKnownHelmet, async (req: Request,
         schemes: ['ucan'],
         ucapabilityPrefix: `nova:${req.ctx.tenantId}:${req.ctx.agentId}`,
       },
+      brokerPresence: await getBrokerPresence(req.ctx),
       skills: (raw.skills || []).map((s: any) => ({
         id: s.id,
         name: s.name,
