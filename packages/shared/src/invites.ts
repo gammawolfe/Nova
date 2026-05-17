@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fsp from 'fs/promises';
 import path from 'path';
+import bs58 from 'bs58';
 import { DATA_ROOT, KEY_ROOT } from './tenant';
 import { getSharedRedis } from './redis';
 
@@ -13,6 +14,7 @@ export interface InvitePayload {
 }
 
 const CONSUMED_PREFIX = 'nova:invite-consumed:';
+const ED25519_MULTICODEC_PREFIX = Uint8Array.of(0xed, 0x01);
 
 /**
  * Load Nova's gateway Ed25519 private key from data/keys/nova.private.pem.
@@ -30,8 +32,9 @@ const CONSUMED_PREFIX = 'nova:invite-consumed:';
  * The .pem filename refers to the canonical form. The legacy branch is
  * a compatibility shim, not a parallel format.
  */
-export async function loadNovaPrivateKey(): Promise<crypto.KeyObject> {
-  const keyPath = path.join(KEY_ROOT, 'nova.private.pem');
+export async function loadNovaPrivateKey(
+  keyPath = path.join(KEY_ROOT, 'nova.private.pem'),
+): Promise<crypto.KeyObject> {
   const content = await fsp.readFile(keyPath, 'utf8').catch(() => {
     throw new Error('Nova keys not found — run scripts/generate-keys.ts first');
   });
@@ -68,12 +71,21 @@ async function loadNovaPublicKey(): Promise<crypto.KeyObject> {
   return crypto.createPublicKey(await loadNovaPrivateKey());
 }
 
+export function deriveDidKeyFromPrivateKey(privateKey: crypto.KeyObject): string {
+  const jwk = crypto.createPublicKey(privateKey).export({ format: 'jwk' }) as { x?: string };
+  if (!jwk.x) throw new Error('Nova public key missing x coordinate');
+  const rawPublicKey = Buffer.from(jwk.x, 'base64url');
+  const prefixed = Buffer.concat([ED25519_MULTICODEC_PREFIX, rawPublicKey]);
+  return `did:key:z${bs58.encode(prefixed)}`;
+}
+
 /**
  * Load Nova's gateway DID from data/keys/nova.did. Returns null if the file
  * doesn't exist (fresh install before generate-keys). Trims whitespace.
  */
-export async function loadNovaDid(): Promise<string | null> {
-  const didPath = path.join(KEY_ROOT, 'nova.did');
+export async function loadNovaDid(
+  didPath = path.join(KEY_ROOT, 'nova.did'),
+): Promise<string | null> {
   try {
     return (await fsp.readFile(didPath, 'utf8')).trim();
   } catch {

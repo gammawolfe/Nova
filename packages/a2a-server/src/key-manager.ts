@@ -1,8 +1,7 @@
 // packages/a2a-server/src/key-manager.ts
 //
-// Module-level singleton owning Nova's notary keypair. Loaded once at
-// process start by index.ts#start; downstream code reads via getDid()
-// and getKeypair().
+// Module-level singleton owning Nova's notary identity. Loaded once at
+// process start by index.ts#start; downstream code reads via getDid().
 //
 // First-time setup is intentionally out of scope here: operators run
 // `pnpm run generate:keys` to mint and persist the root keypair. The
@@ -11,19 +10,20 @@
 // silently-rotated notary DID destroys every UCAN and trust-registry
 // entry that referenced the old one.
 
-import fsp from 'fs/promises';
-import * as ucans from '@ucans/ucans';
+import path from 'path';
 import { logger } from '@nova/shared/src/logger';
+import {
+  deriveDidKeyFromPrivateKey,
+  loadNovaDid,
+  loadNovaPrivateKey,
+} from '@nova/shared/src/invites';
 
-let keypair: ucans.EdKeypair | null = null;
 let did: string | null = null;
 
-async function initialize(privateKeyPath: string): Promise<void> {
+async function initialize(privateKeyPath: string, didPath = path.join(path.dirname(privateKeyPath), 'nova.did')): Promise<void> {
   try {
-    const exportedKey = (await fsp.readFile(privateKeyPath, 'utf8')).trim();
-    keypair = ucans.EdKeypair.fromSecretKey(exportedKey);
-    if (!keypair) throw new Error('KeyManager: EdKeypair.fromSecretKey returned null');
-    did = keypair.did();
+    const privateKey = await loadNovaPrivateKey(privateKeyPath);
+    did = await loadNovaDid(didPath) ?? deriveDidKeyFromPrivateKey(privateKey);
     logger.info({ did }, 'KeyManager initialized successfully');
   } catch (err: any) {
     if (err?.code === 'ENOENT') {
@@ -42,14 +42,9 @@ async function initialize(privateKeyPath: string): Promise<void> {
   }
 }
 
-function getKeypair(): ucans.EdKeypair {
-  if (!keypair) throw new Error('KeyManager not initialized');
-  return keypair;
-}
-
 function getDid(): string {
   if (!did) throw new Error('KeyManager not initialized');
   return did;
 }
 
-export const keyManager = { initialize, getKeypair, getDid };
+export const keyManager = { initialize, getDid };
