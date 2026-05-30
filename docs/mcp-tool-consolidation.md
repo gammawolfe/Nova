@@ -46,29 +46,32 @@ client-side renewal. Preserve it as structured output, not just prose:
 and restate it in the tool description. The six `watch_*`/`unwatch_*` tools fold into the
 `watch`/`unwatch` actions of the resource they target.
 
-## Schema strategy: one source of truth, render union-first
+## Schema strategy: flat raw-shape (forced by the SDK)
 
-Schemas are planning hints for the LLM, not just validation — a flat object with every
-param optional under-specifies what each action needs and can misguide weaker clients.
-But `z.discriminatedUnion("action", …)` serialises to `oneOf`, which some MCP clients
-render poorly. The answer is empirical and per-client, so don't hard-commit to either:
+We intended "union-first" for stronger planning hints. **Verified against
+`@modelcontextprotocol/sdk` 1.29.0, that does not work:**
 
-- **Define each action's params as one zod schema** (single source of truth — these also
-  serve as the runtime validators).
-- **Render the wire `inputSchema` two ways from those same schemas:**
-  - **Union (default):** `z.discriminatedUnion("action", […])` → `oneOf`. Best planning
-    hints; the client sees exactly which params each action requires.
-  - **Flat (fallback):** merge to one object, all params optional, `action` enum required.
-    Maximally portable, weaker hints. Gate behind `NOVA_MCP_FLAT_SCHEMA=1` (or per-client
-    detection).
-- **Validate with the same per-action schema regardless of wire shape**, so server-side
-  safety is identical and handler logic never forks.
+- `normalizeObjectSchema` (`server/zod-compat.js`) returns a usable schema only for a raw
+  shape or an object schema (one with `.shape`). A top-level `z.discriminatedUnion` has no
+  `.shape`, so it returns `undefined`.
+- In `ListTools` (`server/mcp.js:76–83`), an `undefined` normalization makes the advertised
+  `inputSchema` fall back to `EMPTY_OBJECT_JSON_SCHEMA`.
 
-Start union-on; flip to flat only for clients that demonstrably choke on `oneOf`. Note that
-consolidation already narrows the decision before params matter — the agent picks tool
-(clear domain) → `action` (strong enum hint) → params — so any hint-loss bites only at the
-third step, inside an already-scoped choice. Keep union for `nova_task` regardless: its
-`send` action has three required params and is the hottest, most error-prone call.
+Net: a discriminated union **validates** fine (mcp.js:172–173 parses with the schema
+directly) but advertises an **empty** parameter schema — *zero* planning hints. That is
+strictly worse than flat. So:
+
+- **Wire `inputSchema` = a flat raw shape:** required `action` enum + all other params
+  optional, each with a precise `.describe()` (e.g. "respond: the taskId from action:'next'").
+  This is the only shape the SDK renders into a full property list for the client.
+- **Validation = per-action zod schema, re-parsed in the handler** via `forAction()` (single
+  source of truth for each action's real requirements). Server-side safety is unchanged; a
+  bad-shape call returns a precise zod error.
+
+The flat schema's all-optional weakness is bought back three ways: the `action` enum is a
+strong hint, every param's `.describe()` names which action(s) need it, and the description
+carries the `ACTIONS:` map + happy-path order. Consolidation also narrows the choice before
+params matter (tool → action → params), so any hint-loss bites only at the third step.
 
 ## Instruction-driven descriptions (Archon's second lesson)
 
