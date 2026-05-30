@@ -961,9 +961,13 @@ export function registerTools(_server: McpServer, subscriptions?: SubscriptionMa
 
   // ════════════════════════════════════════════════════════════════════════
   // Legacy 1-tool-per-operation surface. Thin delegations to the same op*
-  // functions. Kept for back-compat during the consolidation transition; to be
-  // moved behind NOVA_MCP_LEGACY_TOOLS (default off) in a follow-up step.
+  // functions, kept for back-compat during the consolidation transition. OFF by
+  // default; set NOVA_MCP_LEGACY_TOOLS=1 to also expose the original tools (e.g.
+  // for external scripts that hardcode the old names). The consolidated surface
+  // above is always registered and is the supported path. Everything below this
+  // guard is legacy, so a single early return gates the whole block.
   // ════════════════════════════════════════════════════════════════════════
+  if (process.env['NOVA_MCP_LEGACY_TOOLS'] !== '1') return;
 
   // ── Identity ─────────────────────────────────────────────────────────────
 
