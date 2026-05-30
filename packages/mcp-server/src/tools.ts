@@ -62,6 +62,29 @@ async function getHealth(
   return response;
 }
 
+// ── Broker-mode context preamble ───────────────────────────────────────────
+//
+// The four broker pull/respond tools (next_task, respond, next_reply,
+// ack_reply) share an identical preamble: resolve the active runtime, load the
+// identity, guard that a tenant is joined, and mint a self-auth UCAN. Extracted
+// here so the guard logic lives in one place. Throws on any guard failure;
+// callers convert to a tool-result error via a single try/catch wrapping only
+// this call, which preserves the original error messages verbatim (the
+// per-client-call try/catch that follows keeps its own "X failed:" prefix).
+async function brokerCtx() {
+  const rt = await loadAgentRuntime();
+  if (!rt) throw new Error('No active agent runtime. Set NOVA_AGENT_ID.');
+  const identity = await loadIdentity(rt.agentId);
+  if (!identity) throw new Error(`Identity missing for ${rt.agentId}`);
+  const tenant = await loadTenantConfig();
+  if (!tenant) throw new Error('No tenant joined');
+  const selfUcan = mintSelfAuthToken({
+    senderDid: identity.did,
+    senderPrivateKeyPem: identity.privateKeyPem,
+  });
+  return { rt, identity, tenant, selfUcan };
+}
+
 export function registerTools(_server: McpServer, subscriptions?: import('./subscriptions.js').SubscriptionManager): void {
   // Cast to any: the MCP SDK's zod-compat generics blow TypeScript's inference depth
   // when combined with nested z.object/z.array/z.record. Runtime zod validation still runs
@@ -634,17 +657,9 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       },
     },
     async ({ waitMs }) => {
-      const rt = await loadAgentRuntime();
-      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
-      const identity = await loadIdentity(rt.agentId);
-      if (!identity) return err(`Identity missing for ${rt.agentId}`);
-      const tenant = await loadTenantConfig();
-      if (!tenant) return err('No tenant joined');
-
-      const selfUcan = mintSelfAuthToken({
-        senderDid: identity.did,
-        senderPrivateKeyPem: identity.privateKeyPem,
-      });
+      let ctx;
+      try { ctx = await brokerCtx(); } catch (e: any) { return err(e.message); }
+      const { rt, selfUcan } = ctx;
 
       try {
         const result = await rt.client.inboxPull(rt.agentId, selfUcan, waitMs);
@@ -667,17 +682,9 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       },
     },
     async ({ waitMs }) => {
-      const rt = await loadAgentRuntime();
-      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
-      const identity = await loadIdentity(rt.agentId);
-      if (!identity) return err(`Identity missing for ${rt.agentId}`);
-      const tenant = await loadTenantConfig();
-      if (!tenant) return err('No tenant joined');
-
-      const selfUcan = mintSelfAuthToken({
-        senderDid: identity.did,
-        senderPrivateKeyPem: identity.privateKeyPem,
-      });
+      let ctx;
+      try { ctx = await brokerCtx(); } catch (e: any) { return err(e.message); }
+      const { rt, selfUcan } = ctx;
 
       try {
         const reply = await rt.client.pullReply(rt.agentId, selfUcan, waitMs);
@@ -700,17 +707,9 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       },
     },
     async ({ taskId }) => {
-      const rt = await loadAgentRuntime();
-      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
-      const identity = await loadIdentity(rt.agentId);
-      if (!identity) return err(`Identity missing for ${rt.agentId}`);
-      const tenant = await loadTenantConfig();
-      if (!tenant) return err('No tenant joined');
-
-      const selfUcan = mintSelfAuthToken({
-        senderDid: identity.did,
-        senderPrivateKeyPem: identity.privateKeyPem,
-      });
+      let ctx;
+      try { ctx = await brokerCtx(); } catch (e: any) { return err(e.message); }
+      const { rt, selfUcan } = ctx;
 
       try {
         const response = await rt.client.ackReply(rt.agentId, selfUcan, taskId);
@@ -742,17 +741,9 @@ export function registerTools(_server: McpServer, subscriptions?: import('./subs
       }),
     },
     async ({ taskId, status, result, error }) => {
-      const rt = await loadAgentRuntime();
-      if (!rt) return err('No active agent runtime. Set NOVA_AGENT_ID.');
-      const identity = await loadIdentity(rt.agentId);
-      if (!identity) return err(`Identity missing for ${rt.agentId}`);
-      const tenant = await loadTenantConfig();
-      if (!tenant) return err('No tenant joined');
-
-      const selfUcan = mintSelfAuthToken({
-        senderDid: identity.did,
-        senderPrivateKeyPem: identity.privateKeyPem,
-      });
+      let ctx;
+      try { ctx = await brokerCtx(); } catch (e: any) { return err(e.message); }
+      const { rt, selfUcan } = ctx;
 
       try {
         const response = await rt.client.inboxRespond(rt.agentId, selfUcan, taskId, {
