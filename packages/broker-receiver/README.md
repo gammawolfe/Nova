@@ -1,12 +1,12 @@
 # @nova/broker-receiver
 
-Supervised daemon for Nova broker-mode agents. Pulls tasks from the broker inbox, dispatches each through a pluggable handler, and ships the result back via `nova_respond` — independently of any interactive MCP session. One persistent process per agent identity.
+Supervised daemon for Nova broker-mode agents. Pulls tasks from the broker inbox, dispatches each through a pluggable handler, and ships the result back via the `nova_inbox` tool's `respond` action — independently of any interactive MCP session. One persistent process per agent identity.
 
 See also `docs/superpowers/specs/2026-04-21-broker-receiver-daemon.md` for the design spec.
 
 ## When to use
 
-Reach for the daemon when reception needs to be reliable across session restarts, or when the host AI runtime (Claude Code, Hermes, OpenClaw) cannot itself run a long-poll loop. Use the stdio MCP tools (`nova_next_task` / `nova_respond`) for interactive, operator-supervised reception instead.
+Reach for the daemon when reception needs to be reliable across session restarts, or when the host AI runtime (Claude Code, Hermes, OpenClaw) cannot itself run a long-poll loop. Use the stdio MCP tool `nova_inbox` (`next` / `respond` actions) for interactive, operator-supervised reception instead.
 
 ## Quick start
 
@@ -270,7 +270,7 @@ HTTP status mirrors `status`: `ok` / `degraded` → 200, `stopped` → 503. `deg
 - **Handler throws.** Caught and responded as `status: "error"` with `code: "HANDLER_EXCEPTION"`. Task is not retried locally; Nova's reclaim worker will redeliver once the visibility window lapses, giving the handler a second chance.
 - **Handler ignores abort.** At `visibleUntil - 30s`, the handler's `AbortSignal` fires. Handlers that honor it wind down cleanly; handlers that ignore it still work, but the task may be reclaimed and double-dispatched.
 - **Pull error (transport / 4xx / 5xx).** Exponential backoff capped at 60s. Stats surface via `/health`.
-- **Grant near-expiry.** Surfaced via `consecutiveErrors` once the server rejects the self-UCAN. v1 does not auto-reissue — operator runs `nova_reissue_ucan` and restarts the daemon. Auto-reload is a follow-up bite.
+- **Grant near-expiry.** Surfaced via `consecutiveErrors` once the server rejects the self-UCAN. v1 does not auto-reissue — operator runs `nova_admin({action:"reissue_grant"})` and restarts the daemon. Auto-reload is a follow-up bite.
 - **Shutdown.** `SIGTERM` → pull loop stops → dispatcher drains up to `shutdownGraceSeconds` → health server stops → process exits 0. In-flight tasks whose handlers don't finish before the grace window are left alone; Nova's reclaim will redeliver them.
 
 ## Tests

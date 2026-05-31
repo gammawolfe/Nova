@@ -4,6 +4,13 @@ Living tracking document. Items grouped by theme, checkboxed so status is
 visible at a glance. Dates in `YYYY-MM-DD`. When an item ships, leave it
 checked with a commit/PR link instead of deleting — keeps the trail.
 
+> **Tool-name note:** shipped items below name MCP tools as they existed at
+> ship time (`nova_send_task`, `nova_check_registration`, …). The MCP surface
+> was later consolidated into 7 action-based tools (`nova_task`, `nova_onboard`,
+> …); the old names now require `NOVA_MCP_LEGACY_TOOLS=1`. This trail is left
+> as-written on purpose — see [`docs/mcp-tool-consolidation.md`](docs/mcp-tool-consolidation.md)
+> for the mapping and [`README.md`](README.md#tools-exposed) for the current surface.
+
 ---
 
 ## MCP Onboarding Hardening

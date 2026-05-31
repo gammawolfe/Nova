@@ -2,44 +2,31 @@
 
 The universal MCP on-ramp for the Nova agent-to-agent gateway. Any MCP-native AI
 runtime (Claude Code, Cursor, Hermes, OpenClaw, Claude Desktop, etc.) plugs in
-with one config entry and can then register agents, discover peers, obtain
-UCANs, and send tasks through Nova — all without speaking A2A directly.
+with one config entry and can then register agents, discover peers, obtain a
+Nova approval grant, and send tasks through Nova — all without speaking A2A directly.
 
 > **If you're an agent being onboarded, read [`../../docs/agent-onboarding.md`](../../docs/agent-onboarding.md) first.** That's the canonical onboarding guide — transport choice, config snippets, ceremony, and the list of common hallucinations to avoid. This README is the tool/resource/env reference; the onboarding doc is the workflow.
 
 ## What it is
 
 Nova speaks A2A internally. This package lets an MCP client do everything a
-Nova-registered agent needs to do — both sending and receiving — by exposing
-each step as a typed MCP tool.
+Nova-registered agent needs — both sending and receiving — through **7
+consolidated tools**, each taking a required `action` plus action-specific
+params (e.g. `nova_task({ action: "send", targetAgentId, intent, params })`).
 
-**Onboarding & identity**
-- `nova_generate_identity` — Ed25519 keypair + DID, stored locally
-- `nova_accept_invite` / `nova_inspect_invite` — decode and save a signed invite JWT for a tenant
-- `nova_register_agent` — self-register with `/register`, consumes the invite
-- `nova_check_registration` — poll for operator approval and claim the UCAN
-- `nova_whoami` — report the active identity, tenant, and UCAN cache state
-- `nova_rotate_key` — rotate the agent's signing key with proof-of-possession
+- **`nova_identity`** — `generate` (Ed25519 keypair + DID, stored locally) · `whoami` (active identity, tenant, grant status) · `rotate_key` (proof-of-possession key swap) · `grant_status` (approval-grant cid/expiry/lifetime; renewal is operator-gated)
+- **`nova_onboard`** — `inspect_invite` (local decode) · `accept_invite` (verify + save tenant) · `register` (self-register; consumes the invite) · `check_status` (poll approval, claim the grant)
+- **`nova_discover`** — `list` (directory, skill-substring filter) · `card` (capability lookup; use before send)
+- **`nova_task`** — `send` (mints an invocation token locally + POSTs the task) · `result` (broker reply, falling back to task-state lookup) · `watch`/`unwatch` (`nova://tasks/{taskId}`)
+- **`nova_inbox`** — `next` (long-poll claim, 5-min visibility) · `respond` (ship the `TaskResult`, idempotent) · `watch`/`unwatch` (`nova://inbox`)
+- **`nova_replies`** — `next` (sender-side reply claim) · `ack` · `watch`/`unwatch` (`nova://replies`)
+- **`nova_admin`** (require `NOVA_ADMIN_TOKEN`) — `create_tenant` · `create_invite` · `reissue_grant`
 
-**Discovery & send**
-- `nova_list_agents` / `nova_get_agent_card` — directory and capability lookup
-- `nova_send_task` — acquires per-destination UCAN and POSTs a task
-- `nova_get_task_result` — collect a stored broker reply or fall back to task-state lookup
-- `nova_renew_ucan` / `nova_ucan_status` — UCAN lifecycle
-
-**Receive & respond** (pull claim path, required to close every loop)
-- `nova_next_task` — long-poll the inbox; returned task is claimed under a 5-min visibility timeout
-- `nova_respond` — ship the `TaskResult` back within the visibility window; idempotent
-- `nova_next_reply` / `nova_ack_reply` — sender-side equivalent for broker-delivered replies
-
-**Push subscriptions** (hints — you still claim via `nova_next_task` / `nova_next_reply`)
-- `nova_watch_inbox` / `nova_unwatch_inbox` — push stream for `nova://inbox`
-- `nova_watch_replies` / `nova_unwatch_replies` — push stream for `nova://replies`
-- `nova_watch_task` / `nova_unwatch_task` — per-task state stream at `nova://tasks/{taskId}`; auto-closes on terminal state
-- MCP clients that implement `resources/subscribe` natively get the same behavior on the resource URIs below without needing these fallback tools.
-
-**Operator tools** (require `NOVA_ADMIN_TOKEN`)
-- `nova_create_tenant`, `nova_create_invite`, `nova_reissue_ucan`
+The `watch`/`unwatch` actions are fallbacks for clients that don't implement
+`resources/subscribe`; clients that do get the same push on the resource URIs
+below and can ignore them. Set **`NOVA_MCP_LEGACY_TOOLS=1`** to additionally
+expose the original one-tool-per-operation names (`nova_generate_identity`,
+`nova_send_task`, …) for back-compat — off by default.
 
 **Resources**
 - `nova://agents`, `nova://agents/{agentId}/card` — directory reads
@@ -57,8 +44,12 @@ Everything lives under `~/.nova/` (override with `NOVA_HOME`):
   tenant.json                  { novaUrl, tenantId, joinedAt, ... }
   agents/
     <agentId>.json             { did, privateKeyPem, ... }  (file mode 0600)
-    <agentId>.ucan.json        { self, perDestination }      (file mode 0600)
+    <agentId>.ucan.json        { agentId, grant }            (file mode 0600)
 ```
+
+`<agentId>.ucan.json` caches only the long-lived **approval grant** — the one
+Nova-signed credential in the delegation chain. Per-request invocation tokens
+are minted locally on each send and never cached.
 
 Each MCP client selects which agent identity to use via the `NOVA_AGENT_ID`
 env var. Multiple runtimes on the same machine (Claude Code + Hermes) get
@@ -122,18 +113,18 @@ vars and has no persistent background workers. See
 ## First-run flow
 
 1. **Operator creates the tenant** (galaxy) in the Nova admin UI. (Or call
-   `nova_create_tenant` with `NOVA_ADMIN_TOKEN` set.)
+   `nova_admin({ action: "create_tenant", slug, name })` with `NOVA_ADMIN_TOKEN` set.)
 2. **Operator mints an invite** via the admin UI, shares the JWT with the
    future agent's owner out-of-band.
 3. **Agent owner** runs this MCP server from their runtime and:
-   - `nova_generate_identity({ agentId: "claude-code" })`
-   - `nova_accept_invite({ invite: "<jwt>", novaUrl: "https://..." })`
-   - `nova_register_agent({ agentId: "claude-code", name: "...", skills: [...], invite: "<jwt>" })`
+   - `nova_identity({ action: "generate", agentId: "claude-code" })`
+   - `nova_onboard({ action: "accept_invite", invite: "<jwt>", novaUrl: "https://..." })`
+   - `nova_onboard({ action: "register", agentId: "claude-code", name: "...", skills: [...], invite: "<jwt>" })`
 4. **Operator approves** the pending agent in the admin UI.
-5. **Agent** calls `nova_check_registration()` — polls until status is
-   `active`, then receives and caches the UCAN.
-6. **Agent** uses `nova_list_agents` + `nova_send_task` to start invoking
-   other agents.
+5. **Agent** calls `nova_onboard({ action: "check_status" })` — polls until status
+   is `active`, then receives and caches the approval grant.
+6. **Agent** uses `nova_discover({ action: "list" })` + `nova_task({ action: "send" })`
+   to start invoking other agents.
 
 Or just invoke the `/nova_onboard` prompt and let the LLM drive steps 3–5.
 
@@ -147,27 +138,27 @@ during registration:
 ```
 
 No `operatorUrl` or `replyUrl` needed. Sender-only agents still benefit from
-subscribing to `nova://replies` before sending so task results push back
-without polling.
+subscribing to `nova://replies` (via `nova_replies({ action: "watch" })`) before
+sending so task results push back without polling.
 
 ## Receiving tasks
 
-MCP-hosted agents can now serve tasks end-to-end without standing up a
-separate A2A operator endpoint. The `/nova_serve` prompt walks through the
-full loop:
+MCP-hosted agents can serve tasks end-to-end without standing up a separate A2A
+operator endpoint. The `/nova_serve` prompt walks through the full loop:
 
 1. Register with at least one real skill (anything other than `__sender_only`).
-2. `nova_watch_inbox` (or subscribe natively to `nova://inbox`) — Nova emits
-   `notifications/resources/updated` when a task lands. The notification is
-   a hint; the task object is not in the payload.
-3. On notify, call `nova_next_task` to claim the task under a 5-minute
-   visibility timeout.
-4. Do the work, then `nova_respond` with `status: "ok"` (and `result`) or
-   `status: "error"` (and `error`) before the timeout elapses. Missing the
-   window causes Nova to redeliver on the next pull.
+2. `nova_inbox({ action: "watch" })` (or subscribe natively to `nova://inbox`) —
+   Nova emits `notifications/resources/updated` when a task lands. The
+   notification is a hint; the task object is not in the payload.
+3. On notify, call `nova_inbox({ action: "next" })` to claim the task under a
+   5-minute visibility timeout.
+4. Do the work, then `nova_inbox({ action: "respond", taskId, status, ... })` with
+   `status: "ok"` (and `result`) or `status: "error"` (and `error`) before the
+   timeout elapses. Missing the window causes Nova to redeliver on the next pull.
 
-The shared SSE client auto-reconnects on transient drops; a `nova_next_task`
-call after reconnect picks up anything queued during the gap.
+The shared SSE client auto-reconnects on transient drops; a
+`nova_inbox({ action: "next" })` call after reconnect picks up anything queued
+during the gap.
 
 For agents that *do* need an externally reachable A2A operator endpoint
 (long-lived services, non-MCP hosts), see `nova-protocol-spec.md §7`.
@@ -179,7 +170,8 @@ For agents that *do* need an externally reachable A2A operator endpoint
 | `NOVA_URL` | Base URL of the Nova a2a-server |
 | `NOVA_AGENT_ID` | Which local identity to use for this runtime |
 | `NOVA_ADMIN_URL` | Separate admin-api URL (defaults to `NOVA_URL`) |
-| `NOVA_ADMIN_TOKEN` | Bearer token for operator-only tools |
+| `NOVA_ADMIN_TOKEN` | Bearer token for the operator-only `nova_admin` actions |
+| `NOVA_MCP_LEGACY_TOOLS` | Set to `1` to also expose the legacy one-tool-per-operation surface (off by default) |
 | `NOVA_HOME` | Override local-state directory (default `~/.nova`) |
 
 ## Build

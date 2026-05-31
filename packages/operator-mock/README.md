@@ -24,7 +24,7 @@ Every response is `status: "ok"` with a random `auditToken`, `completedAt` set t
 
 ## How to use it
 
-Boot the container alongside the rest of the stack (it's wired into `docker-compose.yml`), then register an agent whose `operatorUrl` points at `http://operator-mock:4000/process`. `nova_send_task` to that agent will flow through `agent-connector`, hit `/process`, and return a canned result you can assert against.
+Boot the container alongside the rest of the stack (it's wired into `docker-compose.yml`), then register an agent whose `operatorUrl` points at `http://operator-mock:4000/process`. A `nova_task({action:"send"})` to that agent will flow through `agent-connector`, hit `/process`, and return a canned result you can assert against.
 
 ```bash
 npm run build --workspace=@nova/operator-mock

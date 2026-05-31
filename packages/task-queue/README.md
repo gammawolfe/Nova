@@ -81,7 +81,7 @@ Known caveat (documented at the `pull` call site): BLPOP + ZADD can't be made at
 
 ### Sender side — `reply-inbox.ts`
 
-Symmetric to the receiver inbox but in the opposite direction. When a broker-mode sender omits `replyTo`, the recipient's respond handler enqueues the `TaskResult` here instead of POSTing to a webhook. Pulled by `nova_next_reply`, acked by `nova_ack_reply`.
+Symmetric to the receiver inbox but in the opposite direction. When a broker-mode sender omits `replyTo`, the recipient's respond handler enqueues the `TaskResult` here instead of POSTing to a webhook. Pulled by the `nova_replies` tool's `next` action, acked by its `ack` action.
 
 | Key | Purpose |
 |---|---|
@@ -91,7 +91,7 @@ Symmetric to the receiver inbox but in the opposite direction. When a broker-mod
 | `nova:reply-inbox-seq:{tenantId}:{agentId}` | Monotonic `seq` counter |
 | `nova:task-result:{tenantId}:{agentId}:{taskId}` | Direct-lookup store (TTL = `BROKER_REPLY_RESULT_TTL_SECONDS`) |
 
-The direct-lookup key is what lets `nova_get_task_result` return a stored reply independent of the pull/ack state — once a result lands, it stays retrievable for the configured TTL even after the sender acks it off the pull queue.
+The direct-lookup key is what lets the `nova_task` tool's `result` action return a stored reply independent of the pull/ack state — once a result lands, it stays retrievable for the configured TTL even after the sender acks it off the pull queue.
 
 ## Dead-letter (`dead-letter.ts`)
 

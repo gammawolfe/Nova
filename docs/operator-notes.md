@@ -89,4 +89,4 @@ Unit tests don't need a running stack: `npx vitest run` is self-contained.
 
 Identities stored at `~/.nova/agents/<agentId>.json`. The `keyBackend` field indicates whether the private key PEM is stored inline (legacy `file` backend) or in the OS keychain (`keychain` backend, opt-in per PR that shipped it). Both are respected on load; swapping backends requires generating a new identity.
 
-Public DID and public key are published to Nova's discovery API at registration. Rotating a key (`nova_rotate_key`) generates a fresh Ed25519 pair and re-registers; the old identity file is preserved as `{agentId}.json.rotated-{ISO}.bak` for audit.
+Public DID and public key are published to Nova's discovery API at registration. Rotating a key (`nova_identity({action:"rotate_key"})`) generates a fresh Ed25519 pair and re-registers; the old identity file is preserved as `{agentId}.json.rotated-{ISO}.bak` for audit.
