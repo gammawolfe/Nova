@@ -24,8 +24,8 @@ If you find yourself about to do any of the following, **stop** — you are hall
 
 - ❌ Creating a `nova.mcp.json` config file. **Does not exist.** Config lives in your MCP client's own config file (`~/.claude/mcp.json`, `claude_desktop_config.json`, Cursor's MCP settings, etc.), not in a Nova-specific file.
 - ❌ Opening ports `4077`, `8080`, or any port other than what's already configured on the a2a-server deployment. The MCP transport is **stdio**, not TCP. No inbound ports on the agent's host.
-- ❌ Running `npx @ucan/cli keypair create` or any manual keypair generation. `nova_generate_identity` does this for you.
-- ❌ Curling a `/status` endpoint to verify connectivity. There is no such endpoint. Use `nova_whoami` via MCP.
+- ❌ Running `npx @ucan/cli keypair create` or any manual keypair generation. `nova_identity({action:"generate"})` does this for you.
+- ❌ Curling a `/status` endpoint to verify connectivity. There is no such endpoint. Use `nova_identity({action:"whoami"})` via MCP.
 - ❌ Installing a package called `@nova/mcp-server` from npm (it is not yet published). The binary is built locally from this monorepo at `packages/mcp-server/dist/index.js`.
 - ❌ Asking the user for "the Nova host's IP and port". If the user wanted a custom URL they'd have told you — otherwise default to `http://localhost:3001`.
 - ❌ Passing UCANs, JWTs, or signing keys in environment variables. The only auth env var is `NOVA_ADMIN_TOKEN`, and that's operator-only.
@@ -159,7 +159,7 @@ If you're not sure, **ask the operator** which applies. Do not guess.
 | `NOVA_URL` | yes | Base URL of the a2a-server, resolved on the host where nova-mcp runs |
 | `NOVA_AGENT_ID` | yes | Which local identity to use — picks which file under `~/.nova/agents/` to read/write |
 | `NOVA_ADMIN_URL` | no | Admin-api base URL (defaults to `NOVA_URL`) — only needed if admin-api is deployed separately |
-| `NOVA_ADMIN_TOKEN` | no (operator only) | Bearer token for operator-scoped tools (`nova_create_tenant`, `nova_create_invite`, `nova_reissue_ucan`) |
+| `NOVA_ADMIN_TOKEN` | no (operator only) | Bearer token for the operator-scoped `nova_admin` actions (`create_tenant`, `create_invite`, `reissue_grant`) |
 | `NOVA_HOME` | no | Override the local-state directory (default `~/.nova`) |
 
 **Multiple runtimes on one host.** Each runtime sets a distinct `NOVA_AGENT_ID` so they get separate DIDs, separate keypairs, separate UCANs. `claude-code` and `hermes-agent` on the same Mac coexist without collision.
@@ -170,16 +170,17 @@ If you're not sure, **ask the operator** which applies. Do not guess.
 
 Once your MCP client lists `nova_*` tools, the rest is automated by the **`/nova_onboard` prompt** (defined in `packages/mcp-server/src/prompts.ts`). Invoke it and follow it verbatim.
 
-The prompt walks you through, in order:
-1. `nova_whoami` — see current state.
-2. `nova_generate_identity` — Ed25519 keypair + DID, written to `~/.nova/agents/<agentId>.json` (mode 0600).
-3. `nova_inspect_invite` — local decode of the invite JWT. **Verify `agentIdHint` matches `NOVA_AGENT_ID` before step 4.** If it doesn't match, STOP and ask the operator for a corrected invite — do not proceed.
-4. `nova_accept_invite` — server-side validation and local save.
-5. `nova_register_agent` — **exactly once**. Pass real skill IDs for receivers; pass `[{ id: "__sender_only", name: "Sender only", description: "send-only" }]` for send-only agents.
-6. `nova_check_registration` — poll on an escalating backoff (10 s for 2 min → 30 s to 10 min → 60 s after). **Stop at 30 min** and tell the user the operator hasn't approved yet.
-7. Handle `GRANT_CLAIM_EXPIRED` by asking the operator to run `nova_reissue_ucan`, then re-check once.
-8. `nova_whoami` — confirm cached self-UCAN (the "approval grant").
-9. If you registered real skills: `nova_watch_inbox` immediately, then follow `/nova_serve` for the receiver loop.
+The prompt walks you through, in order (every step is one `action` of a
+consolidated tool):
+1. `nova_identity({action:"whoami"})` — see current state.
+2. `nova_identity({action:"generate", agentId})` — Ed25519 keypair + DID, written to `~/.nova/agents/<agentId>.json` (mode 0600).
+3. `nova_onboard({action:"inspect_invite", invite})` — local decode of the invite JWT. **Verify `agentIdHint` matches `NOVA_AGENT_ID` before step 4.** If it doesn't match, STOP and ask the operator for a corrected invite — do not proceed.
+4. `nova_onboard({action:"accept_invite", invite})` — server-side validation and local save.
+5. `nova_onboard({action:"register", ...})` — **exactly once**. Pass real skill IDs for receivers; pass `[{ id: "__sender_only", name: "Sender only", description: "send-only" }]` for send-only agents.
+6. `nova_onboard({action:"check_status"})` — poll on an escalating backoff (10 s for 2 min → 30 s to 10 min → 60 s after). **Stop at 30 min** and tell the user the operator hasn't approved yet.
+7. Handle `GRANT_CLAIM_EXPIRED` by asking the operator to run `nova_admin({action:"reissue_grant", tenantId, agentId})`, then re-check once.
+8. `nova_identity({action:"whoami"})` — confirm cached grant (the "approval grant").
+9. If you registered real skills: `nova_inbox({action:"watch"})` immediately, then follow `/nova_serve` for the receiver loop.
 10. If sender-only: follow `/nova_first_task` when you want to send.
 
 **Do not reinvent this flow.** Every step in the prompt has a reason encoded in it (invite-consumption semantics, visibility timeouts, reclaim windows). Skipping or reordering causes silent corruption of local state.
@@ -190,11 +191,11 @@ The prompt walks you through, in order:
 
 Declare this at registration (step 5 above). It is **not** trivial to change later — receivers that forgot to register a real skill have to re-register.
 
-- **Sender-only.** This agent will only invoke other agents. Register with the single synthetic skill `__sender_only`. No inbox, no `nova_watch_inbox`, no operator webhook.
+- **Sender-only.** This agent will only invoke other agents. Register with the single synthetic skill `__sender_only`. No inbox, no `nova_inbox({action:"watch"})`, no operator webhook.
 - **Receiver (broker mode).** This agent will receive tasks over MCP pull. Register with one or more real skills (each with `id`, `name`, `description`, optionally `inputSchema`). Then follow `/nova_serve` to run the inbox loop. No externally reachable webhook needed.
 - **Receiver (push mode).** This agent runs an HTTP server and wants tasks delivered via POST. Pass `operatorUrl` at registration. This doc doesn't cover that path — see `nova-protocol-spec.md §7`.
 
-Skill IDs are the contract between senders and receivers. Senders call `nova_send_task` with `intent: "<skillId>"`, so agree with the operator on stable IDs.
+Skill IDs are the contract between senders and receivers. Senders call `nova_task({action:"send", intent:"<skillId>"})`, so agree with the operator on stable IDs.
 
 ---
 
@@ -224,13 +225,13 @@ Then follow the normal invite flow:
 
 1. Operator creates or selects a tenant.
 2. Operator mints an invite with `agentIdHint: "codex"`.
-3. Codex calls `nova_generate_identity({ agentId: "codex" })` unless the
+3. Codex calls `nova_identity({ action: "generate", agentId: "codex" })` unless the
    identity already exists.
-4. Codex calls `nova_inspect_invite` and confirms the hint is exactly `codex`.
-5. Codex calls `nova_accept_invite({ invite, novaUrl })`.
-6. Codex calls `nova_register_agent` with the broker-mode skill payload below.
+4. Codex calls `nova_onboard({ action: "inspect_invite", invite })` and confirms the hint is exactly `codex`.
+5. Codex calls `nova_onboard({ action: "accept_invite", invite, novaUrl })`.
+6. Codex calls `nova_onboard({ action: "register", ... })` with the broker-mode skill payload below.
 7. Operator approves the pending `codex` agent, normally at trust tier 2.
-8. Codex calls `nova_check_registration({ agentId: "codex" })` and verifies
+8. Codex calls `nova_onboard({ action: "check_status", agentId: "codex" })` and verifies
    the grant is cached.
 9. Codex verifies the agent card and broker inbox status.
 
@@ -319,15 +320,15 @@ Important Codex-specific rules:
 - Do **not** register Codex with `__sender_only` unless the operator explicitly
   asks for sender-only. That prevents Codex from receiving tasks.
 - Do **not** pass `operatorUrl`; omitting it is what makes Codex broker-mode.
-- After onboarding, Codex receives with `nova_watch_inbox` plus
-  `nova_next_task`, and completes tasks with `nova_respond` before the
+- After onboarding, Codex receives with `nova_inbox({action:"watch"})` plus
+  `nova_inbox({action:"next"})`, and completes tasks with `nova_inbox({action:"respond"})` before the
   5-minute visibility timeout.
 - For unattended receipt, run the broker receiver daemon as `codex`. The MCP
-  receive tools above are interactive; they do not claim anything unless the
+  receive actions above are interactive; they do not claim anything unless the
   MCP host is awake and invoking them.
-- Codex sends with `nova_send_task`. If the destination is also broker-mode,
+- Codex sends with `nova_task({action:"send"})`. If the destination is also broker-mode,
   omit `replyTo`; the result lands in Codex's reply inbox and is collected via
-  `nova_next_reply` / `nova_ack_reply`.
+  `nova_replies({action:"next"})` / `nova_replies({action:"ack"})`.
 - Local state should end up under `~/.nova/tenant.json`,
   `~/.nova/agents/codex.json`, and `~/.nova/agents/codex.ucan.json`.
 
@@ -392,15 +393,15 @@ That's a **Nova-side response**. The MCP transport is fine. Common codes:
 | `AGENT_EXISTS` | Someone already registered with this `agentId` in this tenant | If prior record is deregistered, retry (Nova overwrites). Otherwise ask operator to delete/reject the stale record. |
 | `TENANT_NOT_FOUND` | The invite points at a tenant that doesn't exist | Operator side — tenant may have been deleted. Fresh invite needed. |
 | `INVITE_INVALID` | Signature failure, expiry, or successful prior consumption | Get a new invite. Note: pre-validation failures (AGENT_EXISTS, etc.) do NOT consume the invite — same token retries. |
-| `GRANT_CLAIM_EXPIRED` | Operator approved but you didn't claim within the claim window | Operator runs `nova_reissue_ucan`, you re-check once. |
-| `UCAN_CLAIM_EXPIRED` | Approval grant itself expired (long after approval, ~30 days) | Operator runs `nova_reissue_ucan`, you re-claim via `nova_check_registration`. |
+| `GRANT_CLAIM_EXPIRED` | Operator approved but you didn't claim within the claim window | Operator runs `nova_admin({action:"reissue_grant"})`, you re-check once. |
+| `UCAN_CLAIM_EXPIRED` | Approval grant itself expired (long after approval, ~30 days) | Operator runs `nova_admin({action:"reissue_grant"})`, you re-claim via `nova_onboard({action:"check_status"})`. |
 | `GRANT_REVOKED` | Operator revoked this agent's approval | You are persona non grata. Contact the operator. |
 
 Surface these verbatim. Do not retry silently in a loop.
 
 ### "nova-mcp is unreachable" / "connection refused"
 
-This almost always means your MCP **host** can't spawn the process — not that Nova is down. Re-check your MCP config. If the error comes from *inside* a nova tool call (e.g. `nova_register_agent` fails with "ECONNREFUSED to localhost:3001"), then `NOVA_URL` is wrong or the a2a-server isn't running.
+This almost always means your MCP **host** can't spawn the process — not that Nova is down. Re-check your MCP config. If the error comes from *inside* a nova tool call (e.g. `nova_onboard({action:"register"})` fails with "ECONNREFUSED to localhost:3001"), then `NOVA_URL` is wrong or the a2a-server isn't running.
 
 ---
 
@@ -408,9 +409,9 @@ This almost always means your MCP **host** can't spawn the process — not that 
 
 - **First send:** invoke `/nova_first_task` (prompt).
 - **First receive:** invoke `/nova_serve` (prompt).
-- **Key rotation:** `nova_rotate_key` — generates a new keypair, proves possession of the old one, swaps the DID. Old identity file preserved at `<agentId>.json.rotated-<ISO>.bak`.
-- **Inspect cached UCAN:** `nova_ucan_status`.
-- **Stop receiving:** `nova_unwatch_inbox` (on shutdown; abrupt exits are fine — Nova closes the stream server-side).
+- **Key rotation:** `nova_identity({action:"rotate_key"})` — generates a new keypair, proves possession of the old one, swaps the DID. Old identity file preserved at `<agentId>.json.rotated-<ISO>.bak`.
+- **Inspect cached grant:** `nova_identity({action:"grant_status"})`.
+- **Stop receiving:** `nova_inbox({action:"unwatch"})` (on shutdown; abrupt exits are fine — Nova closes the stream server-side).
 
 Runtime-specific notes (history, quirks, acceptance-test checklists):
 

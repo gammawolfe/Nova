@@ -1,7 +1,7 @@
 /**
  * P2.8 — Keychain backend acceptance test.
  *
- * Exercises packages/mcp-server/src/identity.ts + key-backend.ts end-to-end
+ * Exercises packages/shared/src/identity.ts + key-backend.ts end-to-end
  * with both backends. Does NOT require admin-api / a2a-server — pure local
  * identity persistence.
  *
@@ -22,7 +22,7 @@ function assert(c: boolean, msg: string): asserts c {
 }
 
 // Route NOVA_HOME to a per-run tempdir so we never touch the user's real
-// ~/.nova state. Set before importing any mcp-server modules so paths.ts
+// ~/.nova state. Set before importing any @nova/shared modules so paths.ts
 // picks it up at module load.
 const testHome = path.join(os.tmpdir(), 'nova-p2.8-' + randomBytes(4).toString('hex'));
 process.env['NOVA_HOME'] = testHome;
@@ -42,8 +42,8 @@ async function main() {
   console.log(`Using NOVA_HOME=${testHome}\n`);
 
   // Dynamic import so NOVA_HOME is already set before paths.ts resolves.
-  const { generateIdentity, saveIdentity, loadIdentity, sign } = await import('../packages/mcp-server/src/identity.js');
-  const { getKeyBackend } = await import('../packages/mcp-server/src/key-backend.js');
+  const { generateIdentity, saveIdentity, loadIdentity, sign } = await import('../packages/shared/src/identity.js');
+  const { getKeyBackend } = await import('../packages/shared/src/key-backend.js');
 
   // ── 1. File backend — default / legacy layout preserved ─────────────────
   console.log('--- File backend (default): save + load round-trip ---');

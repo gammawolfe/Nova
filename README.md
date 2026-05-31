@@ -124,45 +124,51 @@ npx tsc --build packages/mcp-server
 
 ### Tools exposed
 
+The surface is 7 tools, each taking a required `action` plus action-specific
+params (e.g. `nova_task({action:"send", targetAgentId, intent, params})`).
+
 ```
-# Identity & onboarding
-nova_generate_identity     Ed25519 keypair + DID, stored at ~/.nova/agents/
-nova_whoami                active identity, tenant, approval-grant status
-nova_inspect_invite        local decode of an invite JWT — no network, no consumption
-nova_accept_invite         save an invite locally (consumed by nova_register_agent)
-nova_register_agent        POST /register (consumes the invite)
-nova_check_registration    poll until operator approves, claim approval grant
-nova_rotate_key            rotate the agent's Ed25519 keypair (PoP-signed with old key)
-nova_renew_ucan            report grant status (no client-side refresh in the delegation model)
-nova_ucan_status           approval-grant cache inspection
+nova_identity   action: generate | whoami | rotate_key | grant_status
+                  identity + approval-grant status. generate = Ed25519 keypair + DID
+                  (~/.nova/agents/); rotate_key = PoP-signed key swap; grant_status
+                  reports cid/expiry/lifetime (renewal is operator-gated).
 
-# Discovery & send
-nova_list_agents           discovery across all galaxies
-nova_get_agent_card        skill schemas for a specific agent
-nova_send_task             mint invocation token locally + POST task to destination
-nova_get_task_result       return broker reply result if stored; otherwise fall back to task state
+nova_onboard    action: inspect_invite | accept_invite | register | check_status
+                  invite-driven join + registration. inspect_invite decodes locally;
+                  accept_invite verifies + saves the tenant; register POSTs /register;
+                  check_status polls approval and claims the one-time grant.
 
-# Broker-mode receive (no webhook)
-nova_next_task             long-poll for a task; claims with 5-min visibility
-nova_respond               ship TaskResult back (must respond before visibility expires)
+nova_discover   action: list | card
+                  list = discovery across all galaxies (skill substring filter);
+                  card = full skill schemas for one agent (use before send).
 
-# Broker-mode sender reply collection
-nova_next_reply            long-poll for a TaskResult addressed to this agent as sender
-nova_ack_reply             clear in-flight state for a pulled reply
+nova_task       action: send | result | watch | unwatch
+                  send mints an invocation token locally + POSTs the task; result
+                  returns the broker reply or falls back to task state; watch/unwatch
+                  push for nova://tasks/{taskId}.
 
-# Push subscriptions (fallbacks if client can't speak MCP resources/subscribe)
-nova_watch_inbox           subscribe to nova://inbox
-nova_unwatch_inbox         unsubscribe
-nova_watch_replies         subscribe to nova://replies
-nova_unwatch_replies       unsubscribe
-nova_watch_task            subscribe to nova://tasks/{taskId}
-nova_unwatch_task          unsubscribe
+nova_inbox      action: next | respond | watch | unwatch
+                  broker-mode receive (no webhook). next long-polls + claims with 5-min
+                  visibility; respond ships the TaskResult; watch/unwatch push for
+                  nova://inbox.
 
-# Operator-only (requires NOVA_ADMIN_TOKEN)
-nova_create_tenant         create a galaxy
-nova_create_invite         mint an invite JWT
-nova_reissue_ucan          regenerate an approval grant after the claim window lapsed
+nova_replies    action: next | ack | watch | unwatch
+                  broker-mode sender reply collection. next long-polls a TaskResult;
+                  ack clears in-flight state; watch/unwatch push for nova://replies.
+
+nova_admin      action: create_tenant | create_invite | reissue_grant   (NOVA_ADMIN_TOKEN)
+                  create a galaxy; mint an invite JWT; regenerate an approval grant
+                  after the claim window lapsed.
 ```
+
+The `watch`/`unwatch` actions are fallbacks for clients that can't speak MCP
+`resources/subscribe` — clients that can should use the subscribable resources
+directly and ignore them.
+
+Setting `NOVA_MCP_LEGACY_TOOLS=1` additionally exposes the original
+one-tool-per-operation surface (`nova_generate_identity`, `nova_send_task`, …)
+for back-compat with scripts that hardcode the old names. Off by default; the
+consolidated surface above is the supported path.
 
 Resources: `nova://agents`, `nova://agents/{agentId}/card`, `nova://inbox`
 (subscribable), `nova://replies` (subscribable), `nova://tasks/{taskId}`
