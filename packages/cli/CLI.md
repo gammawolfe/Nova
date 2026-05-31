@@ -129,7 +129,7 @@ Quotas default: 1000 messages/day, 5 agents max.
 ### `nova invite`
 
 Mint a one-time invite JWT for a new agent to self-register.
-The token is printed prominently for copy-paste into `nova_accept_invite`.
+The token is printed prominently for copy-paste into `nova_onboard({action:"accept_invite"})`.
 
 ```
 nova invite mint --tenant <tenantId> --agent-id-hint <agentId>
@@ -162,7 +162,7 @@ nova agent reissue --tenant <tenantId> --agent <agentId>
 
 **`reissue`** regenerates the UCAN approval grant when an agent missed
 its claim window (24h TTL). The agent picks it up on next
-`nova_check_registration` call.
+`nova_onboard({action:"check_status"})` call.
 
 ---
 
