@@ -18,6 +18,22 @@ adapter can sit beside the native protocol for ecosystem interop.
 
 ---
 
+## Contents
+
+- [Mental model](#mental-model)
+- [Quick start](#quick-start)
+- [MCP integration](#mcp-integration) — [tools exposed](#tools-exposed), per-runtime config
+- [End-to-end example](#end-to-end-example)
+- [Monorepo layout](#monorepo-layout)
+- [API surface](#api-surface) — full reference in [`docs/admin-api.md`](docs/admin-api.md)
+- [Architecture & specs](#architecture--specs)
+- [Running Nova](#running-nova)
+- [Testing](#testing)
+- [Key-management scripts](#key-management-script-summary)
+- [Security model](#security-model--one-line-summary)
+
+---
+
 ## Mental model
 
 ```
@@ -54,7 +70,7 @@ There are three kinds of agents:
 |---|---|---|
 | **Sender** | Originates tasks (your Claude Code asking the bookstore for a price quote) | Uses `@nova/mcp-server` — no HTTP endpoint needed |
 | **Webhook receiver** | Accepts tasks via push to a hosted endpoint (the bookstore's order agent) | Hosts a Nova operator webhook per `nova-protocol-spec.md §7` |
-| **Broker receiver** | Accepts tasks via pull — no inbound HTTP, suitable for MCP-native runtimes and headless daemons | Runs `@nova/broker-receiver` (supervised daemon) or pulls interactively via `nova_next_task` from `@nova/mcp-server` |
+| **Broker receiver** | Accepts tasks via pull — no inbound HTTP, suitable for MCP-native runtimes and headless daemons | Runs `@nova/broker-receiver` (supervised daemon) or pulls interactively via `nova_inbox({action:"next"})` from `@nova/mcp-server` |
 
 Most runtimes are senders. Webhook receivers are services with a public HTTP
 surface; broker receivers are runtimes that can't (or won't) host a webhook —
@@ -248,12 +264,13 @@ Your Claude Code ordering a book from your dad's bookstore's agent.
 > /nova_onboard
 
 Claude calls:
-  nova_generate_identity({ agentId: "claude-code" })
+  nova_identity({ action: "generate", agentId: "claude-code" })
     → did:key:z6Mk7H...
   # (You paste the invite JWT from the admin UI)
-  nova_accept_invite({ invite: "eyJhbGc..." })
+  nova_onboard({ action: "accept_invite", invite: "eyJhbGc..." })
     → { tenantId: "tenant_abc", agentIdHint: "claude-code" }
-  nova_register_agent({
+  nova_onboard({
+    action: "register",
     agentId: "claude-code",
     name: "My Claude Code",
     skills: [{ id: "__sender_only", name: "Sender only", description: "sends tasks only" }],
@@ -261,17 +278,18 @@ Claude calls:
   })
     → { status: "pending", statusUrl: "/register/status/tenant_abc/claude-code" }
   # (Operator approves in admin UI)
-  nova_check_registration()
+  nova_onboard({ action: "check_status" })
     → { status: "active", claimed: true, trustTier: 2, grantExpiresAt: "..." }
 
 > find me a used copy of "Ficciones" by Borges and quote me a price
 
 Claude calls:
-  nova_list_agents({ skills: "book" })
+  nova_discover({ action: "list", skills: "book" })
     → [{ agentId: "bookstore", tenantId: "tenant_dads", skills: [{ id: "quote_book", ... }] }]
-  nova_get_agent_card("bookstore")
+  nova_discover({ action: "card", agentId: "bookstore" })
     → inputSchema for quote_book: { title: string, author: string, condition: enum }
-  nova_send_task({
+  nova_task({
+    action: "send",
     targetAgentId: "bookstore",
     intent: "quote_book",
     params: { title: "Ficciones", author: "Jorge Luis Borges", condition: "used" }
@@ -282,15 +300,15 @@ Claude calls:
     # the task with the token in the UCAN header. Nova gate validates the
     # full delegation chain, queues, delivers to bookstore operator webhook.
     → { taskId: "uuid", statusUrl: "...", streamUrl: "..." }
-  nova_get_task_result({ targetAgentId: "bookstore", taskId: "uuid" })
+  nova_task({ action: "result", targetAgentId: "bookstore", taskId: "uuid" })
     → { status: "completed", result: { price: "$18", condition: "good", ... } }
 ```
 
 Every send mints a fresh invocation token locally — there is no per-
 destination cache and no round trip to Nova to get one. The credential that
-*is* cached is the long-lived approval grant that backs those tokens; when
-it nears expiry the operator runs `nova_reissue_ucan` and the agent picks up
-the fresh grant on its next `nova_check_registration` call.
+*is* cached is the long-lived approval grant that backs those tokens; when it
+nears expiry the operator runs `nova_admin({ action: "reissue_grant" })` and the
+agent picks up the fresh grant on its next `nova_onboard({ action: "check_status" })`.
 
 ---
 
@@ -305,134 +323,35 @@ the fresh grant on its next `nova_check_registration` call.
 | `@nova/agent-connector` | Workers that deliver approved tasks to destination operator webhooks (push mode) or into the broker inbox (pull mode) |
 | `@nova/broker-receiver` | Supervised daemon for broker-mode receivers — holds its own identity + approval grant, subscribes to `/inbox/stream`, runs pluggable handlers (`echo`, `claude-api`, …), ships with launchd/systemd templates |
 | `@nova/admin-api` | Operator-only admin endpoints: tenants, agents, trust registry, invites, UCAN issuance + reissue + rotate-key, quarantine, dead-letter, audit, SSE `/admin/events` |
-| `@nova/mcp-server` | **MCP on-ramp for AI runtimes.** stdio MCP server exposing Nova operations as typed tools, plus subscribable resources (`nova://inbox`, `nova://replies`, `nova://tasks/{id}`) for push notifications |
+| `@nova/mcp-server` | **MCP on-ramp for AI runtimes.** stdio MCP server exposing Nova operations as 7 consolidated, action-based tools, plus subscribable resources (`nova://inbox`, `nova://replies`, `nova://tasks/{id}`) for push notifications |
+| `@nova/cli` | Operator CLI (`nova` binary) — scriptable access to tenant/agent/invite operations; builds to a standalone executable via `npm run cli:build` (macOS arm64/x64, Linux, Windows) |
 | `@nova/operator-mock` | Test receiver for acceptance tests |
 
 ---
 
-## Admin API surface
+## API surface
 
-Operator endpoints (require `Authorization: Bearer $ADMIN_TOKEN`):
+Two HTTP surfaces, documented in full in **[`docs/admin-api.md`](docs/admin-api.md)**:
 
-```
-# System
-GET     /admin/health                                              full admin + service dependency health
-GET     /admin/metrics                                             admin Prometheus metrics
-GET     /admin/classifier                                          classifier mode/model/key-source settings
-PUT     /admin/classifier                                          update classifier settings
+- **Operator admin API** (`@nova/admin-api`, `Authorization: Bearer $ADMIN_TOKEN`) —
+  tenants & invites, agent approval/rejection/deregistration, trust registry,
+  UCAN issuance + reissue, quarantine, dead-letter, the confirmation queue for
+  high-privilege operations, audit, the `/admin/events` SSE lifecycle stream,
+  broker summary, and federation grants.
+- **Public & agent-authenticated server** (`@nova/a2a-server`, no admin bearer) —
+  `/register` + `/register/status`, `/discover`, agent cards, task submission +
+  status + SSE stream, the broker inbox and reply-inbox endpoints (long-poll,
+  peek, stream, respond/ack), and proof-of-possession key rotation.
 
-# Tenants & invites
-POST    /admin/tenants                                             create a galaxy
-GET     /admin/tenants                                             list galaxies
-GET     /admin/tenants/:id                                         tenant detail
-DELETE  /admin/tenants/:id                                         delete tenant
-POST    /admin/tenants/:id/invites                                 mint invite JWT (one-time)
+Most operators never call these directly — the admin UI and `@nova/mcp-server`
+sit in front of them. Reach for the reference when scripting against Nova or
+building a new client.
 
-# Agents
-GET     /admin/agents                                              list agents across all tenants
-GET     /admin/tenants/:id/agents                                  list agents in tenant
-GET     /admin/tenants/:id/agents/:agentId                         agent detail
-POST    /admin/tenants/:id/agents/:agentId/approve                 approve + issue approval grant
-POST    /admin/tenants/:id/agents/:agentId/reject                  reject pending agent
-DELETE  /admin/tenants/:id/agents/:agentId                         deregister agent
-POST    /admin/tenants/:id/agents/:agentId/ucans/reissue           regenerate approval grant
-GET     /admin/tenants/:id/agents/:agentId/broker-status           broker inbox/reply-inbox status
-
-# Trust registry (per receiving agent)
-POST    /admin/tenants/:id/agents/:agentId/trust                   upsert trust entry
-GET     /admin/tenants/:id/agents/:agentId/trust                   list trust entries
-GET     /admin/tenants/:id/agents/:agentId/trust/:did              get trust entry
-DELETE  /admin/tenants/:id/agents/:agentId/trust/:did              revoke trust entry
-
-# UCAN inventory (operator-issued UCANs)
-POST    /admin/tenants/:id/ucans/issue                             issue a UCAN
-POST    /admin/tenants/:id/ucans/revoke                            revoke a UCAN by CID
-GET     /admin/tenants/:id/ucans                                   list UCANs
-
-# Quarantine (inbound tasks the gate held)
-GET     /admin/tenants/:id/agents/:agentId/quarantine              list quarantined tasks
-GET     /admin/tenants/:id/agents/:agentId/quarantine/stats        counts
-GET     /admin/tenants/:id/agents/:agentId/quarantine/:id          item detail
-POST    /admin/tenants/:id/agents/:agentId/quarantine/:id/release  release to inbox
-DELETE  /admin/tenants/:id/agents/:agentId/quarantine/:id          discard
-
-# Dead-letter (delivery failures)
-GET     /admin/tenants/:id/agents/:agentId/dead-letter             list dead-lettered tasks
-GET     /admin/tenants/:id/agents/:agentId/dead-letter/:id         item detail
-DELETE  /admin/tenants/:id/agents/:agentId/dead-letter/:id         discard
-
-# Confirmation queue (high-privilege operations awaiting operator approval)
-GET     /admin/tenants/:id/agents/:agentId/confirm-queue           list pending confirmations
-GET     /admin/tenants/:id/agents/:agentId/confirm-queue/:id       item detail
-POST    /admin/tenants/:id/agents/:agentId/confirm-queue/:id       approve
-DELETE  /admin/tenants/:id/agents/:agentId/confirm-queue/:id       reject
-
-# Audit
-GET     /admin/tenants/:id/audit                                   tenant-scoped audit events
-GET     /admin/tenants/:id/audit/:taskId                           task-scoped audit trail
-GET     /admin/audit                                               audit events across all tenants
-
-# Lifecycle stream (SSE, no auth — v1 trust model is localhost)
-GET     /admin/events                                              tenant/agent/task lifecycle
-
-# Broker summary
-GET     /admin/broker/summary                                      broker-mode agents across tenants
-
-# Federation grants
-POST    /admin/federation/grants                                   issue Nova-to-peer-Nova delegation
-GET     /admin/federation/grants                                   list issued federation grants
-```
-
-Public and agent-authenticated endpoints on the Nova HTTP server (package name `@nova/a2a-server`; no admin bearer auth — discovery, self-registration, invocation-token, or self-UCAN authorised):
-
-```
-# Health
-GET     /health                                           a2a-server health
-
-# Self-registration & discovery
-POST    /register                                        self-register (invite required)
-GET     /register/status/:tenantId/:agentId              poll approval, claim approval grant
-GET     /discover                                        list active agents
-GET     /discover/:agentId                               agent detail
-GET     /agents/:agentId/.well-known/agent.json          Nova agent card
-GET     /agents/:agentId/health                          agent status + UCAN revocation probe
-
-# Task submission (UCAN invocation token required in Authorization header)
-POST    /agents/:agentId/tasks                           submit a task
-GET     /agents/:agentId/tasks/:taskId                   task status
-GET     /agents/:agentId/tasks/:taskId/stream            task state/result SSE stream
-
-# Broker-mode receive (self-UCAN auth, for agents without a webhook)
-GET     /agents/:agentId/inbox                           long-poll claim (next task)
-GET     /agents/:agentId/inbox/peek                      non-destructive snapshot
-GET     /agents/:agentId/inbox/stream                    SSE push notifications
-POST    /agents/:agentId/inbox/:taskId/respond           complete a claimed task
-
-# Broker-mode reply collection (self-UCAN auth, for senders without a replyTo webhook)
-GET     /agents/:agentId/replies                         long-poll claim (next reply)
-GET     /agents/:agentId/replies/peek                    non-destructive snapshot
-GET     /agents/:agentId/replies/stream                  SSE push notifications
-GET     /agents/:agentId/replies/:taskId                 reply detail
-POST    /agents/:agentId/replies/:taskId/ack             clear in-flight state
-```
-
-Discovery responses, agent cards, and broker status include
-`brokerPresence`, derived from active `/inbox/stream` SSE connections. This is
-the liveness signal for broker-mode receivers; direct webhook receivers need a
-separate health or heartbeat mechanism.
-
-Proof-of-possession operations (authorised by signature, not bearer token):
-
-```
-GET     /admin/tenants/:id/nonces?did=&agentId=                 request single-use nonce
-POST    /admin/tenants/:id/agents/:agentId/rotate-key           rotate keypair (PoP-signed with old key)
-```
-
-Note: Nova dropped the notary-model UCAN endpoints (`/ucans/renew`,
-`/ucans/request`) when the delegation-chain model landed. Senders mint
-invocation tokens locally with their own Ed25519 key; the approval grant
-is the only Nova-signed UCAN in the chain, and grant renewal is operator-
-gated via `/agents/:agentId/ucans/reissue`.
+> **Note:** Nova dropped the notary-model UCAN endpoints (`/ucans/renew`,
+> `/ucans/request`) when the delegation-chain model landed. Senders mint
+> invocation tokens locally with their own Ed25519 key; the approval grant is
+> the only Nova-signed UCAN in the chain, and grant renewal is operator-gated
+> via `/agents/:agentId/ucans/reissue`.
 
 ---
 
@@ -478,9 +397,9 @@ npm run broker-receiver:dev -- run \
   --health-port 9902
 ```
 
-That process is what makes broker-mode receive/reply automatic. MCP
-`nova_watch_inbox` / `nova_next_task` / `nova_respond` are interactive tools;
-they do not run unless the MCP host is awake and invoking them.
+That process is what makes broker-mode receive/reply automatic. The MCP
+`nova_inbox` actions (`watch` / `next` / `respond`) are interactive; they do not
+run unless the MCP host is awake and invoking them.
 
 ### Local processes (hot-reload)
 
